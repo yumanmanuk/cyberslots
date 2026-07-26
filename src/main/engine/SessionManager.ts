@@ -15,8 +15,10 @@ import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
+import { CodexAdapter } from './codex/CodexAdapter';
 import { ConfigWriter } from '../config/ConfigWriter';
 import type { SettingsStore } from '../config/settings';
+import type { AiServerHost } from '../proxy/AiServerHost';
 
 interface LiveSession {
   meta: SessionMeta;
@@ -28,8 +30,14 @@ export class SessionManager {
   private readonly configWriter: ConfigWriter;
   private target: WebContents | undefined;
 
-  constructor(private readonly settings: SettingsStore) {
-    this.configWriter = new ConfigWriter(join(app.getPath('userData'), 'kimi-home'));
+  constructor(
+    private readonly settings: SettingsStore,
+    private readonly proxy: AiServerHost,
+  ) {
+    this.configWriter = new ConfigWriter(
+      join(app.getPath('userData'), 'kimi-home'),
+      join(app.getPath('userData'), 'codex-home'),
+    );
     this.loadPersistedMetas();
   }
 
@@ -67,7 +75,7 @@ export class SessionManager {
     // Regenerate engine config from current settings before spawn.
     this.configWriter.sync(settings);
 
-    const adapter = this.buildAdapter(meta);
+    const adapter = await this.buildAdapter(meta);
     this.sessions.get(id)!.adapter = adapter;
     try {
       const { engineSessionId } = await adapter.start();
@@ -107,7 +115,7 @@ export class SessionManager {
   private async ensureRuntime(s: LiveSession): Promise<void> {
     if (s.adapter) return;
     this.configWriter.sync(this.settings.get());
-    const adapter = this.buildAdapter(s.meta, s.meta.engineSessionId);
+    const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
     s.meta.status = 'starting';
     this.touch(s.meta);
@@ -241,7 +249,7 @@ export class SessionManager {
 
   // ---------------------------------------------------------------- private
 
-  private buildAdapter(meta: SessionMeta, resumeSessionId?: string): EngineAdapter {
+  private async buildAdapter(meta: SessionMeta, resumeSessionId?: string): Promise<EngineAdapter> {
     if (meta.engine === 'kimi') {
       return new KimiAdapter(
         {
@@ -254,7 +262,25 @@ export class SessionManager {
         (event) => this.onEngineEvent(meta.id, event),
       );
     }
-    throw new Error(`engine ${meta.engine} 尚未接入（阶段 6 提供 codex）`);
+    if (meta.engine === 'codex') {
+      // codex depends on the embedded proxy: start it, then point the
+      // app-owned CODEX_HOME config at its current loopback port.
+      const settings = this.settings.get();
+      const port = await this.proxy.ensureStarted(settings);
+      this.configWriter.syncCodex(settings, port);
+      return new CodexAdapter(
+        {
+          codexHome: this.configWriter.codexHomeDir,
+          cwd: meta.cwd,
+          modelId: meta.modelId,
+          permissionMode: meta.permissionMode,
+          resumeThreadId: resumeSessionId,
+          availableModels: settings.providers.flatMap((p) => p.models.map((m) => m.alias)),
+        },
+        (event) => this.onEngineEvent(meta.id, event),
+      );
+    }
+    throw new Error(`未知引擎: ${meta.engine}`);
   }
 
   private onEngineEvent(sessionId: string, event: EngineEvent): void {

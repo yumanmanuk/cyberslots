@@ -1,8 +1,9 @@
 /**
- * ConfigWriter — projects app settings into the kimi CLI's config.toml
- * inside an app-managed KIMI_CODE_HOME (userData/kimi-home). Because the
- * home dir is app-owned (not the user's ~/.kimi-code), we can regenerate
- * the whole file safely; the user's own kimi setup is never touched.
+ * ConfigWriter — projects app settings into engine config files inside
+ * app-managed home dirs (userData/kimi-home, userData/codex-home).
+ * Because the homes are app-owned (not the user's ~/.kimi-code or
+ * ~/.codex), we can regenerate whole files safely; the user's own CLI
+ * setups are never touched.
  */
 
 import { stringify as tomlStringify } from 'smol-toml';
@@ -12,10 +13,17 @@ import { join } from 'node:path';
 import type { AppSettings } from '@shared/types';
 
 export class ConfigWriter {
-  constructor(private readonly kimiHome: string) {}
+  constructor(
+    private readonly kimiHome: string,
+    private readonly codexHome: string,
+  ) {}
 
   get home(): string {
     return this.kimiHome;
+  }
+
+  get codexHomeDir(): string {
+    return this.codexHome;
   }
 
   /** (Re)generate config.toml from settings; returns the config path. */
@@ -50,6 +58,32 @@ export class ConfigWriter {
     mkdirSync(this.kimiHome, { recursive: true });
     const path = join(this.kimiHome, 'config.toml');
     const header = '# Managed by CyberSlots — regenerated on every settings change.\n';
+    writeFileSync(path, header + tomlStringify(doc) + '\n', 'utf8');
+    return path;
+  }
+
+  /**
+   * (Re)generate the codex config.toml. codex only speaks the Responses
+   * wire API, so its sole provider is the embedded ai-server proxy on
+   * 127.0.0.1 — codex never sees a real key (routing hides in the model
+   * name). Must be called after the proxy port is known, before spawn.
+   */
+  syncCodex(settings: AppSettings, proxyPort: number): string {
+    const doc: Record<string, unknown> = {
+      model_provider: 'cyberslots',
+      model: settings.defaultModelId || 'MiniMax-M3',
+      model_providers: {
+        cyberslots: {
+          name: 'CyberSlots 内置代理',
+          base_url: `http://127.0.0.1:${proxyPort}/v1`,
+          wire_api: 'responses',
+        },
+      },
+      projects: {},
+    };
+    mkdirSync(this.codexHome, { recursive: true });
+    const path = join(this.codexHome, 'config.toml');
+    const header = '# Managed by CyberSlots — regenerated on every proxy (re)start.\n';
     writeFileSync(path, header + tomlStringify(doc) + '\n', 'utf8');
     return path;
   }

@@ -1,0 +1,6 @@
+{
+  "name": "cyberslots-embedded-ai-server",
+  "private": true,
+  "type": "commonjs",
+  "description": "Embedded Responses<->Chat conversion proxy (upstream: d:/ai-agent/ai-server, trimmed via config.js shim)"
+}

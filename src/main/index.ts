@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { SettingsStore } from './config/settings';
 import { SessionManager } from './engine/SessionManager';
 import { CronService } from './cron/CronService';
+import { AiServerHost } from './proxy/AiServerHost';
 import { registerIpc } from './ipc';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
@@ -16,6 +17,7 @@ const isDev = !!process.env.ELECTRON_RENDERER_URL;
 let mainWindow: BrowserWindow | undefined;
 let sessions: SessionManager | undefined;
 let cron: CronService | undefined;
+let proxy: AiServerHost | undefined;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -65,7 +67,8 @@ if (!gotLock) {
 
   void app.whenReady().then(() => {
     const settings = new SettingsStore();
-    sessions = new SessionManager(settings);
+    proxy = new AiServerHost();
+    sessions = new SessionManager(settings, proxy);
     cron = new CronService(sessions);
     registerIpc(sessions, settings, cron);
     cron.start();
@@ -83,6 +86,7 @@ if (!gotLock) {
   // Anti-orphan: every engine child dies with the app.
   app.on('before-quit', () => {
     cron?.stop();
+    proxy?.stop();
     void sessions?.disposeAll();
   });
 }
