@@ -308,8 +308,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
-/** Pending-send outbox above the input (qoder-style "等待发送 N"):
- *  drag to reorder, edit back into the composer, delete, or steer. */
+/** Pending-send outbox above the input (qoder-style "等待发送 N" 行条)：
+ *  默认收起，展开后可拖拽排序、编辑回填、删除、steer。 */
 function QueuePanel({
   sessionId,
   onEditItem,
@@ -322,22 +322,27 @@ function QueuePanel({
   const removeQueued = useChatStore((s) => s.removeQueued);
   const moveQueued = useChatStore((s) => s.moveQueued);
   const steerQueued = useChatStore((s) => s.steerQueued);
-  const [collapsed, setCollapsed] = useState(false);
+  const [open, setOpen] = useState(false);
   const dragFrom = useRef<number | null>(null);
 
   if (queue.length === 0) return null;
 
   return (
-    <div className="mx-auto mb-1.5 max-w-3xl overflow-hidden rounded-xl border border-line bg-bg-panel/60">
+    <div className="mx-auto mb-1 max-w-[720px] overflow-hidden rounded-xl bg-bg-panel/70">
       <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11.5px] font-medium text-ink-soft transition hover:bg-bg-hover"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] transition hover:bg-bg-hover"
       >
-        <ChevronRight size={12} className={`transition-transform ${collapsed ? '' : 'rotate-90'}`} />
-        {t('queueWaiting')} {queue.length}
+        <ChevronRight size={12} className={`shrink-0 text-ink-faint transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span className="min-w-0 flex-1 truncate text-left font-medium text-ink">
+          {t('queueWaiting')} {queue.length}
+        </span>
+        {!open && queue[0] && (
+          <span className="min-w-0 max-w-[50%] shrink-0 truncate text-ink-faint">{queue[0].text}</span>
+        )}
       </button>
-      {!collapsed && (
-        <div>
+      {open && (
+        <div className="pb-1">
           {queue.map((item, i) => (
             <div
               key={item.id}
@@ -348,7 +353,7 @@ function QueuePanel({
                 if (dragFrom.current !== null && dragFrom.current !== i) moveQueued(sessionId, dragFrom.current, i);
                 dragFrom.current = null;
               }}
-              className="group flex items-center gap-1.5 border-t border-line px-2 py-1.5"
+              className="group flex items-center gap-1.5 px-2 py-1"
             >
               <GripVertical size={13} className="shrink-0 cursor-grab text-ink-faint/60 group-hover:text-ink-faint" />
               <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={item.text}>
@@ -772,8 +777,8 @@ function fmtTokens(n: number): string {
 
 // ------------------------------------------------------------------ goal
 
-/** Goal status line — renders the engine's real goal state (codex
- *  thread/goal/updated pushes objective/status/usage; nothing client-faked). */
+/** Goal 状态行条 — 与待办/等待发送同款圆角行条样式（引擎真实 goal 状态，
+ *  codex thread/goal/updated 推 objective/status/usage，无客户端伪造）。 */
 function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: string) => void }): JSX.Element | null {
   const t = useT();
   const goal = useChatStore((s) => s.goals[sessionId]);
@@ -798,30 +803,35 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
         : `${t('goal')} · ${goal.status}`;
 
   return (
-    <div className="mx-auto mb-1.5 flex max-w-3xl items-center gap-2 px-1 text-[11px] text-ink-faint">
-      <Target size={11} className={goal.status === 'active' ? 'text-accent' : ''} />
-      <span className="font-medium text-ink-soft">{statusLabel}</span>
-      <span className="min-w-0 flex-1 truncate" title={goal.objective}>
-        {goal.objective}
-      </span>
-      <span className="shrink-0 font-mono tabular-nums" title={`已用 ${goal.tokensUsed.toLocaleString()} tokens${goal.tokenBudget ? ` / 预算 ${goal.tokenBudget.toLocaleString()}` : ''}`}>
-        {formatElapsed(goal.timeUsedSeconds * 1000)}
-      </span>
-      {paused ? (
-        <IconBtn title={t('goalResume')} onClick={() => void controlGoal('resume')}>
-          <Play size={11} />
+    <div className="mx-auto mb-1 max-w-[720px] overflow-hidden rounded-xl bg-bg-panel/70">
+      <div className="flex items-center gap-2 px-3 py-1.5 text-[12px]">
+        <Target size={12} className={`shrink-0 ${goal.status === 'active' ? 'text-accent' : 'text-ink-faint'}`} />
+        <span className="shrink-0 font-medium text-ink">{statusLabel}</span>
+        <span className="min-w-0 flex-1 truncate text-ink-soft" title={goal.objective}>
+          {goal.objective}
+        </span>
+        <span
+          className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint"
+          title={`已用 ${goal.tokensUsed.toLocaleString()} tokens${goal.tokenBudget ? ` / 预算 ${goal.tokenBudget.toLocaleString()}` : ''}`}
+        >
+          {formatElapsed(goal.timeUsedSeconds * 1000)}
+        </span>
+        {paused ? (
+          <IconBtn title={t('goalResume')} onClick={() => void controlGoal('resume')}>
+            <Play size={11} />
+          </IconBtn>
+        ) : (
+          <IconBtn title={t('goalPause')} onClick={() => void controlGoal('pause')}>
+            <Pause size={11} />
+          </IconBtn>
+        )}
+        <IconBtn title={t('goalEdit')} onClick={() => onEdit(goal.objective)}>
+          <Pencil size={11} />
         </IconBtn>
-      ) : (
-        <IconBtn title={t('goalPause')} onClick={() => void controlGoal('pause')}>
-          <Pause size={11} />
+        <IconBtn title={t('goalDelete')} onClick={() => void controlGoal('clear')}>
+          <CircleSlash size={11} />
         </IconBtn>
-      )}
-      <IconBtn title={t('goalEdit')} onClick={() => onEdit(goal.objective)}>
-        <Pencil size={11} />
-      </IconBtn>
-      <IconBtn title={t('goalDelete')} onClick={() => void controlGoal('clear')}>
-        <CircleSlash size={11} />
-      </IconBtn>
+      </div>
     </div>
   );
 }

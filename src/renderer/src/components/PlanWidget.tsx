@@ -1,11 +1,12 @@
 /**
- * PlanWidget — sticky "待办" checklist above the composer (referencing the
- * Qoder todo panel, restyled to the codex/Notion identity). Shows the
- * latest plan of the conversation with progress; collapsible.
+ * PlanWidget — “待办” docked row above the composer (Qoder-style):
+ * a rounded bar slightly narrower than the input card, collapsed by
+ * default showing the current step + progress; expands to the list.
+ * Same row style as the send-queue and goal bars (visual family).
  */
 
 import { useState } from 'react';
-import { Check, ChevronDown, ChevronUp, ListChecks, Loader2 } from 'lucide-react';
+import { Check, ChevronRight, Loader2 } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
@@ -25,32 +26,31 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
     const meta = s.sessions.find((m) => m.id === sessionId);
     return meta?.status === 'running' || meta?.status === 'awaiting';
   });
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
 
   if (!plan || plan.entries.length === 0) return null;
   const done = plan.entries.filter((e) => e.status === 'completed').length;
   // Hide once everything is finished and the turn is over.
   if (!running && done === plan.entries.length) return null;
 
+  const current = plan.entries.find((e) => e.status === 'in_progress') ?? plan.entries.find((e) => e.status === 'pending');
+
   return (
-    <div className="shrink-0 px-6 pb-2">
-      <div className="mx-auto max-w-3xl overflow-hidden rounded-xl border border-line bg-bg-panel/80 backdrop-blur">
+    <div className="shrink-0 px-6 pb-1">
+      <div className="mx-auto max-w-[720px] overflow-hidden rounded-xl bg-bg-panel/70">
         <button
           onClick={() => setOpen(!open)}
-          className="flex w-full items-center gap-2 px-3.5 py-2 text-ui text-ink-soft hover:text-ink"
+          className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] transition hover:bg-bg-hover"
         >
-          <ListChecks size={14} className="text-accent" />
-          <span className="font-medium">待办</span>
-          <span className="tabular-nums text-ink-faint">
+          <ChevronRight size={12} className={`shrink-0 text-ink-faint transition-transform ${open ? 'rotate-90' : ''}`} />
+          <span className="shrink-0 font-medium text-ink">待办</span>
+          <span className="min-w-0 flex-1 truncate text-left text-ink-soft">{current?.content ?? ''}</span>
+          <span className="shrink-0 tabular-nums text-ink-faint">
             {done}/{plan.entries.length}
           </span>
-          <span className="mx-1 h-1 flex-1 overflow-hidden rounded-full bg-bg-active">
-            <span className="block h-full rounded-full bg-ok transition-all" style={{ width: `${(done / plan.entries.length) * 100}%` }} />
-          </span>
-          {open ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
         </button>
         {open && (
-          <ul className="max-h-44 space-y-1 overflow-y-auto border-t border-line px-3.5 py-2">
+          <ul className="max-h-44 space-y-1 overflow-y-auto px-3 pb-2 pt-0.5">
             {plan.entries.map((e, i) => (
               <li key={i} className="flex items-start gap-2 text-ui">
                 <span className="mt-0.5 shrink-0">
