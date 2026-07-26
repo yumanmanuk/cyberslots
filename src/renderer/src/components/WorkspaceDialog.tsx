@@ -1,11 +1,14 @@
 /**
- * WorkspaceDialog — create/edit a named multi-folder workspace.
+ * WorkspaceDialog — create/edit a named multi-folder workspace,
+ * codex-desktop「创建项目」style (item 10): name field with folder
+ * icon, "Source folders" list with a Primary badge on the first
+ * folder, × per row, and an "添加文件夹" row at the bottom.
  * The first folder becomes the engine cwd; extra folders are announced
- * to the engine via a context prefix on the first prompt.
+ * to the engine via a context prefix.
  */
 
 import { useEffect, useState } from 'react';
-import { Folder, FolderPlus, Trash2, X } from 'lucide-react';
+import { Folder, FolderPlus, X } from 'lucide-react';
 
 import type { WorkspaceInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
@@ -62,65 +65,74 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
         onClick={(e) => e.stopPropagation()}
         className="flex w-[520px] flex-col overflow-hidden rounded-2xl border border-line bg-bg shadow-2xl"
       >
-        <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <span className="text-sm font-semibold">{editing ? t('renameWorkspace') : t('newWorkspace')}</span>
+        <div className="flex items-center justify-between px-5 pb-1 pt-4">
+          <span className="text-base font-semibold">{editing ? t('manageWorkspace') : t('newWorkspace')}</span>
           <button onClick={onClose} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
             <X size={16} />
           </button>
         </div>
 
         <div className="space-y-4 px-5 py-4">
-          <div>
-            <div className="mb-1.5 text-[11px] font-medium text-ink-faint">{t('workspaceName')}</div>
+          {/* 名称：codex 风格 — 文件夹图标 + 扁平输入条 */}
+          <div className="flex items-center gap-2.5 rounded-xl border border-line bg-bg-input px-3.5 py-2.5 transition focus-within:border-accent">
+            <Folder size={16} className="shrink-0 text-ink-soft" />
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="my workspace"
-              className="w-full rounded-lg border border-line bg-bg-input px-2.5 py-1.5 text-ui outline-none transition focus:border-accent"
+              placeholder={t('workspaceName')}
+              className="min-w-0 flex-1 bg-transparent text-ui outline-none placeholder:text-ink-faint"
             />
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-line">
-            {folders.length === 0 ? (
-              <div className="px-4 py-8 text-center text-ui text-ink-faint">{t('noFoldersYet')}</div>
-            ) : (
-              folders.map((f) => (
-                <div key={f} className="group flex items-center gap-2.5 border-b border-line px-3.5 py-2.5 last:border-b-0">
-                  <Folder size={14} className="shrink-0 text-ink-faint" />
+          <div>
+            <div className="mb-1.5 text-[12px] text-ink-soft">{t('sourceFolders')}</div>
+            <div className="overflow-hidden rounded-xl border border-line">
+              {folders.length === 0 && (
+                <div className="px-4 py-6 text-center text-ui text-ink-faint">{t('noFoldersYet')}</div>
+              )}
+              {folders.map((f, i) => (
+                <div key={f} className="group flex items-center gap-2.5 border-b border-line bg-bg-input px-3.5 py-2.5">
+                  <Folder size={14} className="shrink-0 text-ink-soft" />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-ui font-medium">{f.split(/[\\/]/).pop()}</div>
-                    <div className="truncate font-mono text-[11px] text-ink-faint">{f}</div>
+                    <span className="block truncate text-ui" title={f}>
+                      {f.split(/[\\/]/).pop()}
+                    </span>
                   </div>
+                  {i === 0 && (
+                    <span className="shrink-0 rounded-md border border-line bg-bg-panel px-2 py-0.5 text-[10.5px] font-medium text-ink-soft">
+                      {t('primaryFolder')}
+                    </span>
+                  )}
                   <button
                     onClick={() => setFolders((prev) => prev.filter((x) => x !== f))}
-                    className="rounded-md p-1 text-ink-faint opacity-0 transition hover:text-err group-hover:opacity-100"
+                    className="shrink-0 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
                   >
-                    <Trash2 size={13} />
+                    <X size={13} />
                   </button>
                 </div>
-              ))
-            )}
-            <button
-              onClick={() => void pickFolder()}
-              className="flex w-full items-center gap-2 border-t border-line px-3.5 py-2.5 text-ui text-ink-soft transition hover:bg-bg-hover"
-            >
-              <FolderPlus size={14} /> {t('addFolder')}
-            </button>
+              ))}
+              <button
+                onClick={() => void pickFolder()}
+                className="flex w-full items-center gap-2.5 bg-bg-panel/70 px-3.5 py-2.5 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+              >
+                <FolderPlus size={14} /> {t('addFolder')}
+              </button>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center justify-between border-t border-line px-5 py-3">
+        <div className="flex items-center justify-between px-5 pb-4 pt-1">
           <span className="text-[11px] text-ink-faint">{folders.length === 0 ? t('needFolders') : ''}</span>
           <div className="flex gap-2">
-            <button onClick={onClose} className="rounded-lg border border-line px-4 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover">
+            <button onClick={onClose} className="rounded-lg px-4 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover">
               {t('cancel')}
             </button>
             <button
               onClick={() => void submit()}
               disabled={folders.length === 0}
-              className="rounded-lg bg-accent px-4 py-1.5 text-ui font-medium text-white transition hover:opacity-90 disabled:opacity-40"
+              className="rounded-lg bg-ink px-4 py-1.5 text-ui font-medium text-bg transition hover:opacity-85 disabled:opacity-40"
             >
-              {editing ? t('save') : t('create')}
+              {editing ? t('save') : t('createProject')}
             </button>
           </div>
         </div>

@@ -1,68 +1,43 @@
 /**
- * App settings — persisted under userData/settings.json. API keys are
- * encrypted at rest via Electron safeStorage when the OS keychain is
- * available (DPAPI on Windows); a `plaintext` marker records fallback.
- *
- * Dev convenience: on first run, if `<repo>/.dev/secrets.json` exists
- * (gitignored), providers are seeded from it so the app talks to real
- * models immediately without retyping keys.
+ * App settings — persisted under userData/settings.json. 自「配置只读 +
+ * 路由开关」改版后不再存储任何供应商/密钥：模型端点的唯一真源是
+ * CLI 自己的配置文件（~/.kimi-code、~/.codex，只读），这里只保留
+ * UI 偏好与每引擎的路由开关。
  */
 
-import { app, safeStorage } from 'electron';
-import { createHash } from 'node:crypto';
+import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { AppSettings, ProviderSettings } from '@shared/types';
-
-interface StoredProvider extends Omit<ProviderSettings, 'apiKey'> {
-  apiKeyEnc?: string; // base64(safeStorage)
-  apiKeyPlain?: string; // fallback when encryption unavailable
-}
-
-interface StoredSettings extends Omit<AppSettings, 'providers'> {
-  providers: StoredProvider[];
-  /** Hash of .dev/secrets.json at seed time — reseed when it changes (dev only). */
-  devSeedHash?: string;
-}
+import type { AppSettings } from '@shared/types';
 
 const DEFAULTS: AppSettings = {
-  providers: [],
-  defaultModelId: '',
   theme: 'notion',
   language: 'zh',
   defaultPermissionMode: 'default',
   sendKey: 'enter',
   notifications: { taskComplete: true, question: true, error: true },
   workspaces: [],
+  routing: { kimi: false, codex: false },
 };
 
-/** Backfill fields added over time so old settings.json keep working. */
-function migrate(settings: AppSettings): AppSettings {
+/** Backfill fields added over time; silently drop the legacy provider
+ *  store (pre-routing builds kept providers/keys in settings.json). */
+function migrate(stored: Record<string, unknown>): AppSettings {
+  const s = stored as Partial<AppSettings> & { providers?: unknown; defaultModelId?: unknown };
   return {
-    ...settings,
-    language: settings.language ?? 'zh',
-    notifications: { ...DEFAULTS.notifications, ...(settings.notifications ?? {}) },
-    workspaces: settings.workspaces ?? [],
-    providers: settings.providers.map((p) => ({
-      ...p,
-      name: p.name || presetName(p.id) || p.id,
-      // Pre-generic builds had no protocol: kimi-ish endpoints spoke chat
-      // completions, everything else rode the responses passthrough.
-      protocol: p.protocol ?? (/kimi|moonshot|deepseek/i.test(`${p.id} ${p.baseUrl}`) ? 'openai_chat' : 'openai_responses'),
-    })),
+    theme: s.theme ?? DEFAULTS.theme,
+    language: s.language ?? DEFAULTS.language,
+    defaultPermissionMode: s.defaultPermissionMode ?? DEFAULTS.defaultPermissionMode,
+    sendKey: s.sendKey ?? DEFAULTS.sendKey,
+    notifications: { ...DEFAULTS.notifications, ...(s.notifications ?? {}) },
+    workspaces: s.workspaces ?? [],
+    routing: { ...DEFAULTS.routing, ...(s.routing ?? {}) },
   };
-}
-
-function presetName(id: string): string | undefined {
-  if (/^kimi$/i.test(id)) return 'Kimi For Coding';
-  if (/^minimax$/i.test(id)) return 'MiniMax';
-  return undefined;
 }
 
 export class SettingsStore {
   private cached: AppSettings | undefined;
-  private devSeedHash: string | undefined;
 
   constructor(private readonly dir = app.getPath('userData')) {}
 
@@ -73,44 +48,21 @@ export class SettingsStore {
   get(): AppSettings {
     if (this.cached) return this.cached;
     let settings = { ...DEFAULTS };
-    let storedHash: string | undefined;
     if (existsSync(this.file)) {
       try {
-        const stored = JSON.parse(readFileSync(this.file, 'utf8')) as StoredSettings;
-        settings = migrate({ ...DEFAULTS, ...stored, providers: stored.providers.map(decryptProvider) });
-        storedHash = stored.devSeedHash;
+        // BOM 容忍：外部工具（如 PowerShell）重写过的文件可能带 UTF-8 BOM。
+        const raw = readFileSync(this.file, 'utf8').replace(/^\uFEFF/, '');
+        settings = migrate(JSON.parse(raw) as Record<string, unknown>);
       } catch (err) {
         console.error('[settings] failed to read settings.json, using defaults:', err);
       }
-    }
-    // Dev reseed: whenever .dev/secrets.json changes, it wins — stale seeded
-    // providers caused real confusion during testing (wrong endpoint/model).
-    const seed = seedFromDevSecrets();
-    if (seed && (settings.providers.length === 0 || storedHash !== seed.hash)) {
-      settings.providers = seed.providers;
-      settings.defaultModelId = seed.defaultModelId;
-      this.devSeedHash = seed.hash;
-      this.persist(settings);
-      console.log('[settings] providers (re)seeded from .dev/secrets.json');
-    } else {
-      this.devSeedHash = storedHash;
     }
     this.cached = settings;
     return settings;
   }
 
   set(patch: Partial<AppSettings>): AppSettings {
-    const current = this.get();
-    const next = { ...current, ...patch };
-    // The renderer only ever sees masked keys ("sk-xxxx…abcd"). If a patch
-    // carries a masked/empty key, keep the stored secret for that provider.
-    if (patch.providers) {
-      next.providers = patch.providers.map((p) => {
-        const old = current.providers.find((o) => o.id === p.id);
-        const masked = !p.apiKey || p.apiKey.includes('…');
-        return masked && old ? { ...p, apiKey: old.apiKey } : p;
-      });
-    }
+    const next = { ...this.get(), ...patch };
     this.persist(next);
     this.cached = next;
     return next;
@@ -118,63 +70,6 @@ export class SettingsStore {
 
   private persist(settings: AppSettings): void {
     mkdirSync(this.dir, { recursive: true });
-    const stored: StoredSettings = {
-      ...settings,
-      providers: settings.providers.map(encryptProvider),
-      devSeedHash: this.devSeedHash,
-    };
-    writeFileSync(this.file, JSON.stringify(stored, null, 2), 'utf8');
-  }
-}
-
-function encryptProvider(p: ProviderSettings): StoredProvider {
-  const { apiKey, ...rest } = p;
-  if (apiKey && safeStorage.isEncryptionAvailable()) {
-    return { ...rest, apiKeyEnc: safeStorage.encryptString(apiKey).toString('base64') };
-  }
-  return { ...rest, apiKeyPlain: apiKey };
-}
-
-function decryptProvider(p: StoredProvider): ProviderSettings {
-  const { apiKeyEnc, apiKeyPlain, ...rest } = p;
-  let apiKey = apiKeyPlain ?? '';
-  if (apiKeyEnc) {
-    try {
-      apiKey = safeStorage.decryptString(Buffer.from(apiKeyEnc, 'base64'));
-    } catch (err) {
-      console.error(`[settings] failed to decrypt key for provider ${p.id}:`, err);
-    }
-  }
-  return { ...rest, apiKey };
-}
-
-function seedFromDevSecrets():
-  | (Pick<AppSettings, 'providers' | 'defaultModelId'> & { hash: string })
-  | undefined {
-  try {
-    // In dev, app.getAppPath() is the project root.
-    const secretsPath = join(app.getAppPath(), '.dev', 'secrets.json');
-    if (!existsSync(secretsPath)) return undefined;
-    const rawText = readFileSync(secretsPath, 'utf8');
-    const raw = JSON.parse(rawText) as Record<
-      string,
-      { baseUrl: string; apiKey: string; model: string; maxContextSize: number; userAgent?: string }
-    >;
-    const providers: ProviderSettings[] = Object.entries(raw).map(([id, v]) => ({
-      id,
-      name: id === 'kimi' ? 'Kimi For Coding' : id === 'minimax' ? 'MiniMax' : id,
-      baseUrl: v.baseUrl,
-      protocol: id === 'minimax' ? 'openai_responses' : 'openai_chat',
-      apiKey: v.apiKey,
-      models: [{ alias: v.model, model: v.model, maxContextSize: v.maxContextSize }],
-      ...(v.userAgent ? { customHeaders: { 'User-Agent': v.userAgent } } : {}),
-    }));
-    // MiniMax is the verified-working provider for now (phase0 findings).
-    const defaultModelId = raw['minimax']?.model ?? providers[0]?.models[0]?.alias ?? '';
-    const hash = createHash('sha256').update(rawText).digest('hex').slice(0, 16);
-    return { providers, defaultModelId, hash };
-  } catch (err) {
-    console.error('[settings] dev secrets seed failed:', err);
-    return undefined;
+    writeFileSync(this.file, JSON.stringify(settings, null, 2), 'utf8');
   }
 }

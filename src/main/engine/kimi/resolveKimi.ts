@@ -38,11 +38,15 @@ export function resolveKimiCli(extraArgs: string[], explicitEntry?: string): Spa
   return { command: 'kimi', args: extraArgs, label: 'kimi (PATH)', shell: true };
 }
 
-/** Env for spawned kimi processes: run Electron binary as Node. */
-export function kimiSpawnEnv(kimiHome: string): NodeJS.ProcessEnv {
-  return {
+/** Env for spawned kimi processes: run Electron binary as Node.
+ *  kimiHome 仅在路由开启时传入（镜像 home）；不传则不设
+ *  KIMI_CODE_HOME → kimi 用自己的 ~/.kimi-code（用户配置直连）。 */
+export function kimiSpawnEnv(kimiHome?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
-    KIMI_CODE_HOME: kimiHome,
   };
+  if (kimiHome) env.KIMI_CODE_HOME = kimiHome;
+  else delete env.KIMI_CODE_HOME;
+  return env;
 }

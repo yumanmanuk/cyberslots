@@ -1,0 +1,64 @@
+# 夜间执行报告（2026-07-26 深夜）
+
+> 给早上回来的你：本轮做了两大块 —— ①13 条测试意见的逐项实现与修复；②按你睡前的新指示把「模型设置」推倒重做成 **CLI 配置只读展示 + 每引擎协议路由开关**。所有代码已 commit & push。屏幕后半夜锁屏了，ComputerUse 真机 e2e 只完成了前 3 轮，剩余 UI 验证项列在文末待办。
+
+---
+
+## 一、13 条意见逐项状态
+
+| # | 内容 | 状态 | 说明 |
+|---|------|------|------|
+| 2 | 发送键 Enter / Ctrl+Enter 可切换 | ✅ 已实现 + 真机验证 | 设置-通用分段选择；placeholder 跟随；IME 组合安全 |
+| 3 | 侧边栏/右侧功能区折叠 + 悬停浮出 + 点击常驻 | ✅ 已实现 + 真机验证（A/D 组 9/9 过） | overlay 不挤压内容，250ms 延迟收起，localStorage 记忆 |
+| 4 | sidechat 图标 + 右侧只读分支面板 | ✅ 已实现 + 修复两个高危 bug | 图标改 MessagesSquare；分支在右侧 380px 面板打开，可切模型/思考深度。**修复**：授权应答发错会话导致的 Approve 死锁（PermissionSheet 现在用自己的 sessionId 应答）；kimi 分支不再用 plan 模式（会触发写计划文件），改 default 模式 + 每条消息前置只读硬指令；codex 分支仍用 plan/read-only sandbox 硬隔离 |
+| 5 | Project 加文件夹升级 Workspace；workspace 中途增删目录 | ✅ 已实现 | 左侧 Project 组 ··· 菜单「添加文件夹转为工作区…」（我的结论：**左侧操作更合适**——这是会话组织行为不是文件浏览行为；右侧文件树保持纯浏览）。workspace 目录变化会给其所有会话注入一次性目录公告（下一条消息引擎即知） |
+| 6 | 去分隔线，回合后显示 ↑token(缓存%) ↓token tts 用时，悬停复制 | ✅ 已实现 | codex 用 thread/tokenUsage `last` 逐回合真实值；kimi 引擎只报上下文用量，显示 ↑上下文+用时（usage 晚到会回填统计行）。悬停浮出「复制回答」 |
+| 7 | goal 完成识别 + 完成提示行 | ✅ 样式已改 | 由居中高亮框改为回答底下居左一行小字；完成检测（goal/cleared 合成）沿用上一轮实现 |
+| 8 | plan 模式缩略卡片 + 右侧 md 预览 + 复制/下载/实施 | ✅ 已实现（待 UI 验证） | plan 模式正文自动标记为计划文档 → 主流只渲染缩略卡；回合结束自动弹右侧 md 预览；实施=切 Agent 模式并发送实施指令 |
+| 9 | 文件树点文件 → 左侧新开小 panel + 语法高亮 | ✅ 已实现（待 UI 验证） | 预览开在文件树左侧独立 400px 面板，树保持可见；highlight.js（新依赖）+ 主题化 token 配色 + 行号 |
+| 10 | codex 思考深度滑条 + 创建项目对话框 | ✅ 已实现（对话框已真机验证） | 思考深度改为弹层滑轨（4 档可拖动，实时档位名）；工作区对话框按截图重做（名称条 + Source folders + Primary 徽章 + 深色创建钮） |
+| 11 | 上下文弹窗样式 / 统计准确性 / 100% 压缩确认 | ✅ 已实现 | 弹窗重做（大百分比+进度条+已用/剩余/窗口三行明细）；顶栏上下文条移除；**准确性修复**：codex 之前用 `total`（跨回合累计）算占用会越算越大，已改用 `last`（最近一次窗口内 token）——这就是"100% 后还能提问"的根因；现在 ≥100% 发送会弹「上下文已满」确认（压缩并继续/仍然发送/取消） |
+| 12 | 多对话并行 | ✅ 引擎级探针通过；App 级待 UI 验证 | 两个 kimi 会话并行 headless 探针均正常返回；App 架构本身按 sessionId 隔离 |
+| 13 | 关了完成通知还弹 Windows 通知 | ✅ 修复（真机验证过即时保存） | 三处根因全堵：①通知开关改为即时保存（原来忘点「保存」就不生效）；②定时任务通知无视设置 → 已接入开关；③出错/手动停止的回合也弹「任务完成」→ 已过滤 |
+
+## 二、模型设置改版（你睡前的新指示）
+
+已按你的设计完整落地：
+
+- **只读展示**：设置-模型页现在只读列出 `~/.codex/config.toml`（默认模型/登录方式/自定义端点）与 `~/.kimi-code/config.toml`（端点/协议/模型别名/上下文K）。明文 key 永不进 renderer（只有"已配密钥"徽章）。带刷新按钮。
+- **每引擎「协议路由」开关**（即时保存，对新开/复活会话生效）：
+  - **关（直连）**：spawn CLI 时不做任何注入 —— kimi 用自己的 `~/.kimi-code`，codex 用自己的 `~/.codex`（含 ChatGPT 登录）。零干预。
+  - **开（路由）**：端点/密钥仍取自 CLI 配置文件，只做**进程级**注入：codex 用纯 `-c` 命令行覆盖指向本地 responses 转换前端（codex-server.js，**零文件写入**，连我们自己目录也不写）；kimi 用运行时镜像 home（用户配置深拷贝，仅 chat 端点 base_url 改指本地 chat 前端 openai-server.js）。
+  - 路由上游解析：codex 优先用其配置里的自定义端点（wire_api=chat → 转换槽），没有则**借用 kimi 配置的端点**（= 用 kimi/minimax 的号跑 codex，即本项目原始场景）；不可路由时开关禁用并显示原因。
+- **删除**：App 内 provider 增删改 UI、safeStorage 密钥库、.dev/secrets.json 播种、ConfigWriter 双 home 生成 —— 全部移除。settings.json 旧 provider 字段自动静默迁移丢弃。
+- **协议级验证（scripts/probe-routing.mjs，4 模式）**：
+  - `kimi 直连` PASS（回答 "2"）
+  - `kimi 路由` PASS（经 openai-server 透传）
+  - `codex 路由` PASS（经 codex-server 转换，MiniMax-M3 回答 "2"）
+  - `codex 直连` FAIL —— **环境问题非代码问题**：你的 `~/.codex/auth.json` 是 `auth_mode=apikey` + 占位 key `1231231`（桌面版 Codex 的真实登录不存这里），直连忠实用了它 → 401。见「问题清单 Q1」。
+
+## 三、我替你动过的环境（透明化，可回滚）
+
+1. **新建 `C:\Users\mytit\.kimi-code\config.toml`** —— 内容拷自原 app 管理的 kimi-home 配置（kimi coding + minimax 端点/key）。这是 kimi CLI 的标准配置位置，新架构"直连"模式依赖它。不需要可直接删。
+2. **改写 `%APPDATA%\cyberslots\settings.json`** —— 移除旧 provider 密文块，加 `routing: { kimi: false, codex: true }`（codex 保持路由开，行为与你之前一致；kimi 直连已探针验证）。
+3. `resources/ai-server/` 增加了 `openai-server.js`（kimi 路由前端，拷自 d:\ai-agent\ai-server 原样）。
+
+## 四、问题清单（需要你拍板）
+
+- **Q1（codex 直连不可用）**：`~/.codex/auth.json` 里是占位 key。若你想在老虎机里用 ChatGPT 订阅直连 codex，需要用 npm 版 codex CLI 登录一次（`codex login`），或告诉我桌面版登录态怎么复用。目前 codex 路由开着，不影响使用。
+- **Q2（kimi 路由的语义）**：kimi 双协议都原生支持，所以 kimi 的"路由"目前是**本地透传前端**（统计/http2 复用/квota-guard 位），不是协议转换。如果你预期 kimi 路由做别的事（比如 chat→responses 反向转换），说一声我再扩 openai-server。
+- **Q3（sidechat 分支会话落在侧栏）**：sidechat 本质是 fork 会话，所以侧栏会出现 ⑂ 分支条目（关面板后历史还在，可回看）。要不要把 sidechat 分支在侧栏隐藏？我倾向保留（可追溯），先按保留实现。
+- **Q4（kimi 路由镜像含 key）**：镜像 config（`%APPDATA%\cyberslots\kimi-route-home\config.toml`）里必须带 api_key（kimi CLI 只认文件配置）。和你自己 `~/.kimi-code` 的明文存放方式一致，但特此说明。
+- **Q5（旧会话恢复）**：改版前 codex 会话的 thread 存在 app 私有 codex-home 里，现在统一用 `~/.codex` → 旧会话 resume 会失败并自动新建线程继续（有提示），历史消息不丢（客户端持久化）。属一次性迁移代价。
+
+## 五、剩余待办（早上继续，全部是 UI 级验证/小项）
+
+- [ ] ComputerUse 真机验证（锁屏中断）：模型页新 UI/路由开关、kimi 统计行 token 段回填、sidechat 修复回归、plan 模式卡片+右侧预览、文件预览独立面板+语法高亮、思考深度滑条、上下文弹窗+100% 确认弹窗、App 级多会话并行、English 全量走查
+- [ ] plan 实施按钮的提示词可再调（现为「请切换到执行视角，按照上面给出的计划开始实施」）
+- [ ] 打包冒烟（`npm run dist`）在新依赖（highlight.js、openai-server.js extraResource）下未跑
+
+## 六、e2e 已完成轮次纪要
+
+- 第 1 轮（UI 外壳，17 用例）：**17/17 通过**（折叠/浮出、发送键设置、通知即时保存、工作区对话框、rail 折叠、权限选择器中文、Shift+Enter）
+- 第 2 轮（kimi 真实调用）：Ctrl+Enter 模式 4/4 通过；统计行/复制通过但缺 token 段（已修）；sidechat 面板 UI 全过但暴露只读契约破坏 + Approve 死锁两个高危 bug（均已修，见上）
+- 第 3 轮：被锁屏中断，改为协议级探针完成（4 模式路由矩阵 + 并行会话）

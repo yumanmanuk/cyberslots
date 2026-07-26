@@ -77,7 +77,7 @@ export interface ToolCallContent {
 /** One rendered item in the conversation stream. */
 export type UnifiedMessage =
   | { kind: 'user'; id: string; turnId: number; text: string; attachments?: string[]; createdAt: number; steer?: boolean }
-  | { kind: 'text'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number }
+  | { kind: 'text'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; planDoc?: boolean }
   | { kind: 'thinking'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; durationMs?: number }
   | {
       kind: 'tool_call';
@@ -134,6 +134,8 @@ export interface UsageInfo {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Tokens served from provider prompt cache (subset of inputTokens). */
+  cachedInputTokens?: number;
   contextUsed?: number;
   contextMax?: number;
 }
@@ -187,7 +189,7 @@ export type EngineEvent =
   | { type: 'usage.update'; used: number; size: number; costUsd?: number }
   /** Engine-side goal state changed (null = cleared/none). */
   | { type: 'goal.update'; goal: GoalInfo | null }
-  | { type: 'turn.ended'; turnId: number; stopReason: string; usage?: UsageInfo }
+  | { type: 'turn.ended'; turnId: number; stopReason: string; usage?: UsageInfo; durationMs?: number }
   | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider' };
 
 export interface SlashCommandInfo {
@@ -205,21 +207,75 @@ export interface EngineEventEnvelope {
 
 // ------------------------------------------------------------- settings
 
-/** Wire protocol a provider endpoint speaks — drives automatic routing
- *  (kimi config.toml `type` and the embedded proxy's convert/passthrough
- *  slot selection). */
-export type ProviderProtocol = 'openai_chat' | 'openai_responses';
+/** 每引擎的协议路由开关：true = 调用 CLI 时前置本程序的协议转换
+ *  server；false = CLI 直连其自己配置文件里的端点（本程序零干预）。 */
+export interface EngineRoutingSettings {
+  kimi: boolean;
+  codex: boolean;
+}
 
-export interface ProviderSettings {
-  id: string; // stable unique id (preset id or custom-<uuid>)
-  /** Display name, e.g. "Kimi For Coding". */
-  name: string;
+// ---------------------------------------------- CLI 配置只读快照（展示用）
+// 本程序只读取 CLI 自己的配置文件（~/.kimi-code、~/.codex），永不写入；
+// key 绝不以明文跨进 renderer，只给 hasKey 标记。
+
+export interface KimiConfigModel {
+  alias: string;
+  model: string;
+  maxContextSize?: number;
+}
+
+export interface KimiConfigProvider {
+  id: string;
+  /** kosong provider type：kimi / openai / openai_responses / anthropic … */
+  type: string;
   baseUrl: string;
-  protocol: ProviderProtocol;
-  apiKey: string;
-  models: Array<{ alias: string; model: string; maxContextSize: number }>;
-  /** Extra headers merged into requests, e.g. a UA to pass coding-plan allowlists. */
-  customHeaders?: Record<string, string>;
+  hasKey: boolean;
+  models: KimiConfigModel[];
+}
+
+export interface KimiConfigSnapshot {
+  home: string;
+  configPath: string;
+  exists: boolean;
+  defaultModel?: string;
+  providers: KimiConfigProvider[];
+  error?: string;
+}
+
+export interface CodexConfigProvider {
+  id: string;
+  name?: string;
+  baseUrl: string;
+  /** codex wire_api：responses（chat 已从 codex 移除，旧配置可能仍有） */
+  wireApi: string;
+  envKey?: string;
+  /** env_key 在当前环境能解析到值。 */
+  hasKey: boolean;
+}
+
+export interface CodexConfigSnapshot {
+  home: string;
+  configPath: string;
+  exists: boolean;
+  model?: string;
+  reasoningEffort?: string;
+  /** 配置里的 model_provider（未设 = 内置 openai）。 */
+  activeProvider?: string;
+  authMode: 'chatgpt' | 'apikey' | 'none';
+  providers: CodexConfigProvider[];
+  error?: string;
+}
+
+export interface RouteSupport {
+  ok: boolean;
+  /** 不可路由时的人话原因（已 i18n 化的中文，renderer 直接展示）。 */
+  reason?: string;
+}
+
+export interface EngineConfigsSnapshot {
+  kimi: KimiConfigSnapshot;
+  codex: CodexConfigSnapshot;
+  routeSupport: { kimi: RouteSupport; codex: RouteSupport };
 }
 
 /** A named multi-folder workspace (sidebar top-level group). */
@@ -243,14 +299,14 @@ export interface NotificationSettings {
 export type AppLanguage = 'zh' | 'en';
 
 export interface AppSettings {
-  providers: ProviderSettings[];
-  defaultModelId: string;
   theme: 'notion' | 'light' | 'dark';
   language: AppLanguage;
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';
   notifications: NotificationSettings;
   workspaces: WorkspaceInfo[];
+  /** 协议路由开关（仅影响本程序内 spawn 的 CLI，不碰用户配置文件）。 */
+  routing: EngineRoutingSettings;
 }
 
 // ------------------------------------------------------------ cron tasks

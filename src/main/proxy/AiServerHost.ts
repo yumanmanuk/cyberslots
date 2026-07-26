@@ -1,15 +1,16 @@
 /**
- * AiServerHost — runs the embedded Responses↔Chat conversion proxy
- * (resources/ai-server, the user's own ai-server trimmed to its core)
- * as an Electron utilityProcess on a dynamic loopback port.
+ * AiServerHost — runs the embedded protocol-routing servers as Electron
+ * utilityProcesses on dynamic loopback ports:
+ *  - codex front (codex-server.js): Responses API 前端，Responses↔Chat
+ *    转换 + responses 直通（codex 路由开时使用）。
+ *  - kimi front (openai-server.js): Chat Completions 前端，http2 透传
+ *    （kimi 路由开时使用）。
  *
- * Key design points (方案 §内置 ai-server):
- *  - API keys are injected via env only — never written to disk.
+ * Key design points:
+ *  - Upstream endpoints/keys来自 CLI 配置文件的内存解析结果，经 env 注入
+ *    子进程 — 本程序不落盘任何密钥（kimi 镜像 config 除外，见 engineConfigs）。
  *  - The bundled sources are copied into userData/ai-server before spawn
- *    so the proxy's own logs/ and data/ dirs land in a writable location
- *    (packaged resources may be read-only).
- *  - codex talks to 127.0.0.1:<port>; routing hides in the model name
- *    ("kimi*" → Kimi chat conversion, default → MiniMax responses).
+ *    so the proxy's own logs/ and data/ dirs land in a writable location.
  */
 
 import { app, utilityProcess, type UtilityProcess } from 'electron';
@@ -17,70 +18,102 @@ import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 
-import type { AppSettings } from '@shared/types';
+import type { RouteUpstreams } from '../config/engineConfigs';
 
-const PROXY_FILES = ['codex-server.js', 'client-access.js', 'kimi-quota-guard.js', 'kimi-effort.js', 'config.js', 'package.json'];
+const PROXY_FILES = [
+  'codex-server.js',
+  'openai-server.js',
+  'client-access.js',
+  'kimi-quota-guard.js',
+  'kimi-effort.js',
+  'config.js',
+  'package.json',
+];
 const READY_TIMEOUT_MS = 10_000;
 
-export class AiServerHost {
-  private child: UtilityProcess | undefined;
-  private port = 0;
-  private starting: Promise<number> | undefined;
+type FrontKind = 'codex' | 'kimi';
 
-  /** Ensure the proxy is running; resolves with its loopback port. */
-  async ensureStarted(settings: AppSettings): Promise<number> {
-    if (this.child && this.port) return this.port;
-    this.starting ??= this.start(settings).finally(() => {
-      this.starting = undefined;
-    });
-    return this.starting;
+interface Front {
+  child: UtilityProcess | undefined;
+  port: number;
+  starting: Promise<number> | undefined;
+  /** Upstream fingerprint — restart the front when endpoints change. */
+  sig: string;
+}
+
+export class AiServerHost {
+  private readonly fronts: Record<FrontKind, Front> = {
+    codex: { child: undefined, port: 0, starting: undefined, sig: '' },
+    kimi: { child: undefined, port: 0, starting: undefined, sig: '' },
+  };
+
+  /** codex 路由前端（Responses 协议入口）。 */
+  ensureCodexFront(upstreams: RouteUpstreams): Promise<number> {
+    return this.ensure('codex', upstreams);
   }
 
-  get currentPort(): number {
-    return this.port;
+  /** kimi 路由前端（Chat Completions 协议入口）。 */
+  ensureKimiFront(upstreams: RouteUpstreams): Promise<number> {
+    return this.ensure('kimi', upstreams);
   }
 
   stop(): void {
-    this.child?.kill();
-    this.child = undefined;
-    this.port = 0;
+    for (const kind of ['codex', 'kimi'] as FrontKind[]) {
+      this.fronts[kind].child?.kill();
+      this.fronts[kind] = { child: undefined, port: 0, starting: undefined, sig: '' };
+    }
   }
 
-  private async start(settings: AppSettings): Promise<number> {
+  private ensure(kind: FrontKind, upstreams: RouteUpstreams): Promise<number> {
+    const front = this.fronts[kind];
+    const sig = JSON.stringify(upstreams);
+    if (front.child && front.port && front.sig === sig) return Promise.resolve(front.port);
+    if (front.starting) return front.starting;
+    // Endpoint set changed → restart with fresh env.
+    front.child?.kill();
+    front.child = undefined;
+    front.port = 0;
+    front.starting = this.start(kind, upstreams, sig).finally(() => {
+      front.starting = undefined;
+    });
+    return front.starting;
+  }
+
+  private async start(kind: FrontKind, upstreams: RouteUpstreams, sig: string): Promise<number> {
     const runDir = this.materialize();
     const port = await findFreePort();
+    const entry = kind === 'codex' ? 'codex-server.js' : 'openai-server.js';
+    const portEnv = kind === 'codex' ? 'CODEX_PORT_OVERRIDE' : 'OPENAI_PORT_OVERRIDE';
 
-    // Protocol-driven slot selection (自动路由): the first chat-completions
-    // provider feeds the Responses↔Chat conversion path ("kimi" slot),
-    // the first responses provider rides the passthrough ("minimax" slot).
-    const chatProvider = settings.providers.find((p) => p.protocol === 'openai_chat');
-    const responsesProvider = settings.providers.find((p) => p.protocol === 'openai_responses');
-
-    const child = utilityProcess.fork(join(runDir, 'codex-server.js'), [], {
-      serviceName: 'cyberslots-ai-server',
+    const child = utilityProcess.fork(join(runDir, entry), [], {
+      serviceName: `cyberslots-ai-server-${kind}`,
       stdio: 'pipe',
       env: {
         ...process.env,
-        CODEX_PORT_OVERRIDE: String(port),
-        KIMI_OPENAI_BASE_URL: chatProvider?.baseUrl ?? '',
-        KIMI_API_KEY: chatProvider?.apiKey ?? '',
-        MINIMAX_OPENAI_BASE_URL: responsesProvider?.baseUrl ?? '',
-        MINIMAX_API_KEY: responsesProvider?.apiKey ?? '',
+        [portEnv]: String(port),
+        KIMI_OPENAI_BASE_URL: upstreams.chat?.baseUrl ?? '',
+        KIMI_API_KEY: upstreams.chat?.apiKey ?? '',
+        MINIMAX_OPENAI_BASE_URL: upstreams.responses?.baseUrl ?? '',
+        MINIMAX_API_KEY: upstreams.responses?.apiKey ?? '',
       },
     });
-    child.stdout?.on('data', (d: Buffer) => console.log('[ai-server]', d.toString().trim()));
-    child.stderr?.on('data', (d: Buffer) => console.error('[ai-server:err]', d.toString().trim()));
+    child.stdout?.on('data', (d: Buffer) => console.log(`[ai-server:${kind}]`, d.toString().trim()));
+    child.stderr?.on('data', (d: Buffer) => console.error(`[ai-server:${kind}:err]`, d.toString().trim()));
     child.once('exit', (code) => {
-      console.error(`[ai-server] exited (code=${code})`);
-      if (this.child === child) {
-        this.child = undefined;
-        this.port = 0;
+      console.error(`[ai-server:${kind}] exited (code=${code})`);
+      const front = this.fronts[kind];
+      if (front.child === child) {
+        front.child = undefined;
+        front.port = 0;
       }
     });
-    this.child = child;
+
+    const front = this.fronts[kind];
+    front.child = child;
+    front.sig = sig;
 
     await waitForHealth(port);
-    this.port = port;
+    front.port = port;
     return port;
   }
 
@@ -132,7 +165,7 @@ async function waitForHealth(port: number): Promise<void> {
       });
     });
     if (ok) return;
-    if (Date.now() > deadline) throw new Error(`内置 ai-server 启动超时（port ${port}）`);
+    if (Date.now() > deadline) throw new Error(`内置 ai-server(${port}) 启动超时`);
     await new Promise((r) => setTimeout(r, 250));
   }
 }

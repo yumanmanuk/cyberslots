@@ -25,11 +25,12 @@ export function resolveCodexCli(extraArgs: string[], explicitEntry?: string): Sp
   return { command: 'codex', args: extraArgs, label: 'codex (PATH)', shell: true };
 }
 
-/** Env for spawned codex processes: Electron-as-Node + app-owned CODEX_HOME. */
-export function codexSpawnEnv(codexHome: string): NodeJS.ProcessEnv {
+/** Env for spawned codex processes: Electron-as-Node；不再覆盖
+ *  CODEX_HOME — codex 始终用用户自己的 ~/.codex（登录/会话/配置），
+ *  路由开关只通过 `-c` 命令行覆盖生效，零文件写入。 */
+export function codexSpawnEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
-    CODEX_HOME: codexHome,
   };
 }

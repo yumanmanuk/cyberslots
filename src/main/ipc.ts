@@ -11,6 +11,7 @@ import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
+import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
 import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
 
@@ -52,11 +53,17 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
     sessions.controlGoal(sessionId, action),
   );
   ipcMain.handle(IPC.sessionMarkRead, (_e, sessionId: string) => sessions.markRead(sessionId));
-
-  ipcMain.handle(IPC.settingsGet, () => redactForRenderer(settings.get()));
-  ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) =>
-    redactForRenderer(settings.set(patch)),
+  ipcMain.handle(IPC.sessionAssignWorkspace, (_e, cwd: string, workspaceId: string) =>
+    sessions.assignWorkspace(cwd, workspaceId),
   );
+  ipcMain.handle(IPC.workspaceAnnounce, (_e, workspaceId: string) =>
+    sessions.announceWorkspaceFolders(workspaceId),
+  );
+
+  ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => settings.set(patch));
+  // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
+  ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
 
   ipcMain.handle(IPC.themeSync, (e, theme: AppSettings['theme']) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -83,15 +90,4 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
   );
   ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
-}
-
-/** API keys never cross into the renderer — masked for display only. */
-function redactForRenderer(s: AppSettings): AppSettings {
-  return {
-    ...s,
-    providers: s.providers.map((p) => ({
-      ...p,
-      apiKey: p.apiKey ? `${p.apiKey.slice(0, 8)}…${p.apiKey.slice(-4)}` : '',
-    })),
-  };
 }

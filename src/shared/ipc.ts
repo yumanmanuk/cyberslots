@@ -7,6 +7,7 @@
 import type {
   AppSettings,
   CronTask,
+  EngineConfigsSnapshot,
   EngineEventEnvelope,
   EngineId,
   GoalControlAction,
@@ -36,8 +37,11 @@ export const IPC = {
   sessionGoalSet: 'session:goal-set',
   sessionGoalControl: 'session:goal-control',
   sessionMarkRead: 'session:mark-read',
+  sessionAssignWorkspace: 'session:assign-workspace',
+  workspaceAnnounce: 'workspace:announce',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  engineConfigsGet: 'engine-configs:get',
   themeSync: 'window:theme-sync',
   cronList: 'cron:list',
   cronSave: 'cron:save',
@@ -122,8 +126,14 @@ export interface CyberSlotsApi {
   sessionGoalSet(sessionId: string, objective: string): Promise<void>;
   sessionGoalControl(sessionId: string, action: GoalControlAction): Promise<void>;
   sessionMarkRead(sessionId: string): Promise<void>;
+  /** 把某个 Project（按 cwd 分组）的会话挂到工作区下（Project → Workspace 升级）。 */
+  sessionAssignWorkspace(cwd: string, workspaceId: string): Promise<void>;
+  /** 工作区目录集变化后，向其会话注入一次性目录公告前缀。 */
+  workspaceAnnounce(workspaceId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。 */
+  engineConfigsGet(): Promise<EngineConfigsSnapshot>;
   /** Push the active theme to main so the native title bar matches. */
   themeSync(theme: AppSettings['theme']): Promise<void>;
   cronList(): Promise<CronTask[]>;

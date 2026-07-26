@@ -19,6 +19,7 @@ import type {
   PermissionOptionView,
   PlanEntry,
   ToolCallStatus,
+  UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { NdjsonRpc } from './rpc';
@@ -30,8 +31,6 @@ const KILL_GRACE_MS = 3_000;
 type Json = Record<string, unknown>;
 
 export interface CodexAdapterOptions {
-  /** App-managed CODEX_HOME (config.toml points at the embedded proxy). */
-  codexHome: string;
   cwd: string;
   modelId?: string;
   permissionMode?: PermissionMode;
@@ -39,7 +38,11 @@ export interface CodexAdapterOptions {
   resumeThreadId?: string;
   /** Optional explicit path to codex bin/codex.js (settings override). */
   cliEntry?: string;
-  /** Model aliases to surface in the model picker (from app settings). */
+  /** 路由开启时的 `-c key=value` 命令行覆盖（零文件写入）。 */
+  configOverrideArgs?: string[];
+  /** 路由开启时指定的 model_provider；缺省 = 用户配置默认。 */
+  modelProvider?: string;
+  /** Model aliases to surface in the model picker. */
   availableModels?: string[];
 }
 
@@ -67,6 +70,10 @@ export class CodexAdapter implements EngineAdapter {
   private turnDone: (() => void) | undefined;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly stderrTail: string[] = [];
+  /** Latest per-turn token breakdown (thread/tokenUsage `last`) — attached
+   *  to turn.ended so the UI can render 上行/缓存/下行 stats per answer. */
+  private lastTurnUsage: UsageInfo | undefined;
+  private turnStartedAt = 0;
   /** Last goal snapshot — lets us synthesize the completion announcement
    *  if the engine clears the goal without pushing a `complete` update. */
   private lastGoal: GoalInfo | null = null;
@@ -85,11 +92,12 @@ export class CodexAdapter implements EngineAdapter {
 
   async start(): Promise<{ engineSessionId: string }> {
     this.emit({ type: 'session.status', status: 'starting' });
-    const spec = resolveCodexCli(['app-server'], this.opts.cliEntry);
+    // 路由覆盖是 root 级 `-c` 参数，必须排在 app-server 子命令之前。
+    const spec = resolveCodexCli([...(this.opts.configOverrideArgs ?? []), 'app-server'], this.opts.cliEntry);
     const child = spawn(spec.command, spec.args, {
       cwd: this.opts.cwd,
       shell: spec.shell ?? false,
-      env: codexSpawnEnv(this.opts.codexHome),
+      env: codexSpawnEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
@@ -136,11 +144,11 @@ export class CodexAdapter implements EngineAdapter {
 
     const modeCfg = MODE_MAP[this.mode];
     const threadParams: Json = {
-      modelProvider: 'cyberslots',
       cwd: this.opts.cwd,
       approvalPolicy: modeCfg.approvalPolicy,
       sandbox: modeCfg.sandbox,
     };
+    if (this.opts.modelProvider) threadParams.modelProvider = this.opts.modelProvider;
     if (this.modelId) threadParams.model = this.modelId;
 
     const thread = this.opts.resumeThreadId
@@ -199,6 +207,8 @@ export class CodexAdapter implements EngineAdapter {
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     const rpc = this.requireRpc();
     const turnId = ++this.turnId;
+    this.lastTurnUsage = undefined;
+    this.turnStartedAt = Date.now();
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
 
@@ -375,9 +385,22 @@ export class CodexAdapter implements EngineAdapter {
       }
       case 'thread/tokenUsage/updated': {
         const usage = params.tokenUsage as Json | undefined;
+        // 上下文占用以 `last`（最近一次补全的窗口内 token 数）为准 —
+        // `total` 是跨回合累计值，会把占用比例越算越大（codex TUI 同此口径）。
+        const last = usage?.last as Json | undefined;
         const total = usage?.total as Json | undefined;
-        const used = Number(total?.totalTokens ?? 0);
+        const used = Number(last?.totalTokens ?? total?.totalTokens ?? 0);
         const size = Number(usage?.modelContextWindow ?? 0);
+        if (last) {
+          this.lastTurnUsage = {
+            inputTokens: Number(last.inputTokens ?? 0),
+            cachedInputTokens: Number(last.cachedInputTokens ?? 0),
+            outputTokens: Number(last.outputTokens ?? 0),
+            totalTokens: Number(last.totalTokens ?? 0),
+            contextUsed: used,
+            contextMax: size || undefined,
+          };
+        }
         this.emit({ type: 'usage.update', used, size });
         return;
       }
@@ -409,7 +432,24 @@ export class CodexAdapter implements EngineAdapter {
         if (status === 'failed' && err) {
           this.emit({ type: 'error', turnId, source: 'provider', message: String(err.message ?? 'turn failed') });
         }
-        this.emit({ type: 'turn.ended', turnId, stopReason: status === 'completed' ? 'end_turn' : status });
+        // Prefer the turn's own usage payload; fall back to the streamed
+        // per-turn tokenUsage snapshot captured above.
+        const turnUsage = turn?.usage as Json | undefined;
+        const usage: UsageInfo | undefined = turnUsage
+          ? {
+              ...this.lastTurnUsage,
+              inputTokens: Number(turnUsage.inputTokens ?? 0),
+              cachedInputTokens: Number(turnUsage.cachedInputTokens ?? 0),
+              outputTokens: Number(turnUsage.outputTokens ?? 0),
+            }
+          : this.lastTurnUsage;
+        this.emit({
+          type: 'turn.ended',
+          turnId,
+          stopReason: status === 'completed' ? 'end_turn' : status,
+          usage,
+          durationMs: this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined,
+        });
         this.turnDone?.();
         return;
       }

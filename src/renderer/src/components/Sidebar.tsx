@@ -16,8 +16,10 @@ import {
   Folder,
   FolderGit2,
   FolderOpen,
+  FolderPlus,
   Loader2,
   MoreHorizontal,
+  PanelLeftClose,
   Pencil,
   Plus,
   Settings,
@@ -32,7 +34,7 @@ import WorkspaceDialog from './WorkspaceDialog';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
-export default function Sidebar(): JSX.Element {
+export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element {
   const t = useT();
   const sessions = useChatStore((s) => s.sessions);
   // Stable fallback — inline `?? []` creates a fresh array per snapshot and
@@ -41,6 +43,7 @@ export default function Sidebar(): JSX.Element {
   const filter = useChatStore((s) => s.filter);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectSession = useChatStore((s) => s.selectSession);
+  const toggleSidebar = useChatStore((s) => s.toggleSidebar);
   const [wsDialog, setWsDialog] = useState<{ open: boolean; editing: WorkspaceInfo | null }>({ open: false, editing: null });
 
   const visible = useMemo(() => applyFilter(sessions, filter), [sessions, filter]);
@@ -55,15 +58,24 @@ export default function Sidebar(): JSX.Element {
   };
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-line bg-bg-panel">
+    <aside className={`flex w-64 shrink-0 flex-col border-r border-line bg-bg-panel ${overlay ? 'h-full' : ''}`}>
       {/* 新会话 + 小节工具条 */}
-      <div className="px-3 pb-1 pt-3">
+      <div className="flex items-center gap-1.5 px-3 pb-1 pt-3">
         <button
           onClick={() => useChatStore.setState({ activeSessionId: null })}
-          className="flex w-full items-center gap-2 rounded-xl border border-line bg-bg-input px-3 py-2 text-ui text-ink-soft shadow-sm transition hover:border-ink-faint hover:text-ink"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-input px-3 py-2 text-ui text-ink-soft shadow-sm transition hover:border-ink-faint hover:text-ink"
         >
           <Plus size={14} /> {t('newSession')}
         </button>
+        {!overlay && (
+          <button
+            title={t('collapseSidebar')}
+            onClick={toggleSidebar}
+            className="shrink-0 rounded-lg p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+          >
+            <PanelLeftClose size={15} />
+          </button>
+        )}
       </div>
       <div className="flex items-center justify-between px-4 pb-1 pt-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Sessions</span>
@@ -250,7 +262,7 @@ function WorkspaceGroup({
         </button>
         <DotMenu
           items={[
-            { icon: <Pencil size={13} />, label: t('renameWorkspace'), onClick: onEdit },
+            { icon: <Pencil size={13} />, label: t('manageWorkspace'), onClick: onEdit },
             {
               icon: <SquareTerminal size={13} />,
               label: t('openTerminal'),
@@ -287,7 +299,18 @@ function ProjectGroup({
   onSelect: (id: string) => void;
 }): JSX.Element {
   const t = useT();
+  const convertProjectToWorkspace = useChatStore((s) => s.convertProjectToWorkspace);
   const [expanded, setExpanded] = useState(true);
+
+  /** Project → Workspace：选一个新目录，和现有 cwd 合并成多目录工作区，
+   *  本组会话整体迁入新工作区（引擎下一条消息前获知新目录）。 */
+  const convert = async (): Promise<void> => {
+    const dir = await window.cyberslots.dialogPickFolder();
+    if (!dir) return;
+    const folders = dir === cwd ? [cwd] : [cwd, dir];
+    await convertProjectToWorkspace(cwd, name, folders);
+  };
+
   return (
     <div>
       <div className="group flex items-center gap-1 rounded-md px-1 py-1 hover:bg-bg-hover">
@@ -301,6 +324,7 @@ function ProjectGroup({
         </button>
         <DotMenu
           items={[
+            { icon: <FolderPlus size={13} />, label: t('convertToWorkspace'), onClick: () => void convert() },
             { icon: <SquareTerminal size={13} />, label: t('openTerminal'), onClick: () => void window.cyberslots.openIn('terminal', cwd) },
             { icon: <Folder size={13} />, label: t('openInEditor'), onClick: () => void window.cyberslots.openIn('vscode', cwd) },
           ]}

@@ -1,15 +1,38 @@
 /**
  * FilePreview — read/edit a workspace file. Markdown opens in rendered
- * preview by default (spec F6); everything else shows as numbered plain
- * text. Edit mode is a plain editor with save (CodeMirror upgrade later).
+ * preview by default (spec F6); code shows with highlight.js syntax
+ * colors + line numbers. Edit mode is a plain editor with save.
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import hljs from 'highlight.js';
 import { Code2, Eye, ExternalLink, Pencil, Save, X } from 'lucide-react';
 
 import type { OpenTarget } from '@shared/ipc';
+
+/** ext → highlight.js language id（常见别名修正） */
+const LANG_BY_EXT: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  py: 'python',
+  rs: 'rust',
+  rb: 'ruby',
+  kt: 'kotlin',
+  yml: 'yaml',
+  ps1: 'powershell',
+  sh: 'bash',
+  toml: 'ini',
+  vue: 'xml',
+  html: 'xml',
+  htm: 'xml',
+  svg: 'xml',
+};
 
 interface Props {
   path: string;
@@ -110,15 +133,29 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{text ?? ''}</ReactMarkdown>
           </div>
         ) : (
-          <NumberedSource text={text ?? ''} />
+          <NumberedSource text={text ?? ''} ext={ext} />
         )}
       </div>
     </div>
   );
 }
 
-function NumberedSource({ text }: { text: string }): JSX.Element {
+/** 带行号的代码视图 — highlight.js 整块着色（token 可跨行），
+ *  行号列与代码共享行高，滚动同步。 */
+function NumberedSource({ text, ext }: { text: string; ext: string }): JSX.Element {
   const lines = useMemo(() => text.split('\n'), [text]);
+  const html = useMemo(() => {
+    const lang = LANG_BY_EXT[ext] ?? ext;
+    try {
+      if (lang && hljs.getLanguage(lang)) return hljs.highlight(text, { language: lang }).value;
+      // 未知扩展名：仅对小文件自动探测，大文件直接纯文本（autoDetect 很贵）。
+      if (text.length < 60_000) return hljs.highlightAuto(text).value;
+    } catch {
+      /* fall through to plain text */
+    }
+    return undefined;
+  }, [text, ext]);
+
   return (
     <div className="flex font-mono text-[12px] leading-5">
       <div className="select-none border-r border-line bg-bg-panel px-2 py-2 text-right text-ink-faint">
@@ -126,7 +163,11 @@ function NumberedSource({ text }: { text: string }): JSX.Element {
           <div key={i}>{i + 1}</div>
         ))}
       </div>
-      <pre className="flex-1 overflow-x-auto whitespace-pre px-3 py-2">{text}</pre>
+      {html !== undefined ? (
+        <pre className="hljs flex-1 overflow-x-auto whitespace-pre bg-transparent px-3 py-2" dangerouslySetInnerHTML={{ __html: html }} />
+      ) : (
+        <pre className="flex-1 overflow-x-auto whitespace-pre px-3 py-2">{text}</pre>
+      )}
     </div>
   );
 }

@@ -1,15 +1,13 @@
 /**
  * SettingsView — full-page settings with a category rail (通用 / 模型 /
- * 通知 / 关于), replacing the old single modal. Providers are fully
- * generic (cc-switch style): add from presets or custom, protocol
- * drives automatic routing; keys stay masked.
+ * 通知 / 关于). 模型页是 CLI 配置的只读快照（~/.kimi-code、~/.codex）
+ * 加每引擎一个协议路由开关 — 本程序不提供任何配置文件修改功能。
  */
 
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Bell, Box, ChevronDown, Info, Plus, Settings2, Trash2 } from 'lucide-react';
+import { ArrowLeft, Bell, Box, FileLock2, Info, RefreshCw, Settings2 } from 'lucide-react';
 
-import type { AppSettings, NotificationSettings, ProviderSettings } from '@shared/types';
-import { PROVIDER_PRESETS, type ProviderPreset } from '@shared/presets';
+import type { AppSettings, CodexConfigSnapshot, EngineConfigsSnapshot, KimiConfigSnapshot, NotificationSettings, RouteSupport } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { useT, type MsgKey } from '../i18n';
 
@@ -32,11 +30,14 @@ export default function SettingsView(): JSX.Element | null {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
+    // 只在打开时重置草稿 — 若依赖 settings，即时保存（如通知开关）会
+    // 回写 settings 并把其它面板未保存的草稿一并冲掉。
     if (open && settings) {
       setDraft(structuredClone(settings));
       setCategory('general');
     }
-  }, [open, settings]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open || !draft) return null;
 
@@ -73,7 +74,7 @@ export default function SettingsView(): JSX.Element | null {
           <div className="mx-auto max-w-2xl px-8 py-8">
             <h1 className="mb-6 text-xl font-semibold">{t(CATEGORIES.find((c) => c.id === category)!.key)}</h1>
             {category === 'general' && <GeneralPane draft={draft} setDraft={setDraft} />}
-            {category === 'models' && <ModelsPane draft={draft} setDraft={setDraft} />}
+            {category === 'models' && <ModelsPane />}
             {category === 'notifications' && <NotificationsPane draft={draft} setDraft={setDraft} />}
             {category === 'about' && <AboutPane />}
           </div>
@@ -131,202 +132,217 @@ function GeneralPane({ draft, setDraft }: PaneProps): JSX.Element {
           onChange={(sendKey) => setDraft({ ...draft, sendKey: sendKey as AppSettings['sendKey'] })}
         />
       </Section>
-      <Section title={t('defaultModel')}>
-        <select
-          value={draft.defaultModelId}
-          onChange={(e) => setDraft({ ...draft, defaultModelId: e.target.value })}
-          className="w-64 rounded-lg border border-line bg-bg-input px-2.5 py-1.5 text-ui outline-none transition focus:border-accent"
-        >
-          {draft.providers.flatMap((p) => p.models.map((m) => m.alias)).map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-      </Section>
     </div>
   );
 }
 
 // ----------------------------------------------------------------- models
+// 只读展示 CLI 自己的配置（本程序永不写入）+ 每引擎的协议路由开关。
 
-function ModelsPane({ draft, setDraft }: PaneProps): JSX.Element {
+function ModelsPane(): JSX.Element {
   const t = useT();
-  const [presetOpen, setPresetOpen] = useState(false);
+  const settings = useChatStore((s) => s.settings);
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  const [snap, setSnap] = useState<EngineConfigsSnapshot | null>(null);
 
-  const patchProvider = (id: string, patch: Partial<ProviderSettings>): void => {
-    setDraft({ ...draft, providers: draft.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) });
+  const reload = (): void => {
+    void window.cyberslots.engineConfigsGet().then(setSnap);
+  };
+  useEffect(reload, []);
+
+  // 路由开关即时保存（同通知开关），并提示仅对新开会话生效。
+  const setRouting = (engine: 'kimi' | 'codex', on: boolean): void => {
+    const routing = { ...(settings?.routing ?? { kimi: false, codex: false }), [engine]: on };
+    void saveSettings({ routing });
   };
 
-  const addFromPreset = (preset: ProviderPreset | null): void => {
-    const id = preset ? uniqueId(preset.id, draft.providers) : `custom-${crypto.randomUUID().slice(0, 8)}`;
-    const provider: ProviderSettings = preset
-      ? { id, name: preset.name, baseUrl: preset.baseUrl, protocol: preset.protocol, apiKey: '', models: structuredClone(preset.models), ...(preset.customHeaders ? { customHeaders: preset.customHeaders } : {}) }
-      : { id, name: '', baseUrl: '', protocol: 'openai_chat', apiKey: '', models: [] };
-    setDraft({ ...draft, providers: [...draft.providers, provider] });
-    setPresetOpen(false);
-  };
+  const routing = settings?.routing ?? { kimi: false, codex: false };
 
   return (
     <div className="space-y-5">
-      <p className="text-[12px] leading-5 text-ink-faint">{t('providersHint')}</p>
-
-      {draft.providers.map((p) => (
-        <ProviderCard
-          key={p.id}
-          provider={p}
-          onPatch={(patch) => patchProvider(p.id, patch)}
-          onRemove={() => setDraft({ ...draft, providers: draft.providers.filter((x) => x.id !== p.id) })}
-        />
-      ))}
-
-      <div className="relative">
-        <button
-          onClick={() => setPresetOpen(!presetOpen)}
-          className="flex items-center gap-2 rounded-lg border border-dashed border-line px-4 py-2 text-ui text-ink-soft transition hover:border-accent hover:text-accent"
-        >
-          <Plus size={14} /> {t('addProvider')}
-          <ChevronDown size={12} />
+      <div className="flex items-start gap-2 rounded-xl border border-line bg-bg-panel/50 px-4 py-3">
+        <FileLock2 size={15} className="mt-0.5 shrink-0 text-ink-faint" />
+        <p className="text-[12px] leading-5 text-ink-faint">{t('modelsReadonlyHint')}</p>
+        <button title={t('cfgReload')} onClick={reload} className="shrink-0 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
+          <RefreshCw size={13} />
         </button>
-        {presetOpen && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setPresetOpen(false)} />
-            <div className="absolute left-0 top-11 z-20 w-64 rounded-xl border border-line bg-bg-input py-1.5 shadow-lg">
-              <div className="px-3 pb-1 pt-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">{t('choosePreset')}</div>
-              {PROVIDER_PRESETS.map((preset) => (
-                <button
-                  key={preset.id}
-                  onClick={() => addFromPreset(preset)}
-                  className="flex w-full items-center justify-between px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover"
-                >
-                  <span>{preset.name}</span>
-                  <span className="font-mono text-[10px] text-ink-faint">{preset.protocol === 'openai_chat' ? 'chat' : 'responses'}</span>
-                </button>
-              ))}
-              <div className="mx-3 my-1 border-t border-line" />
-              <button onClick={() => addFromPreset(null)} className="block w-full px-3 py-1.5 text-left text-ui text-ink-soft transition hover:bg-bg-hover">
-                {t('customProvider')}
-              </button>
-            </div>
-          </>
-        )}
       </div>
+
+      {!snap ? (
+        <div className="py-8 text-center text-ui text-ink-faint">…</div>
+      ) : (
+        <>
+          <CodexConfigCard
+            snap={snap.codex}
+            support={snap.routeSupport.codex}
+            routing={routing.codex}
+            onToggle={(on) => setRouting('codex', on)}
+          />
+          <KimiConfigCard
+            snap={snap.kimi}
+            support={snap.routeSupport.kimi}
+            routing={routing.kimi}
+            onToggle={(on) => setRouting('kimi', on)}
+          />
+        </>
+      )}
     </div>
   );
 }
 
-function ProviderCard({
-  provider: p,
-  onPatch,
-  onRemove,
+function CardShell({
+  title,
+  configPath,
+  routing,
+  support,
+  onToggle,
+  children,
 }: {
-  provider: ProviderSettings;
-  onPatch: (patch: Partial<ProviderSettings>) => void;
-  onRemove: () => void;
+  title: string;
+  configPath: string;
+  routing: boolean;
+  support: RouteSupport;
+  onToggle: (on: boolean) => void;
+  children: React.ReactNode;
 }): JSX.Element {
   const t = useT();
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
-      <div className="mb-3 flex items-center gap-2">
-        <input
-          value={p.name}
-          onChange={(e) => onPatch({ name: e.target.value })}
-          placeholder={t('providerName')}
-          className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-1.5 py-0.5 text-[13px] font-semibold outline-none transition hover:border-line focus:border-accent"
-        />
-        <Segmented
-          small
-          value={p.protocol}
-          options={[
-            { id: 'openai_chat', label: 'Chat' },
-            { id: 'openai_responses', label: 'Responses' },
-          ]}
-          onChange={(protocol) => onPatch({ protocol: protocol as ProviderSettings['protocol'] })}
-        />
-        <button title={t('remove')} onClick={onRemove} className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-err">
-          <Trash2 size={14} />
-        </button>
+      <div className="mb-1 flex items-center gap-3">
+        <span className="text-[13px] font-semibold">{title}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint" title={configPath}>
+          {configPath}
+        </span>
+        <span className="text-[11px] text-ink-soft">{t('routingSwitch')}</span>
+        <Toggle checked={routing} onChange={onToggle} disabled={!support.ok && !routing} />
       </div>
-
-      <Field label="Base URL">
-        <input
-          value={p.baseUrl}
-          onChange={(e) => onPatch({ baseUrl: e.target.value })}
-          spellCheck={false}
-          className="w-full rounded-lg border border-line bg-bg-input px-2.5 py-1.5 font-mono text-[12px] outline-none transition focus:border-accent"
-        />
-      </Field>
-      <Field label="API Key">
-        <input
-          value={p.apiKey}
-          onChange={(e) => onPatch({ apiKey: e.target.value })}
-          placeholder={t('apiKeyPlaceholder')}
-          spellCheck={false}
-          className="w-full rounded-lg border border-line bg-bg-input px-2.5 py-1.5 font-mono text-[12px] outline-none transition focus:border-accent"
-        />
-      </Field>
-
-      <Field label={t('models')}>
-        <div className="space-y-1.5">
-          {p.models.map((m, i) => (
-            <div key={i} className="flex items-center gap-1.5">
-              <input
-                value={m.alias}
-                onChange={(e) => onPatch({ models: p.models.map((x, j) => (j === i ? { ...x, alias: e.target.value } : x)) })}
-                placeholder={t('modelAlias')}
-                spellCheck={false}
-                className="w-36 rounded-lg border border-line bg-bg-input px-2 py-1 font-mono text-[11.5px] outline-none transition focus:border-accent"
-              />
-              <input
-                value={m.model}
-                onChange={(e) => onPatch({ models: p.models.map((x, j) => (j === i ? { ...x, model: e.target.value } : x)) })}
-                placeholder={t('modelUpstreamId')}
-                spellCheck={false}
-                className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2 py-1 font-mono text-[11.5px] outline-none transition focus:border-accent"
-              />
-              <input
-                value={Math.round(m.maxContextSize / 1024)}
-                onChange={(e) =>
-                  onPatch({
-                    models: p.models.map((x, j) => (j === i ? { ...x, maxContextSize: (Number(e.target.value) || 0) * 1024 } : x)),
-                  })
-                }
-                title={t('contextSize')}
-                className="w-16 rounded-lg border border-line bg-bg-input px-2 py-1 text-right font-mono text-[11.5px] outline-none transition focus:border-accent"
-              />
-              <button
-                onClick={() => onPatch({ models: p.models.filter((_, j) => j !== i) })}
-                className="rounded-md p-1 text-ink-faint transition hover:text-err"
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))}
-          <button
-            onClick={() => onPatch({ models: [...p.models, { alias: '', model: '', maxContextSize: 131072 }] })}
-            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] text-ink-faint transition hover:text-accent"
-          >
-            <Plus size={12} /> {t('addModel')}
-          </button>
-        </div>
-      </Field>
+      <div className="mb-3 text-[11px] leading-5 text-ink-faint">
+        {routing ? t('routingOnHint') : t('routingOffHint')}
+        {!support.ok && support.reason && <span className="ml-1 text-warn">⚠ {support.reason}</span>}
+        <span className="ml-1 text-ink-faint/70">{t('routingApplyHint')}</span>
+      </div>
+      {children}
     </div>
   );
 }
 
-function uniqueId(base: string, providers: ProviderSettings[]): string {
-  if (!providers.some((p) => p.id === base)) return base;
-  let n = 2;
-  while (providers.some((p) => p.id === `${base}-${n}`)) n++;
-  return `${base}-${n}`;
+function CodexConfigCard({
+  snap,
+  support,
+  routing,
+  onToggle,
+}: {
+  snap: CodexConfigSnapshot;
+  support: RouteSupport;
+  routing: boolean;
+  onToggle: (on: boolean) => void;
+}): JSX.Element {
+  const t = useT();
+  const authLabel =
+    snap.authMode === 'chatgpt' ? t('cfgAuthChatGPT') : snap.authMode === 'apikey' ? t('cfgAuthApiKey') : t('cfgAuthNone');
+  return (
+    <CardShell title="Codex" configPath={snap.configPath} routing={routing} support={support} onToggle={onToggle}>
+      {!snap.exists ? (
+        <div className="text-ui text-ink-faint">{t('cfgNotFound')}</div>
+      ) : snap.error ? (
+        <div className="text-ui text-err">{snap.error}</div>
+      ) : (
+        <div className="space-y-1.5 text-[12px]">
+          <ReadonlyRow label={t('cfgActiveModel')} value={`${snap.model ?? '—'}${snap.reasoningEffort ? ` · ${snap.reasoningEffort}` : ''}`} />
+          <ReadonlyRow label={t('cfgAuth')} value={authLabel} />
+          <ReadonlyRow label={t('cfgActiveProvider')} value={snap.activeProvider ?? 'openai（内置）'} />
+          {snap.providers.length > 0 ? (
+            snap.providers.map((p) => (
+              <div key={p.id} className="rounded-lg border border-line bg-bg-input px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{p.name ?? p.id}</span>
+                  <span className="rounded bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.wireApi}</span>
+                  <span className={`rounded px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+                    {p.hasKey ? t('cfgKeySet') : `${t('cfgKeyMissing')}${p.envKey ? ` (${p.envKey})` : ''}`}
+                  </span>
+                </div>
+                <div className="mt-0.5 truncate font-mono text-[11px] text-ink-faint">{p.baseUrl}</div>
+              </div>
+            ))
+          ) : (
+            <div className="text-[11.5px] text-ink-faint">{t('cfgNoProviders')}</div>
+          )}
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
+function KimiConfigCard({
+  snap,
+  support,
+  routing,
+  onToggle,
+}: {
+  snap: KimiConfigSnapshot;
+  support: RouteSupport;
+  routing: boolean;
+  onToggle: (on: boolean) => void;
+}): JSX.Element {
+  const t = useT();
+  return (
+    <CardShell title="Kimi Code" configPath={snap.configPath} routing={routing} support={support} onToggle={onToggle}>
+      {!snap.exists ? (
+        <div className="text-ui text-ink-faint">{t('cfgNotFound')}</div>
+      ) : snap.error ? (
+        <div className="text-ui text-err">{snap.error}</div>
+      ) : (
+        <div className="space-y-1.5 text-[12px]">
+          <ReadonlyRow label={t('cfgActiveModel')} value={snap.defaultModel ?? '—'} />
+          {snap.providers.map((p) => (
+            <div key={p.id} className="rounded-lg border border-line bg-bg-input px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{p.id}</span>
+                <span className="rounded bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.type}</span>
+                <span className={`rounded px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+                  {p.hasKey ? t('cfgKeySet') : t('cfgKeyMissing')}
+                </span>
+              </div>
+              <div className="mt-0.5 truncate font-mono text-[11px] text-ink-faint">{p.baseUrl}</div>
+              {p.models.length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {p.models.map((m) => (
+                    <span key={m.alias} title={m.model} className="rounded-md bg-bg-panel px-1.5 py-0.5 font-mono text-[10.5px] text-ink-soft">
+                      {m.alias}
+                      {m.maxContextSize ? ` · ${Math.round(m.maxContextSize / 1024)}K` : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </CardShell>
+  );
+}
+
+function ReadonlyRow({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-20 shrink-0 text-[11px] text-ink-faint">{label}</span>
+      <span className="min-w-0 truncate font-mono text-[11.5px] text-ink">{value}</span>
+    </div>
+  );
 }
 
 // ------------------------------------------------------------ notifications
 
 function NotificationsPane({ draft, setDraft }: PaneProps): JSX.Element {
   const t = useT();
-  const patch = (p: Partial<NotificationSettings>): void =>
-    setDraft({ ...draft, notifications: { ...draft.notifications, ...p } });
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  // 通知开关即时生效（不依赖底部保存钮）— 否则关了开关忘了点保存，
+  // Windows 通知还会继续弹（item 13 实测踩坑）。
+  const patch = (p: Partial<NotificationSettings>): void => {
+    const notifications = { ...draft.notifications, ...p };
+    setDraft({ ...draft, notifications });
+    void saveSettings({ notifications });
+  };
 
   const rows: Array<{ key: keyof NotificationSettings; label: MsgKey; hint: MsgKey }> = [
     { key: 'taskComplete', label: 'notifyTaskComplete', hint: 'notifyTaskCompleteHint' },
@@ -410,11 +426,12 @@ function Segmented({
   );
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }): JSX.Element {
+function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }): JSX.Element {
   return (
     <button
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`h-5 w-9 shrink-0 rounded-full transition ${checked ? 'bg-accent' : 'bg-bg-active'}`}
+      className={`h-5 w-9 shrink-0 rounded-full transition disabled:cursor-not-allowed disabled:opacity-40 ${checked ? 'bg-accent' : 'bg-bg-active'}`}
     >
       <span className={`block h-4 w-4 rounded-full bg-white shadow-sm transition ${checked ? 'translate-x-[18px]' : 'translate-x-0.5'}`} />
     </button>

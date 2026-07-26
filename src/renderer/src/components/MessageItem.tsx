@@ -1,7 +1,8 @@
 /**
  * MessageItem — renders each UnifiedMessage kind in the conversation
  * stream, codex-desktop style: right-aligned gray user bubbles, clean
- * left-aligned AI markdown, compact tool rows, collapsible thinking.
+ * left-aligned AI markdown, compact tool rows, collapsible thinking,
+ * and a per-answer stats footer (上行/缓存/下行/tts/用时).
  */
 
 import { useState } from 'react';
@@ -13,17 +14,25 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  ClipboardCopy,
+  Copy,
+  Download,
   FileText,
   Loader2,
+  NotebookText,
   Pencil,
+  Play,
   Search,
   TerminalSquare,
   X,
 } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
+import { useChatStore } from '../store/chatStore';
+import { downloadMarkdown, extractPlanTitle } from '../planDoc';
+import { useT } from '../i18n';
 
-export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Element | null {
+export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; sessionId: string }): JSX.Element | null {
   switch (msg.kind) {
     case 'user':
       return (
@@ -38,6 +47,7 @@ export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Eleme
       );
 
     case 'text':
+      if (msg.planDoc) return <PlanDocCard msg={msg} sessionId={sessionId} />;
       return (
         <div className={`md-body max-w-none ${msg.streaming ? 'caret' : ''}`}>
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
@@ -67,21 +77,11 @@ export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Eleme
       );
 
     case 'turn_end':
-      return (
-        <div className="flex items-center gap-2 text-[11px] text-ink-faint">
-          <span className="h-px flex-1 bg-line" />
-          {msg.stopReason === 'cancelled' ? '已停止' : ''}
-          <span className="h-px flex-1 bg-line" />
-        </div>
-      );
+      return <TurnStats msg={msg} sessionId={sessionId} />;
 
     case 'system':
-      // Announcements (e.g. goal completion) — quiet accent-tinted banner.
-      return (
-        <div className="mx-auto flex max-w-[90%] items-center gap-2 rounded-xl border border-accent/25 bg-accent-soft/60 px-4 py-2 text-[12px] text-ink-soft">
-          <span className="min-w-0 whitespace-pre-wrap">{msg.text}</span>
-        </div>
-      );
+      // 安静的左对齐小字提示行（goal 完成公告等），不加高亮框不居中。
+      return <div className="whitespace-pre-wrap text-[11.5px] leading-5 text-ink-faint">{msg.text}</div>;
 
     default:
       return null;
@@ -89,6 +89,148 @@ export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Eleme
 }
 
 // ------------------------------------------------------------- sub-blocks
+
+/** 回合结束统计行（取代分隔线）：↑上行（缓存比例） · ↓下行 · tts · 用时。
+ *  悬停时下方浮出一行复制按钮（复制本回合的回答正文）。 */
+function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'turn_end' }>; sessionId: string }): JSX.Element | null {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const u = msg.usage;
+  const parts: string[] = [];
+
+  if (u?.inputTokens != null && u.inputTokens > 0) {
+    const cachePct =
+      u.cachedInputTokens != null && u.inputTokens > 0
+        ? ` (${((u.cachedInputTokens / u.inputTokens) * 100).toFixed(1)}%)`
+        : '';
+    parts.push(`↑ ${fmtK(u.inputTokens)}${cachePct}`);
+  } else if (u?.contextUsed != null && u.contextUsed > 0) {
+    parts.push(`↑ ${fmtK(u.contextUsed)}`);
+  }
+  if (u?.outputTokens != null && u.outputTokens > 0) parts.push(`↓ ${fmtK(u.outputTokens)}`);
+  if (u?.outputTokens && msg.durationMs && msg.durationMs > 500) {
+    parts.push(`${(u.outputTokens / (msg.durationMs / 1000)).toFixed(1)} t/s`);
+  }
+  if (msg.durationMs) parts.push(fmtDuration(msg.durationMs));
+  if (msg.stopReason === 'cancelled') parts.unshift('已停止');
+  if (parts.length === 0) return null;
+
+  const copyAnswer = (): void => {
+    const msgs = useChatStore.getState().ui[sessionId]?.messages ?? [];
+    const text = msgs
+      .filter((m) => m.kind === 'text' && m.turnId === msg.turnId)
+      .map((m) => (m as Extract<UnifiedMessage, { kind: 'text' }>).text)
+      .join('\n\n');
+    if (!text) return;
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <div className="group/stats -my-1">
+      <div className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-ink-faint">
+        {parts.map((p, i) => (
+          <span key={i} className="flex items-center gap-1.5">
+            {i > 0 && <span className="text-ink-faint/40">·</span>}
+            {p}
+          </span>
+        ))}
+      </div>
+      {/* 悬停浮出的操作行 */}
+      <div className="h-0 overflow-hidden opacity-0 transition-all duration-150 group-hover/stats:h-7 group-hover/stats:opacity-100">
+        <button
+          onClick={copyAnswer}
+          className="mt-1 flex items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+        >
+          {copied ? <Check size={11} className="text-ok" /> : <ClipboardCopy size={11} />}
+          {copied ? t('copied') : t('copyAnswer')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Plan 模式产出的计划文档 — 主流只渲染缩略卡片，完整内容在右侧 md 预览。 */
+function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'text' }>; sessionId: string }): JSX.Element {
+  const t = useT();
+  const setPlanPreview = useChatStore((s) => s.setPlanPreview);
+  const setMode = useChatStore((s) => s.setMode);
+  const [copied, setCopied] = useState(false);
+
+  const title = extractPlanTitle(msg.text) ?? t('planCardTitle');
+  const excerpt = msg.text.replace(/^#+\s.*$/m, '').trim().split('\n').filter(Boolean).slice(0, 3).join('\n');
+
+  const copy = (): void => {
+    void navigator.clipboard.writeText(msg.text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  const download = (): void => downloadMarkdown(title, msg.text);
+
+  const implement = (): void => {
+    void setMode('default');
+    setTimeout(() => void useChatStore.getState().sendPromptTo(sessionId, t('planImplementPrompt')), 300);
+  };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-line bg-bg-panel/60 shadow-sm transition hover:shadow-md">
+      <button onClick={() => setPlanPreview(sessionId, msg.id)} className="block w-full text-left">
+        <div className="flex items-center gap-2 px-3.5 pb-1 pt-2.5">
+          {msg.streaming ? (
+            <Loader2 size={14} className="shrink-0 animate-spin text-accent" />
+          ) : (
+            <NotebookText size={14} className="shrink-0 text-accent" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-ui font-medium">
+            {msg.streaming ? t('planCardStreaming') : title}
+          </span>
+        </div>
+        <div className="line-clamp-3 whitespace-pre-wrap px-3.5 pb-2 text-[11.5px] leading-5 text-ink-faint">{excerpt}</div>
+      </button>
+      {!msg.streaming && (
+        <div className="flex items-center gap-1 border-t border-line px-2 py-1.5">
+          <CardBtn onClick={() => setPlanPreview(sessionId, msg.id)} icon={<FileText size={12} />} label={t('planOpen')} />
+          <CardBtn onClick={copy} icon={copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />} label={copied ? t('copied') : t('planCopy')} />
+          <CardBtn onClick={download} icon={<Download size={12} />} label={t('planDownload')} />
+          <div className="flex-1" />
+          <button
+            onClick={implement}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-[11.5px] font-medium text-white transition hover:opacity-90"
+          >
+            <Play size={11} /> {t('planImplement')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CardBtn({ onClick, icon, label }: { onClick: () => void; icon: React.ReactNode; label: string }): JSX.Element {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+    >
+      {icon} {label}
+    </button>
+  );
+}
+
+function fmtK(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k`;
+  return String(n);
+}
+
+function fmtDuration(ms: number): string {
+  const s = ms / 1000;
+  if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s % 60)}s`;
+}
 
 function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);

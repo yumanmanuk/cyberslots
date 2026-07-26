@@ -17,7 +17,14 @@ import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
 import { CodexAdapter } from './codex/CodexAdapter';
-import { ConfigWriter } from '../config/ConfigWriter';
+import {
+  buildKimiRouteMirror,
+  codexRouteOverrideArgs,
+  readCodexConfig,
+  readKimiConfig,
+  resolveCodexRouteUpstreams,
+  resolveKimiRouteUpstreams,
+} from '../config/engineConfigs';
 import type { SettingsStore } from '../config/settings';
 import type { AiServerHost } from '../proxy/AiServerHost';
 
@@ -28,17 +35,12 @@ interface LiveSession {
 
 export class SessionManager {
   private readonly sessions = new Map<string, LiveSession>();
-  private readonly configWriter: ConfigWriter;
   private target: WebContents | undefined;
 
   constructor(
     private readonly settings: SettingsStore,
     private readonly proxy: AiServerHost,
   ) {
-    this.configWriter = new ConfigWriter(
-      join(app.getPath('userData'), 'kimi-home'),
-      join(app.getPath('userData'), 'codex-home'),
-    );
     this.loadPersistedMetas();
   }
 
@@ -72,7 +74,7 @@ export class SessionManager {
         workspace && workspace.folders.length > 1
           ? `本会话绑定多根工作区「${workspace.name}」，包含以下根目录（当前工作目录是第一个，其余目录也属于本项目范围，可用绝对路径访问）：\n${workspace.folders.join('\n')}`
           : undefined,
-      modelId: req.modelId ?? settings.defaultModelId,
+      modelId: req.modelId ?? '',
       permissionMode: req.permissionMode ?? settings.defaultPermissionMode,
       status: 'starting',
       createdAt: Date.now(),
@@ -81,9 +83,6 @@ export class SessionManager {
     };
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
-
-    // Regenerate engine config from current settings before spawn.
-    this.configWriter.sync(settings);
 
     const adapter = await this.buildAdapter(meta);
     this.sessions.get(id)!.adapter = adapter;
@@ -124,7 +123,6 @@ export class SessionManager {
   /** Lazily revive the engine process for sessions closed by app restart. */
   private async ensureRuntime(s: LiveSession): Promise<void> {
     if (s.adapter) return;
-    this.configWriter.sync(this.settings.get());
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
     s.meta.status = 'starting';
@@ -272,6 +270,29 @@ export class SessionManager {
     this.forward(sessionId, { type: 'session.meta', patch: { unread: false } });
   }
 
+  /** Project → Workspace 升级：把同 cwd 的散装 Project 会话挂到工作区下。 */
+  assignWorkspace(cwd: string, workspaceId: string): void {
+    for (const s of this.sessions.values()) {
+      if (!s.meta.workspaceId && s.meta.chatMode === 'work' && s.meta.cwd === cwd) {
+        s.meta.workspaceId = workspaceId;
+        this.forward(s.meta.id, { type: 'session.meta', patch: { workspaceId } });
+      }
+    }
+    this.persistMetas();
+  }
+
+  /** 工作区目录集变化后，给其所有会话注入一次性目录公告（下一条
+   *  prompt 前置注入，引擎即时获知新增/移除的根目录）。 */
+  announceWorkspaceFolders(workspaceId: string): void {
+    const ws = this.settings.get().workspaces.find((w) => w.id === workspaceId);
+    if (!ws) return;
+    const seed = `工作区「${ws.name}」的目录集已更新，当前包含以下根目录（第一个是工作目录，其余目录同属本项目范围，可用绝对路径访问；不在列表内的旧目录已移出本工作区）：\n${ws.folders.join('\n')}`;
+    for (const s of this.sessions.values()) {
+      if (s.meta.workspaceId === workspaceId) s.meta.contextSeed = seed;
+    }
+    this.persistMetas();
+  }
+
   async close(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
@@ -325,10 +346,20 @@ export class SessionManager {
   // ---------------------------------------------------------------- private
 
   private async buildAdapter(meta: SessionMeta, resumeSessionId?: string): Promise<EngineAdapter> {
+    const settings = this.settings.get();
     if (meta.engine === 'kimi') {
+      // 路由开：镜像 home（base_url 指向本地 chat 前端）；关：不设
+      // KIMI_CODE_HOME → kimi 直接用用户自己的 ~/.kimi-code 配置。
+      let kimiHome: string | undefined;
+      if (settings.routing.kimi) {
+        const kimiCfg = readKimiConfig();
+        if (!kimiCfg.exists) throw new Error(`未找到 Kimi Code 配置（${kimiCfg.configPath}），无法启用路由`);
+        const port = await this.proxy.ensureKimiFront(resolveKimiRouteUpstreams(kimiCfg));
+        kimiHome = buildKimiRouteMirror(app.getPath('userData'), kimiCfg, port);
+      }
       return new KimiAdapter(
         {
-          kimiHome: this.configWriter.home,
+          kimiHome,
           cwd: meta.cwd,
           modelId: meta.modelId,
           permissionMode: meta.permissionMode,
@@ -338,19 +369,32 @@ export class SessionManager {
       );
     }
     if (meta.engine === 'codex') {
-      // codex depends on the embedded proxy: start it, then point the
-      // app-owned CODEX_HOME config at its current loopback port.
-      const settings = this.settings.get();
-      const port = await this.proxy.ensureStarted(settings);
-      this.configWriter.syncCodex(settings, port);
+      // 路由开：纯 `-c` 命令行覆盖指向本地 responses 前端（零文件写入）；
+      // 关：不加覆盖，codex 完全按用户 ~/.codex 配置/登录直连。
+      let overrideArgs: string[] = [];
+      let availableModels: string[] = [];
+      const codexCfg = readCodexConfig();
+      if (settings.routing.codex) {
+        const kimiCfg = readKimiConfig();
+        const ups = resolveCodexRouteUpstreams(codexCfg, kimiCfg);
+        if (!ups.chat && !ups.responses) throw new Error('Codex 路由无可用上游端点（见设置-模型页）');
+        const port = await this.proxy.ensureCodexFront(ups);
+        overrideArgs = codexRouteOverrideArgs(port);
+        // 路由模式下模型名驱动路由：候选 = kimi 配置的模型别名。
+        availableModels = kimiCfg.providers.flatMap((p) => p.models.map((m) => m.alias));
+      } else {
+        // 直连：尊重用户配置默认模型，不强制下发 model 参数。
+        if (codexCfg.model) availableModels = [codexCfg.model];
+      }
       return new CodexAdapter(
         {
-          codexHome: this.configWriter.codexHomeDir,
           cwd: meta.cwd,
-          modelId: meta.modelId,
+          modelId: settings.routing.codex ? meta.modelId : '',
           permissionMode: meta.permissionMode,
           resumeThreadId: resumeSessionId,
-          availableModels: settings.providers.flatMap((p) => p.models.map((m) => m.alias)),
+          configOverrideArgs: overrideArgs,
+          modelProvider: settings.routing.codex ? 'cyberslots' : undefined,
+          availableModels,
         },
         (event) => this.onEngineEvent(meta.id, event),
       );
@@ -382,6 +426,9 @@ export class SessionManager {
     const prefs = this.settings.get().notifications;
     if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
     if (event.type === 'turn.ended' && prefs.taskComplete && !meta.title.startsWith('⏰')) {
+      // 只在真正正常完成时提醒 — 出错/手动停止的回合不算「任务完成」，
+      // 否则关了报错通知的用户还会收到伪装成完成的弹窗。
+      if (event.stopReason === 'error' || event.stopReason === 'cancelled' || event.stopReason === 'interrupted') return;
       new Notification({ title: `任务完成：${meta.title}`, body: '回到窗口查看结果' }).show();
     } else if (event.type === 'goal.update' && event.goal?.status === 'complete' && prefs.taskComplete) {
       new Notification({

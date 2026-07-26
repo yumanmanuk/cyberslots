@@ -42,8 +42,8 @@ const KILL_GRACE_MS = 3_000;
 const QUESTION_OPTION_RE = /^q\d+_(opt_\d+|skip)$/;
 
 export interface KimiAdapterOptions {
-  /** Directory used as KIMI_CODE_HOME (config.toml lives here). */
-  kimiHome: string;
+  /** 路由镜像 home（设 KIMI_CODE_HOME）；缺省 = 用户自己的 ~/.kimi-code。 */
+  kimiHome?: string;
   /** Session working directory. */
   cwd: string;
   modelId?: string;
@@ -65,6 +65,8 @@ export class KimiAdapter implements EngineAdapter {
   private turnId = 0;
   private disposed = false;
   private promptActive = false;
+  /** Latest usage_update snapshot — folded into turn.ended stats. */
+  private lastUsage: { used: number; size: number } | undefined;
   private readonly splitter = new ThinkSplitter();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly stderrTail: string[] = [];
@@ -206,14 +208,21 @@ export class KimiAdapter implements EngineAdapter {
       for (const part of this.splitter.flush()) {
         this.emit({ type: part.kind === 'thinking' ? 'thinking.delta' : 'text.delta', turnId, text: part.text });
       }
-      this.emit({ type: 'turn.ended', turnId, stopReason: res.stopReason });
+      this.emit({
+        type: 'turn.ended',
+        turnId,
+        stopReason: res.stopReason,
+        usage: this.lastUsage
+          ? { contextUsed: this.lastUsage.used, contextMax: this.lastUsage.size || undefined }
+          : undefined,
+        durationMs: Date.now() - started,
+      });
     } catch (err) {
       this.emit({ type: 'error', turnId, source: classifyError(err), message: errorMessage(err) });
       this.emit({ type: 'turn.ended', turnId, stopReason: 'error' });
     } finally {
       this.promptActive = false;
       if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
-      void started;
     }
   }
 
@@ -356,6 +365,7 @@ export class KimiAdapter implements EngineAdapter {
       }
       case 'usage_update': {
         const cost = u.cost as { amount?: number } | null | undefined;
+        this.lastUsage = { used: Number(u.used ?? 0), size: Number(u.size ?? 0) };
         this.emit({
           type: 'usage.update',
           used: Number(u.used ?? 0),

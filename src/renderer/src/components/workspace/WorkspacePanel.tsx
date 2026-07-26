@@ -1,8 +1,9 @@
 /**
  * WorkspacePanel — right-hand collapsible panel (codex "Code changes"
  * style): 变更 tab aggregates per-file diffs from the tool stream with
- * +/- counts; 文件 tab is the lazy project tree; clicking either opens
- * an inline file preview.
+ * +/- counts; 文件 tab is the lazy project tree. Clicking a file opens
+ * a separate preview panel to the LEFT of the tree (item 9) so the
+ * tree stays visible while reading code.
  */
 
 import { useMemo, useState } from 'react';
@@ -37,35 +38,42 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
   const agents = useAgentActivity(sessionId);
 
   return (
-    <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-2 py-1.5">
-        <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
-        <TabButton
-          active={tab === 'changes'}
-          onClick={() => onTabChange('changes')}
-          icon={<FileDiff size={13} />}
-          label={changes.length > 0 ? `变更 ${changes.length}` : '变更'}
-        />
-        <TabButton
-          active={tab === 'agents'}
-          onClick={() => onTabChange('agents')}
-          icon={<Bot size={13} />}
-          label={agents.length > 0 ? `Agents ${agents.length}` : 'Agents'}
-        />
-      </div>
-
-      <div className="min-h-0 flex-1">
-        {openFile ? (
+    <>
+      {/* 文件预览 — 独立小面板，开在文件树左侧，树保持可见（item 9） */}
+      {openFile && (
+        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg">
           <FilePreview path={openFile} root={root} onClose={() => setOpenFile(null)} />
-        ) : tab === 'files' ? (
-          <FileTree root={root} onOpenFile={setOpenFile} />
-        ) : tab === 'changes' ? (
-          <ChangesList changes={changes} onOpen={setOpenFile} />
-        ) : (
-          <AgentsList agents={agents} />
-        )}
-      </div>
-    </aside>
+        </aside>
+      )}
+
+      <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
+        <div className="flex shrink-0 items-center gap-1 border-b border-line px-2 py-1.5">
+          <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
+          <TabButton
+            active={tab === 'changes'}
+            onClick={() => onTabChange('changes')}
+            icon={<FileDiff size={13} />}
+            label={changes.length > 0 ? `变更 ${changes.length}` : '变更'}
+          />
+          <TabButton
+            active={tab === 'agents'}
+            onClick={() => onTabChange('agents')}
+            icon={<Bot size={13} />}
+            label={agents.length > 0 ? `Agents ${agents.length}` : 'Agents'}
+          />
+        </div>
+
+        <div className="min-h-0 flex-1">
+          {tab === 'files' ? (
+            <FileTree root={root} onOpenFile={setOpenFile} />
+          ) : tab === 'changes' ? (
+            <ChangesList changes={changes} onOpen={setOpenFile} />
+          ) : (
+            <AgentsList agents={agents} />
+          )}
+        </div>
+      </aside>
+    </>
   );
 }
 

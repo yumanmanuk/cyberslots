@@ -1,29 +1,47 @@
 /**
  * ChatView — conversation stream + composer for the active session.
- * A slim vertical icon rail on the right edge gives one-click access
- * to files / change review / agents / terminal / branch (qoder-style
- * quick entries); the workspace panel opens against it.
+ * Right side hosts one auxiliary panel at a time (workspace files /
+ * sidechat branch / plan preview) plus a collapsible icon rail with
+ * hover-peek flyout (item 3/4/8).
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Bot, FileDiff, FolderTree, GitBranch, PanelRightClose, SquareTerminal } from 'lucide-react';
+import {
+  Bot,
+  FileDiff,
+  FolderTree,
+  MessagesSquare,
+  PanelRightClose,
+  PanelRightOpen,
+  SquareTerminal,
+} from 'lucide-react';
 
-import { useChatStore, type SessionUiState } from '../store/chatStore';
+import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
 import MessageItem from './MessageItem';
 import Composer from './Composer';
 import PermissionSheet from './PermissionSheet';
 import PlanWidget from './PlanWidget';
 import WorkspacePanel, { type PanelTab } from './workspace/WorkspacePanel';
+import SideChatPanel from './SideChatPanel';
+import PlanDocPanel from './PlanDocPanel';
+
+type RightPanel = 'workspace' | 'sidechat' | 'plan' | null;
 
 export default function ChatView({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const creating = useChatStore((s) => s.creating);
-  const forkSession = useChatStore((s) => s.forkSession);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const railCollapsed = useChatStore((s) => s.railCollapsed);
+  const toggleRail = useChatStore((s) => s.toggleRail);
+  const sidechatId = useChatStore((s) => s.sidechats[sessionId]);
+  const planPreviewId = useChatStore((s) => s.planPreview[sessionId]);
+  const openSidechat = useChatStore((s) => s.openSidechat);
+  const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>('files');
+  const [railPeek, setRailPeek] = useState(false);
+  const peekTimer = useRef<ReturnType<typeof setTimeout>>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -36,23 +54,98 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  // Plan 模式产出计划后自动弹出右侧 md 预览（item 8）。
+  useEffect(() => {
+    if (planPreviewId) setRightPanel('plan');
+  }, [planPreviewId]);
+
   const onScroll = (): void => {
     const el = scrollRef.current;
     if (!el) return;
     stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  const openPanel = (tab: PanelTab): void => {
-    if (panelOpen && panelTab === tab) {
-      setPanelOpen(false);
+  const openWorkspaceTab = (tab: PanelTab): void => {
+    if (rightPanel === 'workspace' && panelTab === tab) {
+      setRightPanel(null);
       return;
     }
     setPanelTab(tab);
-    setPanelOpen(true);
+    setRightPanel('workspace');
   };
 
+  const onSidechat = async (): Promise<void> => {
+    if (rightPanel === 'sidechat') {
+      setRightPanel(null);
+      return;
+    }
+    await openSidechat(sessionId);
+    setRightPanel('sidechat');
+  };
+
+  const peekEnter = (): void => {
+    clearTimeout(peekTimer.current);
+    setRailPeek(true);
+  };
+  const peekLeave = (): void => {
+    clearTimeout(peekTimer.current);
+    peekTimer.current = setTimeout(() => setRailPeek(false), 250);
+  };
+
+  const planMsg = planPreviewId
+    ? messages.find((m) => m.id === planPreviewId && m.kind === 'text')
+    : undefined;
+
+  const railButtons = (
+    <>
+      {isWork && (
+        <>
+          <RailButton
+            title={t('railFiles')}
+            active={rightPanel === 'workspace' && panelTab === 'files'}
+            onClick={() => openWorkspaceTab('files')}
+          >
+            <FolderTree size={16} />
+          </RailButton>
+          <RailButton
+            title={t('railChanges')}
+            active={rightPanel === 'workspace' && panelTab === 'changes'}
+            onClick={() => openWorkspaceTab('changes')}
+          >
+            <FileDiff size={16} />
+          </RailButton>
+          <RailButton
+            title={t('railAgents')}
+            active={rightPanel === 'workspace' && panelTab === 'agents'}
+            onClick={() => openWorkspaceTab('agents')}
+          >
+            <Bot size={16} />
+          </RailButton>
+          <div className="my-1 h-px w-5 bg-line" />
+          <RailButton title={t('railTerminal')} onClick={() => void window.cyberslots.openIn('terminal', meta!.cwd)}>
+            <SquareTerminal size={16} />
+          </RailButton>
+        </>
+      )}
+      {meta && (
+        <RailButton
+          title={t('railBranch')}
+          active={rightPanel === 'sidechat'}
+          disabled={creating || meta.status === 'starting'}
+          onClick={() => void onSidechat()}
+        >
+          <MessagesSquare size={16} />
+        </RailButton>
+      )}
+      <div className="flex-1" />
+      <RailButton title={t('collapseRail')} onClick={toggleRail}>
+        <PanelRightClose size={15} />
+      </RailButton>
+    </>
+  );
+
   return (
-    <div className="flex h-full min-w-0">
+    <div className="relative flex h-full min-w-0">
       <div className="flex h-full min-w-0 flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-4">
           <span className="min-w-0 truncate text-sm font-medium">{meta?.title ?? '会话'}</span>
@@ -61,7 +154,6 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           )}
           <div className="flex-1" />
           <Heartbeat sessionId={sessionId} busy={meta?.status === 'running' || meta?.status === 'awaiting'} />
-          <UsageBar ui={ui} />
         </header>
 
         <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
@@ -72,7 +164,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
               </div>
             )}
             {messages.map((m) => (
-              <MessageItem key={m.id} msg={m} />
+              <MessageItem key={m.id} msg={m} sessionId={sessionId} />
             ))}
           </div>
         </div>
@@ -82,59 +174,52 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
         <Composer sessionId={sessionId} />
       </div>
 
-      {isWork && panelOpen && meta && (
+      {/* 右侧辅助面板（一次一个）：工作区 / sidechat / 计划预览 */}
+      {rightPanel === 'workspace' && isWork && meta && (
         <WorkspacePanel sessionId={sessionId} root={meta.cwd} tab={panelTab} onTabChange={setPanelTab} />
       )}
+      {rightPanel === 'sidechat' && sidechatId && (
+        <SideChatPanel sessionId={sidechatId} onClose={() => setRightPanel(null)} />
+      )}
+      {rightPanel === 'plan' && planMsg && planMsg.kind === 'text' && (
+        <PlanDocPanel
+          sessionId={sessionId}
+          text={planMsg.text}
+          onClose={() => {
+            setRightPanel(null);
+            useChatStore.getState().setPlanPreview(sessionId, undefined);
+          }}
+        />
+      )}
 
-      {/* 右侧快捷图标 rail */}
-      <div className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-line bg-bg-panel/60 py-2.5">
-        {isWork && (
-          <>
-            <RailButton
-              title={t('railFiles')}
-              active={panelOpen && panelTab === 'files'}
-              onClick={() => openPanel('files')}
+      {/* 右侧快捷图标 rail — 支持折叠 + 悬停浮出（item 3） */}
+      {!railCollapsed ? (
+        <div className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-line bg-bg-panel/60 py-2.5 transition-all duration-200">
+          {railButtons}
+        </div>
+      ) : (
+        <>
+          {/* 折叠态：右缘悬浮小把手，悬停浮出、点击常驻 */}
+          <div className="absolute right-0 top-14 z-30" onMouseEnter={peekEnter} onMouseLeave={peekLeave}>
+            <button
+              title={t('expandRail')}
+              onClick={toggleRail}
+              className="flex h-8 w-6 items-center justify-center rounded-l-lg border border-r-0 border-line bg-bg-panel text-ink-faint shadow-sm transition hover:text-ink"
             >
-              <FolderTree size={16} />
-            </RailButton>
-            <RailButton
-              title={t('railChanges')}
-              active={panelOpen && panelTab === 'changes'}
-              onClick={() => openPanel('changes')}
-            >
-              <FileDiff size={16} />
-            </RailButton>
-            <RailButton
-              title={t('railAgents')}
-              active={panelOpen && panelTab === 'agents'}
-              onClick={() => openPanel('agents')}
-            >
-              <Bot size={16} />
-            </RailButton>
-            <div className="my-1 h-px w-5 bg-line" />
-            <RailButton title={t('railTerminal')} onClick={() => void window.cyberslots.openIn('terminal', meta!.cwd)}>
-              <SquareTerminal size={16} />
-            </RailButton>
-          </>
-        )}
-        {meta && (
-          <RailButton
-            title={t('railBranch')}
-            disabled={creating || meta.status === 'starting'}
-            onClick={() => void forkSession(sessionId)}
+              <PanelRightOpen size={14} />
+            </button>
+          </div>
+          <div
+            onMouseEnter={peekEnter}
+            onMouseLeave={peekLeave}
+            className={`absolute bottom-0 right-0 top-0 z-20 flex w-11 flex-col items-center gap-1 border-l border-line bg-bg-panel py-2.5 shadow-lg transition-transform duration-200 ease-out ${
+              railPeek ? 'translate-x-0' : 'translate-x-full'
+            }`}
           >
-            <GitBranch size={16} />
-          </RailButton>
-        )}
-        {isWork && panelOpen && (
-          <>
-            <div className="flex-1" />
-            <RailButton title={t('workPanelToggle')} onClick={() => setPanelOpen(false)}>
-              <PanelRightClose size={16} />
-            </RailButton>
-          </>
-        )}
-      </div>
+            {railButtons}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -203,22 +288,5 @@ function RailButton({
     >
       {children}
     </button>
-  );
-}
-
-function UsageBar({ ui }: { ui: SessionUiState | undefined }): JSX.Element | null {
-  const usage = ui?.usage;
-  if (!usage || usage.size <= 0) return null;
-  const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
-  return (
-    <div className="flex items-center gap-2" title={`上下文 ${usage.used.toLocaleString()} / ${usage.size.toLocaleString()} tokens`}>
-      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-bg-active">
-        <div
-          className={`h-full rounded-full ${pct > 85 ? 'bg-err' : pct > 65 ? 'bg-warn' : 'bg-ok'}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="text-[11px] tabular-nums text-ink-faint">{pct}%</span>
-    </div>
   );
 }

@@ -90,7 +90,7 @@ if (!gotLock) {
     const settings = new SettingsStore();
     proxy = new AiServerHost();
     sessions = new SessionManager(settings, proxy);
-    cron = new CronService(sessions);
+    cron = new CronService(sessions, settings);
     registerIpc(sessions, settings, cron);
     cron.start();
     createWindow(settings.get().theme);

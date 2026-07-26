@@ -11,6 +11,7 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   CircleSlash,
   FileText,
   GripVertical,
@@ -29,15 +30,21 @@ import {
 
 import type { EngineId, PermissionMode } from '@shared/types';
 import { useChatStore, type QueuedMessage } from '../store/chatStore';
-import { useT } from '../i18n';
+import { useT, type MsgKey } from '../i18n';
 
-const PERM_LABELS: Record<string, string> = {
-  default: '手动审批',
-  auto: '全自动',
-  yolo: 'YOLO',
+const PERM_LABEL_KEYS: Record<string, MsgKey> = {
+  default: 'permManual',
+  auto: 'permAuto',
+  yolo: 'permYolo',
 };
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+const EFFORT_LABEL_KEYS: Record<string, MsgKey> = {
+  low: 'effortLow',
+  medium: 'effortMedium',
+  high: 'effortHigh',
+  xhigh: 'effortXhigh',
+};
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
@@ -52,19 +59,28 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const [ctxFullOpen, setCtxFullOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const goalActive = useChatStore((s) => !!s.goals[sessionId]);
+  const sendKey = useChatStore((s) => s.settings?.sendKey ?? 'enter');
   const sendPrompt = useChatStore((s) => s.sendPrompt);
   const cancel = useChatStore((s) => s.cancel);
 
   const busy = meta?.status === 'running' || meta?.status === 'awaiting';
   const isPlan = ui?.modes.current === 'plan';
+  const usage = ui?.usage;
+  const ctxFull = !!usage && usage.size > 0 && usage.used / usage.size >= 1;
 
-  const send = (): void => {
+  const send = (opts?: { force?: boolean }): void => {
     const value = text.trim();
     if (!value && attachments.length === 0) return;
+    // 上下文 100%：先弹确认弹窗要求压缩，避免静默丢失早期内容。
+    if (ctxFull && !opts?.force && !busy) {
+      setCtxFullOpen(true);
+      return;
+    }
     const paths = attachments.length ? attachments.map((a) => a.path) : undefined;
     setText('');
     setAttachments([]);
@@ -100,7 +116,16 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       cycleMode();
       return;
     }
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    // 发送键可配：Enter 发送（Shift+Enter 换行） / Ctrl+Enter 发送（Enter 换行）
+    if (sendKey === 'ctrl-enter') {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        send();
+      }
+      return;
+    }
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       send();
     }
@@ -162,7 +187,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           rows={Math.min(8, Math.max(1, text.split('\n').length))}
-          placeholder={busy ? t('inputBusy') : t('inputPlaceholder')}
+          placeholder={busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
           className="w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
         />
 
@@ -209,7 +234,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             <div className="flex items-center gap-1.5">
               {(text.trim() || attachments.length > 0) && (
                 <button
-                  onClick={send}
+                  onClick={() => send()}
                   title={t('enqueue')}
                   className="flex h-8 w-8 items-center justify-center rounded-full border border-accent/40 bg-accent-soft text-accent transition hover:opacity-85"
                 >
@@ -226,7 +251,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           ) : (
             <button
-              onClick={send}
+              onClick={() => send()}
               disabled={!text.trim() && attachments.length === 0}
               title={t('send')}
               className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90 disabled:opacity-30"
@@ -247,6 +272,20 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             send();
           }}
           onClose={() => setExpanded(false)}
+        />
+      )}
+
+      {ctxFullOpen && (
+        <CtxFullDialog
+          onCompact={() => {
+            setCtxFullOpen(false);
+            void useChatStore.getState().compactSession();
+          }}
+          onSendAnyway={() => {
+            setCtxFullOpen(false);
+            send({ force: true });
+          }}
+          onClose={() => setCtxFullOpen(false)}
         />
       )}
     </div>
@@ -410,11 +449,13 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
 }
 
 function PermissionPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
+  const t = useT();
   const ui = useChatStore((s) => s.ui[sessionId]);
   const setMode = useChatStore((s) => s.setMode);
   const [open, setOpen] = useState(false);
   const current = ui?.modes.current ?? 'default';
   const options: PermissionMode[] = ['default', 'auto', 'yolo'];
+  const label = (m: string): string => (PERM_LABEL_KEYS[m] ? t(PERM_LABEL_KEYS[m]!) : m);
 
   return (
     <div className="relative">
@@ -422,7 +463,7 @@ function PermissionPicker({ sessionId }: { sessionId: string }): JSX.Element | n
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
-        {PERM_LABELS[current] ?? current}
+        {label(current)}
         <ChevronDown size={11} />
       </button>
       {open && (
@@ -436,7 +477,7 @@ function PermissionPicker({ sessionId }: { sessionId: string }): JSX.Element | n
                 void setMode(m);
               }}
             >
-              {PERM_LABELS[m]}
+              {label(m)}
             </DropdownItem>
           ))}
         </Dropdown>
@@ -499,10 +540,20 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   );
 }
 
+/** 思考深度 — codex 桌面版同款滑条交互：弹层里一条 4 档滑轨，
+ *  拖动/点击档位即选，标题行实时显示当前档位名。 */
 function EffortPicker({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   const effort = useChatStore((s) => s.efforts[sessionId] ?? 'medium');
   const [open, setOpen] = useState(false);
+  const idx = Math.max(0, EFFORTS.indexOf(effort));
+  const label = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
+
+  const select = (i: number): void => {
+    const value = EFFORTS[Math.max(0, Math.min(EFFORTS.length - 1, i))]!;
+    useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+  };
+
   return (
     <div className="relative">
       <button
@@ -510,25 +561,72 @@ function EffortPicker({ sessionId }: { sessionId: string }): JSX.Element {
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
-        {effort}
+        {label(effort)}
         <ChevronDown size={11} />
       </button>
       {open && (
-        <Dropdown onClose={() => setOpen(false)} align="right">
-          {EFFORTS.map((e) => (
-            <DropdownItem
-              key={e}
-              active={e === effort}
-              onClick={() => {
-                setOpen(false);
-                useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: e } }));
-              }}
-            >
-              {e}
-            </DropdownItem>
-          ))}
-        </Dropdown>
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-9 right-0 z-20 w-56 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-ui font-medium">{label(effort)}</span>
+              <ChevronRight size={12} className="text-ink-faint" />
+            </div>
+            <EffortSlider index={idx} count={EFFORTS.length} onSelect={select} />
+            <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
+              <span>{label('low')}</span>
+              <span>{label('xhigh')}</span>
+            </div>
+          </div>
+        </>
       )}
+    </div>
+  );
+}
+
+/** 4-stop slider: filled accent track up to the thumb, dots on the rest. */
+function EffortSlider({ index, count, onSelect }: { index: number; count: number; onSelect: (i: number) => void }): JSX.Element {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const pick = (clientX: number): void => {
+    const el = trackRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const ratio = (clientX - rect.left) / rect.width;
+    onSelect(Math.round(ratio * (count - 1)));
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+        pick(e.clientX);
+      }}
+      onPointerMove={(e) => dragging.current && pick(e.clientX)}
+      onPointerUp={() => (dragging.current = false)}
+      className="relative h-5 cursor-pointer touch-none select-none"
+    >
+      <div className="absolute left-0 right-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-bg-active" />
+      <div
+        className="absolute left-0 top-1/2 h-2.5 -translate-y-1/2 rounded-full bg-accent transition-all duration-150"
+        style={{ width: `calc(${(index / (count - 1)) * 100}% + ${index === 0 ? 10 : 0}px)`, minWidth: 18 }}
+      />
+      {Array.from({ length: count }).map((_, i) => (
+        <span
+          key={i}
+          className={`absolute top-1/2 h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full transition ${
+            i <= index ? 'bg-white/70' : 'bg-ink-faint/40'
+          }`}
+          style={{ left: `${(i / (count - 1)) * 92 + 4}%` }}
+        />
+      ))}
+      <span
+        className="absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border border-line bg-white shadow-md transition-all duration-150"
+        style={{ left: `${(index / (count - 1)) * 100}%` }}
+      />
     </div>
   );
 }
@@ -546,6 +644,7 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
   const R = 6.5;
   const CIRC = 2 * Math.PI * R;
   const color = pct > 0.85 ? 'var(--err)' : pct > 0.65 ? 'var(--warn)' : 'var(--ink-faint)';
+  const barColor = pct > 0.85 ? 'bg-err' : pct > 0.65 ? 'bg-warn' : 'bg-accent';
 
   return (
     <div className="relative">
@@ -572,14 +671,34 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-9 right-0 z-20 w-60 rounded-xl border border-line bg-bg-input p-3.5 shadow-lg">
-            <div className="mb-1 text-ui font-medium">
-              {t('context')} {Math.round(pct * 100)}%
+          <div className="absolute bottom-9 right-0 z-20 w-72 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
+            {/* 标题行：占用百分比大字 + 状态色点 */}
+            <div className="mb-3 flex items-baseline justify-between">
+              <span className="text-ui font-semibold">{t('ctxTitle')}</span>
+              <span className={`text-lg font-semibold tabular-nums ${pct > 0.85 ? 'text-err' : pct > 0.65 ? 'text-warn' : 'text-ink'}`}>
+                {Math.round(pct * 100)}%
+              </span>
             </div>
-            <div className="mb-2.5 font-mono text-[11px] text-ink-faint">
-              {usage.used.toLocaleString()} / {usage.size.toLocaleString()} tokens
+            {/* 分段进度条 */}
+            <div className="mb-3 h-2 overflow-hidden rounded-full bg-bg-active">
+              <div className={`h-full rounded-full ${barColor} transition-all duration-300`} style={{ width: `${pct * 100}%` }} />
             </div>
-            <div className="mb-3 text-[11.5px] leading-5 text-ink-soft">{t('compactConfirm')}</div>
+            {/* 明细三行 */}
+            <div className="mb-3 space-y-1.5 text-[11.5px]">
+              <div className="flex justify-between">
+                <span className="text-ink-faint">{t('ctxUsed')}</span>
+                <span className="font-mono tabular-nums text-ink">{fmtTokens(usage.used)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-faint">{t('ctxFree')}</span>
+                <span className="font-mono tabular-nums text-ink">{fmtTokens(Math.max(0, usage.size - usage.used))}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-ink-faint">{t('ctxWindow')}</span>
+                <span className="font-mono tabular-nums text-ink">{fmtTokens(usage.size)}</span>
+              </div>
+            </div>
+            <div className="mb-3 rounded-lg bg-bg-panel px-3 py-2 text-[11px] leading-5 text-ink-soft">{t('compactConfirm')}</div>
             <button
               onClick={() => {
                 setOpen(false);
@@ -594,6 +713,46 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
       )}
     </div>
   );
+}
+
+/** 上下文已满 — 发送前强制确认：先压缩 / 执意发送 / 取消。 */
+function CtxFullDialog({
+  onCompact,
+  onSendAnyway,
+  onClose,
+}: {
+  onCompact: () => void;
+  onSendAnyway: () => void;
+  onClose: () => void;
+}): JSX.Element {
+  const t = useT();
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-[420px] rounded-2xl border border-line bg-bg p-5 shadow-2xl">
+        <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <CircleAlert size={16} className="text-err" />
+          {t('ctxFullTitle')}
+        </div>
+        <p className="mb-4 text-ui leading-6 text-ink-soft">{t('ctxFullBody')}</p>
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="rounded-lg border border-line px-3.5 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover">
+            {t('cancel')}
+          </button>
+          <button onClick={onSendAnyway} className="rounded-lg border border-line px-3.5 py-1.5 text-ui text-ink-soft transition hover:border-warn/60 hover:text-warn">
+            {t('ctxSendAnyway')}
+          </button>
+          <button onClick={onCompact} className="rounded-lg bg-accent px-4 py-1.5 text-ui font-medium text-white transition hover:opacity-90">
+            {t('ctxCompactNow')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k`;
+  return String(n);
 }
 
 // ------------------------------------------------------------------ goal

@@ -202,3 +202,92 @@ body {
     transform: translateY(0);
   }
 }
+
+/* ============ highlight.js — theme-aware token colors ============
+   亮色主题取类 GitHub Light 色盘，深色主题取类 Flexoki 色盘；
+   背景交给容器，.hljs 只管 token 颜色。 */
+.hljs {
+  color: var(--ink);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta .hljs-keyword,
+.hljs-doctag,
+.hljs-section {
+  color: #a626a4;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: #2e9e63;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-type,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link {
+  color: #b76b01;
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #2f6feb;
+}
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-built_in {
+  color: #c5493f;
+}
+.hljs-deletion {
+  color: var(--err);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+[data-theme='dark'] .hljs-keyword,
+[data-theme='dark'] .hljs-selector-tag,
+[data-theme='dark'] .hljs-doctag,
+[data-theme='dark'] .hljs-section {
+  color: #c586c0;
+}
+[data-theme='dark'] .hljs-string,
+[data-theme='dark'] .hljs-regexp,
+[data-theme='dark'] .hljs-addition,
+[data-theme='dark'] .hljs-attribute {
+  color: #87a987;
+}
+[data-theme='dark'] .hljs-number,
+[data-theme='dark'] .hljs-literal,
+[data-theme='dark'] .hljs-type,
+[data-theme='dark'] .hljs-symbol {
+  color: #d0a215;
+}
+[data-theme='dark'] .hljs-title,
+[data-theme='dark'] .hljs-title.class_,
+[data-theme='dark'] .hljs-title.function_,
+[data-theme='dark'] .hljs-name {
+  color: #66b3ff;
+}
+[data-theme='dark'] .hljs-attr,
+[data-theme='dark'] .hljs-variable,
+[data-theme='dark'] .hljs-built_in {
+  color: #d1837a;
+}

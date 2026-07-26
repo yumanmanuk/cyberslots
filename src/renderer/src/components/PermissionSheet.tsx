@@ -16,7 +16,12 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
   // Select the stable messages reference; derive with useMemo. Returning a
   // fresh array from the selector would loop useSyncExternalStore forever.
   const messages = useChatStore((s) => s.ui[sessionId]?.messages);
-  const answerPermission = useChatStore((s) => s.answerPermission);
+  // 必须用自己的 sessionId 应答 — store.answerPermission 只看
+  // activeSessionId，在 sidechat 面板里会把答复发给主会话，
+  // 导致分支授权永远无响应（e2e 实测死锁根因）。
+  const answer = (requestId: string, optionId?: string): void => {
+    void window.cyberslots.sessionAnswerPermission({ sessionId, requestId, optionId });
+  };
   const pending = useMemo(
     () =>
       (messages ?? []).filter(
@@ -50,7 +55,7 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
             return (
               <button
                 key={o.optionId}
-                onClick={() => void answerPermission(current.requestId, o.optionId)}
+                onClick={() => answer(current.requestId, o.optionId)}
                 className={`rounded-lg border px-3.5 py-1.5 text-ui font-medium transition ${
                   rejecting
                     ? 'border-line text-ink-soft hover:border-err/60 hover:text-err'

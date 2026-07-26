@@ -14,8 +14,8 @@ import WorkspaceDialog from './WorkspaceDialog';
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
 const ENGINES: Array<{ id: EngineId; label: string; hint: string }> = [
-  { id: 'kimi', label: 'Kimi Code', hint: '主引擎 · ACP · swarm/goal 原生' },
-  { id: 'codex', label: 'Codex', hint: '副引擎 · app-server · 经内置代理路由' },
+  { id: 'kimi', label: 'Kimi Code', hint: '主引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）' },
+  { id: 'codex', label: 'Codex', hint: '副引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）' },
 ];
 
 export default function NewSessionView(): JSX.Element {

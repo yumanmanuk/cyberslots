@@ -12,6 +12,7 @@ import { join } from 'node:path';
 
 import type { CronTask } from '@shared/types';
 import type { SessionManager } from '../engine/SessionManager';
+import type { SettingsStore } from '../config/settings';
 import { cronMatches, validateCron } from './cronMatch';
 
 const TICK_MS = 20_000;
@@ -23,7 +24,10 @@ export class CronService {
   private lastMinuteKey = '';
   private readonly running = new Set<string>();
 
-  constructor(private readonly sessions: SessionManager) {
+  constructor(
+    private readonly sessions: SessionManager,
+    private readonly settings: SettingsStore,
+  ) {
     this.load();
   }
 
@@ -97,10 +101,14 @@ export class CronService {
       this.sessions.announceUser(meta.id, task.prompt);
       await this.sessions.prompt(meta.id, task.prompt);
       task.lastResult = 'ok';
-      this.notify(`定时任务完成：${task.name}`, '结果已写入会话，可在侧栏查看。');
+      if (this.settings.get().notifications.taskComplete) {
+        this.notify(`定时任务完成：${task.name}`, '结果已写入会话，可在侧栏查看。');
+      }
     } catch (err) {
       task.lastResult = 'error';
-      this.notify(`定时任务失败：${task.name}`, err instanceof Error ? err.message : String(err));
+      if (this.settings.get().notifications.error) {
+        this.notify(`定时任务失败：${task.name}`, err instanceof Error ? err.message : String(err));
+      }
     } finally {
       task.lastRunAt = Date.now();
       this.running.delete(task.id);
