@@ -4,7 +4,8 @@
  */
 
 import { app, BrowserWindow, shell } from 'electron';
-import { join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 import { SettingsStore } from './config/settings';
 import { SessionManager } from './engine/SessionManager';
@@ -13,6 +14,18 @@ import { AiServerHost } from './proxy/AiServerHost';
 import { registerIpc } from './ipc';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
+
+// 绿色版约定：打包后全部数据落在 exe 同级 ./data，解压即用、删目录即卸载。
+// 必须在 app ready 之前设置（否则 userData 已被锁定到 %APPDATA%）。
+if (app.isPackaged) {
+  const portableData = join(dirname(process.execPath), 'data');
+  try {
+    mkdirSync(portableData, { recursive: true });
+    app.setPath('userData', portableData);
+  } catch (err) {
+    console.error('[main] portable data dir unavailable, falling back to default userData:', err);
+  }
+}
 
 let mainWindow: BrowserWindow | undefined;
 let sessions: SessionManager | undefined;

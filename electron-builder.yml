@@ -1,0 +1,23 @@
+# electron-builder — CyberSlots 免安装绿色版（zip 主推）
+# 数据目录：打包版运行时重定向到 exe 同级 ./data（见 src/main/index.ts）
+appId: com.yumanmanuk.cyberslots
+productName: CyberSlots
+directories:
+  output: dist
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: resources/ai-server
+    to: ai-server
+win:
+  target:
+    - target: zip
+      arch: [x64]
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  # 跳过 rcedit/signtool（需要 winCodeSign 缓存，在无管理员/非开发者模式下
+  # 解压 symlink 会失败）；免安装包不签名，图标后期再补
+  signAndEditExecutable: false
+# 免安装分发不签名；杀软误报属已知问题（代码签名列为后期项）
+forceCodeSigning: false
+npmRebuild: false
