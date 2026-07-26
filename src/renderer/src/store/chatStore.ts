@@ -597,9 +597,11 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       mutateUi(set, sessionId, (ui) => {
         let messages = foldMessage(ui.messages, event);
         // Plan 模式下的正文流标记为计划文档 — 主流只渲染缩略卡片。
+        // 仅对“像文档”的文本生效：模型偶尔把工具调用 JSON 当正文吐
+        // （e2e 实测），那类内容不该包成计划卡。
         if (event.type === 'text.delta' && ui.modes.current === 'plan') {
           const last = messages[messages.length - 1];
-          if (last && last.kind === 'text' && !last.planDoc) {
+          if (last && last.kind === 'text' && !last.planDoc && looksLikePlanDoc(last.text)) {
             messages = [...messages.slice(0, -1), { ...last, planDoc: true }];
           }
         }
@@ -607,6 +609,14 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       });
       schedulePersist(get, sessionId);
   }
+}
+
+/** 计划文档启发式判定：markdown 标题/列表等结构特征，且不是裸 JSON。 */
+function looksLikePlanDoc(text: string): boolean {
+  const t = text.trimStart();
+  if (!t) return false;
+  if (t.startsWith('{') || t.startsWith('[')) return false; // 裸 JSON/工具调用回显
+  return /^#{1,4}\s/m.test(t) || /^([-*]|\d+\.)\s/m.test(t) || t.length > 300;
 }
 
 /** Pure fold of one message-affecting event into the message list. */

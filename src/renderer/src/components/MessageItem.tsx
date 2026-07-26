@@ -97,6 +97,7 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   const [copied, setCopied] = useState(false);
   const u = msg.usage;
   const parts: string[] = [];
+  const tilde = u?.approx ? '~' : '';
 
   if (u?.inputTokens != null && u.inputTokens > 0) {
     const cachePct =
@@ -107,9 +108,9 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   } else if (u?.contextUsed != null && u.contextUsed > 0) {
     parts.push(`↑ ${fmtK(u.contextUsed)}`);
   }
-  if (u?.outputTokens != null && u.outputTokens > 0) parts.push(`↓ ${fmtK(u.outputTokens)}`);
+  if (u?.outputTokens != null && u.outputTokens > 0) parts.push(`↓ ${tilde}${fmtK(u.outputTokens)}`);
   if (u?.outputTokens && msg.durationMs && msg.durationMs > 500) {
-    parts.push(`${(u.outputTokens / (msg.durationMs / 1000)).toFixed(1)} t/s`);
+    parts.push(`${tilde}${(u.outputTokens / (msg.durationMs / 1000)).toFixed(1)} t/s`);
   }
   if (msg.durationMs) parts.push(fmtDuration(msg.durationMs));
   if (msg.stopReason === 'cancelled') parts.unshift('已停止');

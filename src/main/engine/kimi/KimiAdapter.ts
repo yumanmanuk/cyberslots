@@ -30,6 +30,7 @@ import type {
   PlanEntry,
   ToolCallContent,
   ToolCallStatus,
+  UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { ThinkSplitter } from '../thinkSplitter';
@@ -67,6 +68,9 @@ export class KimiAdapter implements EngineAdapter {
   private promptActive = false;
   /** Latest usage_update snapshot — folded into turn.ended stats. */
   private lastUsage: { used: number; size: number } | undefined;
+  /** 本回合流出的正文字符数 — kimi ACP 实测不推 usage_update
+   *  （scripts/probe-usage.mjs），下行 token 只能估算（UI 带 ~）。 */
+  private turnOutputChars = 0;
   private readonly splitter = new ThinkSplitter();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly stderrTail: string[] = [];
@@ -193,6 +197,7 @@ export class KimiAdapter implements EngineAdapter {
     const turnId = ++this.turnId;
     this.splitter.reset();
     this.promptActive = true;
+    this.turnOutputChars = 0;
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
     const started = Date.now();
@@ -208,13 +213,15 @@ export class KimiAdapter implements EngineAdapter {
       for (const part of this.splitter.flush()) {
         this.emit({ type: part.kind === 'thinking' ? 'thinking.delta' : 'text.delta', turnId, text: part.text });
       }
+      // 真实 usage 优先；没有就给字符数估算的下行 token（approx 标记）。
+      const usage: UsageInfo = this.lastUsage
+        ? { contextUsed: this.lastUsage.used, contextMax: this.lastUsage.size || undefined }
+        : { outputTokens: estimateTokens(this.turnOutputChars), approx: true };
       this.emit({
         type: 'turn.ended',
         turnId,
         stopReason: res.stopReason,
-        usage: this.lastUsage
-          ? { contextUsed: this.lastUsage.used, contextMax: this.lastUsage.size || undefined }
-          : undefined,
+        usage,
         durationMs: Date.now() - started,
       });
     } catch (err) {
@@ -313,6 +320,7 @@ export class KimiAdapter implements EngineAdapter {
       case 'agent_message_chunk': {
         const text = contentText(u);
         if (!text) return;
+        this.turnOutputChars += text.length;
         for (const part of this.splitter.push(text)) {
           this.emit({ type: part.kind === 'thinking' ? 'thinking.delta' : 'text.delta', turnId, text: part.text });
         }
@@ -492,6 +500,12 @@ function errorMessage(err: unknown): string {
 function pathToFileUri(p: string): string {
   const normalized = p.replace(/\\/g, '/');
   return normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`;
+}
+
+/** 粗粒度 token 估算：混合中英文按 ≈ 1 token / 1.7 字符。只用于
+ *  无真实 usage 时的展示兜底，UI 会带 ~ 标注。 */
+function estimateTokens(chars: number): number {
+  return Math.max(1, Math.round(chars / 1.7));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, tag: string): Promise<T> {

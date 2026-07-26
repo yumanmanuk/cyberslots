@@ -138,6 +138,8 @@ export interface UsageInfo {
   cachedInputTokens?: number;
   contextUsed?: number;
   contextMax?: number;
+  /** 字符数估算值（kimi ACP 不推 usage 时的兜底），UI 带 ~ 标注。 */
+  approx?: boolean;
 }
 
 /** Engine-native goal snapshot (codex thread/goal; kimi ACP has no goal surface). */

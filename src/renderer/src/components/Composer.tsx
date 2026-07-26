@@ -54,6 +54,18 @@ interface Attachment {
   isImage: boolean;
 }
 
+/** Escape 关闭裸弹层（非 Dropdown 封装的 popover 用）。 */
+function useEscClose(open: boolean, onClose: () => void): void {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+}
+
 export default function Composer({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   const [text, setText] = useState('');
@@ -546,6 +558,7 @@ function EffortPicker({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   const effort = useChatStore((s) => s.efforts[sessionId] ?? 'medium');
   const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
   const idx = Math.max(0, EFFORTS.indexOf(effort));
   const label = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
 
@@ -638,6 +651,7 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
   const usage = useChatStore((s) => s.ui[sessionId]?.usage);
   const compactSession = useChatStore((s) => s.compactSession);
   const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
   if (!usage || usage.size <= 0) return null;
 
   const pct = Math.min(1, usage.used / usage.size);
@@ -726,6 +740,7 @@ function CtxFullDialog({
   onClose: () => void;
 }): JSX.Element {
   const t = useT();
+  useEscClose(true, onClose);
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30" onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} className="w-[420px] rounded-2xl border border-line bg-bg p-5 shadow-2xl">
