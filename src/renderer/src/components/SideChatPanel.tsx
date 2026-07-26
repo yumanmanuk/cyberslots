@@ -61,8 +61,8 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
   };
 
   return (
-    <aside className="flex w-[380px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
-      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+    <aside className="flex w-[380px] shrink-0 flex-col bg-bg-panel/50">
+      <div className="flex shrink-0 items-center gap-2 px-3 pb-1.5 pt-2.5">
         <MessagesSquare size={14} className="shrink-0 text-accent" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-ui font-medium">{t('sidechatTitle')}</div>
@@ -91,7 +91,7 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
       <PermissionSheet sessionId={sessionId} />
 
       {/* mini composer：模型 + 思考深度 + 发送/停止 */}
-      <div className="shrink-0 border-t border-line p-2.5">
+      <div className="shrink-0 p-2.5">
         <div className="rounded-xl border border-line bg-bg-input transition focus-within:border-ink-faint">
           <textarea
             value={text}

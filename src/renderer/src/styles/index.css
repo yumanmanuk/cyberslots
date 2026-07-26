@@ -9,6 +9,7 @@
 
 :root,
 [data-theme='notion'] {
+  --bg-canvas: #f7f6f3; /* 窗口画布（标题栏+侧栏），主内容浮层浮在其上 */
   --bg: #fffcf0;
   --bg-panel: #f7f6f3;
   --bg-hover: #f1efe9;
@@ -26,6 +27,7 @@
 }
 
 [data-theme='light'] {
+  --bg-canvas: #f2f2f4;
   --bg: #ffffff;
   --bg-panel: #f7f7f8;
   --bg-hover: #f0f0f1;
@@ -43,15 +45,17 @@
 }
 
 [data-theme='dark'] {
-  --bg: #100f0f;
-  --bg-panel: #1c1b1a;
-  --bg-hover: #262523;
-  --bg-active: #302e2b;
-  --bg-input: #1c1b1a;
+  /* codex 桌面版明暗关系：画布最暗 → 内容浮层稍亮 → 卡片再亮一级 */
+  --bg-canvas: #0f0e0e;
+  --bg: #1a1918;
+  --bg-panel: #242220;
+  --bg-hover: #2c2a27;
+  --bg-active: #363330;
+  --bg-input: #211f1e;
   --ink: #cecdc3;
   --ink-soft: #928f85;
   --ink-faint: #6f6c64;
-  --line: #302e2b;
+  --line: #34312e;
   --accent: #d0a215;
   --accent-soft: #33301f;
   --ok: #66a06b;
@@ -96,6 +100,18 @@ body {
 }
 *::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* 静默滚动条 — 侧栏等画布区域用：平时隐形，悬停容器才浮现，
+   避免常驻滑块贴着浮层边缘像一条假分隔线 */
+.scroll-quiet::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll-quiet::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+.scroll-quiet:hover::-webkit-scrollbar-thumb {
+  background: var(--line);
 }
 
 /* Markdown body (chat stream) */

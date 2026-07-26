@@ -41,13 +41,13 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
     <>
       {/* 文件预览 — 独立小面板，开在文件树左侧，树保持可见（item 9） */}
       {openFile && (
-        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg">
+        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col bg-bg-panel/30">
           <FilePreview path={openFile} root={root} onClose={() => setOpenFile(null)} />
         </aside>
       )}
 
-      <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
-        <div className="flex shrink-0 items-center gap-1 border-b border-line px-2 py-1.5">
+      <aside className="flex w-[300px] shrink-0 flex-col bg-bg-panel/60">
+        <div className="flex shrink-0 items-center gap-1 px-2 py-2">
           <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
           <TabButton
             active={tab === 'changes'}
@@ -162,14 +162,14 @@ function ChangesList({ changes, onOpen }: { changes: ChangeEntry[]; onOpen: (pat
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] hover:bg-bg-hover"
           >
             <span className="min-w-0 flex-1 truncate">{c.name}</span>
-            {c.count > 1 && <span className="rounded bg-bg-active px-1 text-[10px] text-ink-faint">×{c.count}</span>}
+            {c.count > 1 && <span className="rounded-md bg-bg-active px-1 text-[10px] text-ink-faint">×{c.count}</span>}
             {c.adds + c.dels > 0 ? (
               <>
                 <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
                 <span className="font-mono text-[11px] text-err">-{c.dels}</span>
               </>
             ) : (
-              <span className="rounded bg-warn/10 px-1 text-[10px] text-warn">已写入</span>
+              <span className="rounded-md bg-warn/10 px-1 text-[10px] text-warn">已写入</span>
             )}
           </button>
         ))}
@@ -236,7 +236,7 @@ function AgentsList({ agents }: { agents: AgentEntry[] }): JSX.Element {
             )}
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{a.title}</span>
             <span
-              className={`rounded px-1.5 py-0.5 text-[10px] ${
+              className={`rounded-md px-1.5 py-0.5 text-[10px] ${
                 a.status === 'failed'
                   ? 'bg-err/10 text-err'
                   : a.status === 'completed'

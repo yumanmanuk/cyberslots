@@ -393,7 +393,7 @@ function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove: () => vo
     >
       {att.isImage ? <ImageIcon size={12} /> : <FileText size={12} />}
       <span className="max-w-44 truncate">{att.name}</span>
-      <button onClick={onRemove} className="rounded-sm transition hover:opacity-70">
+      <button onClick={onRemove} className="rounded-md transition hover:opacity-70">
         <X size={11} />
       </button>
     </span>

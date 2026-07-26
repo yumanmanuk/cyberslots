@@ -58,7 +58,11 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   };
 
   return (
-    <aside className={`flex w-64 shrink-0 flex-col border-r border-line bg-bg-panel ${overlay ? 'h-full' : ''}`}>
+    <aside
+      className={`flex w-64 shrink-0 flex-col ${
+        overlay ? 'h-full rounded-r-2xl bg-bg-canvas' : 'bg-transparent'
+      }`}
+    >
       {/* 新会话 + 小节工具条 */}
       <div className="flex items-center gap-1.5 px-3 pb-1 pt-3">
         <button
@@ -83,7 +87,7 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
       </div>
 
       {/* 分组滚动区 */}
-      <nav className="flex-1 overflow-y-auto px-2 pb-2">
+      <nav className="scroll-quiet flex-1 overflow-y-auto px-2 pb-2">
         <GroupHeader label={t('workspaces')} addTitle={t('newWorkspace')} onAdd={() => setWsDialog({ open: true, editing: null })} />
         {groups.workspaces.length === 0 && <EmptyHint />}
         {groups.workspaces.map(({ workspace, sessions: list }) => (
@@ -110,8 +114,8 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
         ))}
       </nav>
 
-      {/* 左下角功能入口区 */}
-      <div className="border-t border-line px-2 pb-2 pt-2">
+      {/* 左下角功能入口区 — 靠留白分隔，不用分隔线 */}
+      <div className="px-2 pb-2 pt-2">
         <button
           onClick={() => useChatStore.setState({ cronOpen: true })}
           className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink"

@@ -49,9 +49,9 @@ export default function SettingsView(): JSX.Element | null {
   };
 
   return (
-    <div className="absolute inset-0 z-30 flex bg-bg">
-      {/* 分类导航 */}
-      <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-bg-panel px-3 pb-4 pt-3">
+    <div className="absolute inset-0 z-30 flex bg-bg-canvas">
+      {/* 分类导航 — 与画布同色融合 */}
+      <aside className="flex w-56 shrink-0 flex-col px-3 pb-4 pt-3">
         <button onClick={close} className="mb-3 flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink">
           <ArrowLeft size={15} /> {t('back')}
         </button>
@@ -68,8 +68,8 @@ export default function SettingsView(): JSX.Element | null {
         ))}
       </aside>
 
-      {/* 内容区 */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      {/* 内容区 — 与主界面同款左上大圆角浮层 */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[20px] bg-bg shadow-sm">
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-2xl px-8 py-8">
             <h1 className="mb-6 text-xl font-semibold">{t(CATEGORIES.find((c) => c.id === category)!.key)}</h1>
@@ -79,7 +79,7 @@ export default function SettingsView(): JSX.Element | null {
             {category === 'about' && <AboutPane />}
           </div>
         </div>
-        <div className="flex shrink-0 items-center justify-end gap-3 border-t border-line px-8 py-3">
+        <div className="flex shrink-0 items-center justify-end gap-3 px-8 py-3">
           {saved && <span className="text-ui text-ok">{t('saved')}</span>}
           <button onClick={() => void save()} className="rounded-lg bg-accent px-5 py-1.5 text-ui font-medium text-white transition hover:opacity-90">
             {t('save')}
@@ -256,8 +256,8 @@ function CodexConfigCard({
               <div key={p.id} className="rounded-lg border border-line bg-bg-input px-3 py-2">
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{p.name ?? p.id}</span>
-                  <span className="rounded bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.wireApi}</span>
-                  <span className={`rounded px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+                  <span className="rounded-md bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.wireApi}</span>
+                  <span className={`rounded-md px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
                     {p.hasKey ? t('cfgKeySet') : `${t('cfgKeyMissing')}${p.envKey ? ` (${p.envKey})` : ''}`}
                   </span>
                 </div>
@@ -298,8 +298,8 @@ function KimiConfigCard({
             <div key={p.id} className="rounded-lg border border-line bg-bg-input px-3 py-2">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{p.id}</span>
-                <span className="rounded bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.type}</span>
-                <span className={`rounded px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+                <span className="rounded-md bg-bg-panel px-1.5 text-[10px] text-ink-faint">{p.type}</span>
+                <span className={`rounded-md px-1.5 text-[10px] ${p.hasKey ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
                   {p.hasKey ? t('cfgKeySet') : t('cfgKeyMissing')}
                 </span>
               </div>

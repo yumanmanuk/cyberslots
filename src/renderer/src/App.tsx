@@ -35,9 +35,9 @@ export default function App(): JSX.Element {
   };
 
   return (
-    <div data-theme={theme} className="flex h-full flex-col bg-bg text-ink">
-      {/* 40px 拖拽标题条 — 与原生 titleBarOverlay 等高，随主题换色 */}
-      <header className="drag flex h-10 shrink-0 items-center border-b border-line bg-bg-panel px-4">
+    <div data-theme={theme} className="flex h-full flex-col bg-bg-canvas text-ink">
+      {/* 40px 拖拽标题条 — 与侧栏同色融合（codex 桌面版风），无分隔线 */}
+      <header className="drag flex h-10 shrink-0 items-center px-4">
         <span className="text-[12px] font-semibold tracking-wide text-ink-soft">{t('appName')}</span>
       </header>
 
@@ -54,7 +54,7 @@ export default function App(): JSX.Element {
                   setPeek(false);
                   toggleSidebar();
                 }}
-                className="flex h-8 w-6 items-center justify-center rounded-r-lg border border-l-0 border-line bg-bg-panel text-ink-faint shadow-sm transition hover:text-ink"
+                className="flex h-8 w-6 items-center justify-center rounded-r-lg bg-bg-canvas text-ink-faint shadow-sm transition hover:text-ink"
               >
                 <PanelLeftOpen size={14} />
               </button>
@@ -72,7 +72,8 @@ export default function App(): JSX.Element {
           </>
         )}
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        {/* 主内容「浮层」— 左上大圆角，靠色块与画布分层，不用分隔线 */}
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[20px] bg-bg shadow-sm">
           <ErrorBoundary>
             {activeSessionId ? <ChatView key={activeSessionId} sessionId={activeSessionId} /> : <NewSessionView />}
           </ErrorBoundary>

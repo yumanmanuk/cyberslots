@@ -44,7 +44,7 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
           <div className="min-w-0 flex-1">
             <div className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">
               {isQuestion ? '模型提问' : '请求授权'}
-              {pending.length > 1 && <span className="ml-1.5 rounded bg-bg-active px-1.5 text-[10px]">{pending.length} 项等待</span>}
+              {pending.length > 1 && <span className="ml-1.5 rounded-md bg-bg-active px-1.5 text-[10px]">{pending.length} 项等待</span>}
             </div>
             <div className="truncate text-sm font-medium">{isQuestion ? current.question : current.title}</div>
           </div>

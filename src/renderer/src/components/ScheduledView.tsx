@@ -74,7 +74,7 @@ export default function ScheduledView(): JSX.Element | null {
             >
               <Plus size={13} /> 新建
             </button>
-            <button onClick={close} className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+            <button onClick={close} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
               <X size={16} />
             </button>
           </div>
@@ -136,14 +136,14 @@ function TaskRow({
           <span className={`block h-3 w-3 rounded-full bg-white transition ${task.enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
         </button>
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{task.name}</span>
-        <code className="rounded bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-ink-soft">{task.cron}</code>
-        <button title="立即运行" onClick={onRun} className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-accent">
+        <code className="rounded-md bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-ink-soft">{task.cron}</code>
+        <button title="立即运行" onClick={onRun} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-accent">
           <Play size={13} />
         </button>
-        <button title="编辑" onClick={onEdit} className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+        <button title="编辑" onClick={onEdit} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <Pencil size={13} />
         </button>
-        <button title="删除" onClick={onDelete} className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-err">
+        <button title="删除" onClick={onDelete} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-err">
           <Trash2 size={13} />
         </button>
       </div>

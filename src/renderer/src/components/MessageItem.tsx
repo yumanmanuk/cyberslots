@@ -275,11 +275,11 @@ function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permiss
         {msg.kind === 'ask_user' ? '提问' : '授权'}：{title}
       </span>
       {answered ? (
-        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${rejected ? 'bg-err/10 text-err' : 'bg-ok/10 text-ok'}`}>
+        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] ${rejected ? 'bg-err/10 text-err' : 'bg-ok/10 text-ok'}`}>
           {chosen?.name ?? '已取消'}
         </span>
       ) : (
-        <span className="shrink-0 rounded bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">等待处理（见下方弹层）</span>
+        <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">等待处理（见下方弹层）</span>
       )}
     </div>
   );
@@ -333,12 +333,12 @@ function DiffView({ path, oldText, newText }: { path: string; oldText?: string; 
     <div className="mb-2">
       <div className="mb-1 font-mono text-[11px] text-ink-faint">{path}</div>
       {oldText && (
-        <pre className="whitespace-pre-wrap rounded bg-err/10 px-2 py-1 font-mono text-[12px] leading-5 text-err">
+        <pre className="whitespace-pre-wrap rounded-md bg-err/10 px-2 py-1 font-mono text-[12px] leading-5 text-err">
           {prefixLines(oldText, '- ')}
         </pre>
       )}
       {newText && (
-        <pre className="mt-1 whitespace-pre-wrap rounded bg-ok/10 px-2 py-1 font-mono text-[12px] leading-5 text-ok">
+        <pre className="mt-1 whitespace-pre-wrap rounded-md bg-ok/10 px-2 py-1 font-mono text-[12px] leading-5 text-ok">
           {prefixLines(newText, '+ ')}
         </pre>
       )}

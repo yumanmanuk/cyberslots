@@ -8,6 +8,7 @@ export default {
     extend: {
       colors: {
         bg: 'var(--bg)',
+        'bg-canvas': 'var(--bg-canvas)',
         'bg-panel': 'var(--bg-panel)',
         'bg-hover': 'var(--bg-hover)',
         'bg-active': 'var(--bg-active)',

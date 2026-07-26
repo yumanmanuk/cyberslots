@@ -147,7 +147,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   return (
     <div className="relative flex h-full min-w-0">
       <div className="flex h-full min-w-0 flex-1 flex-col">
-        <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-4">
+        <header className="flex h-12 shrink-0 items-center gap-3 px-5">
           <span className="min-w-0 truncate text-sm font-medium">{meta?.title ?? '会话'}</span>
           {isWork && meta && (
             <span className="truncate rounded-md bg-bg-panel px-2 py-0.5 font-mono text-[11px] text-ink-soft">{meta.cwd}</span>
@@ -192,9 +192,9 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
         />
       )}
 
-      {/* 右侧快捷图标 rail — 支持折叠 + 悬停浮出（item 3） */}
+      {/* 右侧快捷图标 rail — 透明融入浮层，支持折叠 + 悬停浮出（item 3） */}
       {!railCollapsed ? (
-        <div className="flex w-11 shrink-0 flex-col items-center gap-1 border-l border-line bg-bg-panel/60 py-2.5 transition-all duration-200">
+        <div className="flex w-11 shrink-0 flex-col items-center gap-1 py-2.5 transition-all duration-200">
           {railButtons}
         </div>
       ) : (
@@ -204,7 +204,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             <button
               title={t('expandRail')}
               onClick={toggleRail}
-              className="flex h-8 w-6 items-center justify-center rounded-l-lg border border-r-0 border-line bg-bg-panel text-ink-faint shadow-sm transition hover:text-ink"
+              className="flex h-8 w-6 items-center justify-center rounded-l-lg bg-bg-canvas text-ink-faint shadow-sm transition hover:text-ink"
             >
               <PanelRightOpen size={14} />
             </button>
@@ -212,7 +212,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           <div
             onMouseEnter={peekEnter}
             onMouseLeave={peekLeave}
-            className={`absolute bottom-0 right-0 top-0 z-20 flex w-11 flex-col items-center gap-1 border-l border-line bg-bg-panel py-2.5 shadow-lg transition-transform duration-200 ease-out ${
+            className={`absolute bottom-0 right-0 top-0 z-20 flex w-11 flex-col items-center gap-1 rounded-l-2xl bg-bg-canvas py-2.5 shadow-lg transition-transform duration-200 ease-out ${
               railPeek ? 'translate-x-0' : 'translate-x-full'
             }`}
           >

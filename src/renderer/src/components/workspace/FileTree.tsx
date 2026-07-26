@@ -70,7 +70,7 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
         <button
           onClick={() => (n.dir ? toggle(n.path) : onOpenFile(n.path))}
           onDoubleClick={() => !n.dir && onOpenFile(n.path)}
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-[3px] text-left text-[12.5px] text-ink-soft hover:bg-bg-hover"
+          className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[12.5px] text-ink-soft hover:bg-bg-hover"
           style={{ paddingLeft: 6 + depth * 14 }}
           title={n.path}
         >
@@ -99,7 +99,7 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
         <span className="truncate font-mono text-[11px] text-ink-faint" title={root}>
           {root.split(/[\\/]/).pop()}
         </span>
-        <button onClick={() => void refresh()} title="刷新" className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+        <button onClick={() => void refresh()} title="刷新" className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <RefreshCw size={12} />
         </button>
       </div>

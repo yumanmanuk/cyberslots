@@ -85,7 +85,7 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
+      <div className="flex items-center gap-1 px-2 pb-1 pt-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-soft" title={path}>
           {fileName}
         </span>
@@ -158,7 +158,7 @@ function NumberedSource({ text, ext }: { text: string; ext: string }): JSX.Eleme
 
   return (
     <div className="flex font-mono text-[12px] leading-5">
-      <div className="select-none border-r border-line bg-bg-panel px-2 py-2 text-right text-ink-faint">
+      <div className="select-none px-2 py-2 text-right text-ink-faint/70">
         {lines.map((_, i) => (
           <div key={i}>{i + 1}</div>
         ))}
@@ -211,7 +211,7 @@ function OpenInMenu({ path }: { path: string }): JSX.Element {
 
 function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }): JSX.Element {
   return (
-    <button title={title} onClick={onClick} className="rounded p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+    <button title={title} onClick={onClick} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
       {children}
     </button>
   );
