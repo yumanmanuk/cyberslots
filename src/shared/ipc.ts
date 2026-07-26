@@ -9,6 +9,7 @@ import type {
   CronTask,
   EngineEventEnvelope,
   EngineId,
+  GoalControlAction,
   PermissionMode,
   SessionMeta,
   UnifiedMessage,
@@ -32,6 +33,8 @@ export const IPC = {
   sessionForkEngine: 'session:fork-engine',
   sessionCompact: 'session:compact',
   sessionSteer: 'session:steer',
+  sessionGoalSet: 'session:goal-set',
+  sessionGoalControl: 'session:goal-control',
   sessionMarkRead: 'session:mark-read',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
@@ -115,6 +118,9 @@ export interface CyberSlotsApi {
   sessionCompact(sessionId: string): Promise<void>;
   /** Steer the in-flight turn; resolves false when not steerable. */
   sessionSteer(sessionId: string, text: string): Promise<boolean>;
+  /** Engine-native goal (codex thread/goal). */
+  sessionGoalSet(sessionId: string, objective: string): Promise<void>;
+  sessionGoalControl(sessionId: string, action: GoalControlAction): Promise<void>;
   sessionMarkRead(sessionId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;

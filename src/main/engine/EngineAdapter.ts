@@ -6,7 +6,7 @@
  * app-server JSON-RPC. Both translate into `EngineEvent`s.
  */
 
-import type { EngineEvent, PermissionMode } from '@shared/types';
+import type { EngineEvent, GoalControlAction, PermissionMode } from '@shared/types';
 
 export interface EngineAdapter {
   /** Spawn/connect and create the underlying engine session. */
@@ -33,6 +33,12 @@ export interface EngineAdapter {
    * Returns false when there is no steerable active turn.
    */
   steer?(text: string): Promise<boolean>;
+  /**
+   * Engine-native goal surface (codex thread/goal/*). Engines without a
+   * client-side goal API omit these and the UI hides the goal controls.
+   */
+  setGoal?(objective: string): Promise<void>;
+  controlGoal?(action: GoalControlAction): Promise<void>;
   /** Kill the engine process and release resources. */
   dispose(): Promise<void>;
 }

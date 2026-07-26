@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path';
 import type { WebContents } from 'electron';
 
-import type { EngineEvent, EngineEventEnvelope, PermissionMode, SessionMeta, UnifiedMessage } from '@shared/types';
+import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, SessionMeta, UnifiedMessage } from '@shared/types';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
@@ -219,6 +219,20 @@ export class SessionManager {
     const ok = await s.adapter.steer(text);
     if (ok) this.forward(sessionId, { type: 'user.echo', turnId: 0, text });
     return ok;
+  }
+
+  /** Engine-native goal (codex only). Throws for engines without a goal API. */
+  async setGoal(sessionId: string, objective: string): Promise<void> {
+    const s = this.require(sessionId);
+    await this.ensureRuntime(s);
+    if (!s.adapter?.setGoal) throw new Error(`引擎 ${s.meta.engine} 不支持原生 Goal`);
+    await s.adapter.setGoal(objective);
+  }
+
+  async controlGoal(sessionId: string, action: GoalControlAction): Promise<void> {
+    const s = this.require(sessionId);
+    if (!s.adapter?.controlGoal) throw new Error(`引擎 ${s.meta.engine} 不支持原生 Goal`);
+    await s.adapter.controlGoal(action);
   }
 
   async setModel(sessionId: string, modelId: string): Promise<void> {

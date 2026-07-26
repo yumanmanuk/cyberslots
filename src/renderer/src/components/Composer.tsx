@@ -77,20 +77,14 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     textareaRef.current?.focus();
   };
 
-  /** 🎯 Goal: the composer text IS the goal — no separate dialog.
-   *  With an active goal the same button updates it (UpdateGoal). */
+  /** 🎯 Goal (codex-only): the composer text IS the objective — sent to the
+   *  engine's native thread/goal/set. kimi's ACP surface has no goal API,
+   *  so the button never renders for kimi sessions. */
   const sendGoal = (): void => {
     const goal = text.trim();
-    if (!goal || busy) return;
+    if (!goal) return;
     setText('');
-    void sendPrompt(
-      goalActive
-        ? `请使用 UpdateGoal 将当前目标更新为以下内容并继续执行：\n${goal}`
-        : `请使用 CreateGoal 创建以下目标并开始持续执行（必要时用 SetGoalBudget 设定合理预算）：\n${goal}`,
-    );
-    useChatStore.setState((s) => ({
-      goals: { ...s.goals, [sessionId]: { text: goal, startedAt: s.goals[sessionId]?.startedAt ?? Date.now(), status: 'running' } },
-    }));
+    void useChatStore.getState().setGoal(goal);
     textareaRef.current?.focus();
   };
 
@@ -186,16 +180,18 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           <EngineBadge sessionId={sessionId} />
           {!isPlan && <PermissionPicker sessionId={sessionId} />}
           <SwarmToggle />
-          <button
-            title={text.trim() ? (goalActive ? `${t('goal')} · UpdateGoal` : `${t('goal')} · 以输入框内容创建目标`) : `${t('goal')} · 先在输入框写目标，再点此触发`}
-            onClick={sendGoal}
-            disabled={!text.trim() || busy}
-            className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition disabled:opacity-40 ${
-              goalActive ? 'bg-accent-soft font-medium text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
-            }`}
-          >
-            <Target size={13} />
-          </button>
+          {meta?.engine === 'codex' && (
+            <button
+              title={text.trim() ? (goalActive ? `${t('goal')} · 更新目标` : `${t('goal')} · 以输入框内容创建目标`) : `${t('goal')} · 先在输入框写目标，再点此触发`}
+              onClick={sendGoal}
+              disabled={!text.trim()}
+              className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition disabled:opacity-40 ${
+                goalActive ? 'bg-accent-soft font-medium text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+              }`}
+            >
+              <Target size={13} />
+            </button>
+          )}
 
           <div className="flex-1" />
 
@@ -602,69 +598,54 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
 
 // ------------------------------------------------------------------ goal
 
+/** Goal status line — renders the engine's real goal state (codex
+ *  thread/goal/updated pushes objective/status/usage; nothing client-faked). */
 function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: string) => void }): JSX.Element | null {
   const t = useT();
   const goal = useChatStore((s) => s.goals[sessionId]);
-  const sendPrompt = useChatStore((s) => s.sendPrompt);
-  const cancel = useChatStore((s) => s.cancel);
+  const controlGoal = useChatStore((s) => s.controlGoal);
   const [, tick] = useState(0);
 
+  // Local ticker so the elapsed display moves between engine pushes.
   useEffect(() => {
-    if (!goal) return;
+    if (!goal || goal.status !== 'active') return;
     const timer = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(timer);
   }, [goal]);
 
   if (!goal) return null;
 
-  const elapsed = formatElapsed(Date.now() - goal.startedAt);
-  const setGoal = (g: typeof goal | undefined): void =>
-    useChatStore.setState((s) => {
-      const goals = { ...s.goals };
-      if (g) goals[sessionId] = g;
-      else delete goals[sessionId];
-      return { goals };
-    });
+  const paused = goal.status !== 'active';
+  const statusLabel =
+    goal.status === 'active'
+      ? t('goalRunning')
+      : goal.status === 'paused'
+        ? `${t('goal')} · ${t('goalPause')}`
+        : `${t('goal')} · ${goal.status}`;
 
   return (
     <div className="mx-auto mb-1.5 flex max-w-3xl items-center gap-2 px-1 text-[11px] text-ink-faint">
-      <Target size={11} className={goal.status === 'running' ? 'text-accent' : ''} />
-      <span className="font-medium text-ink-soft">{t('goalRunning')}</span>
-      <span className="min-w-0 flex-1 truncate" title={goal.text}>
-        {goal.text}
+      <Target size={11} className={goal.status === 'active' ? 'text-accent' : ''} />
+      <span className="font-medium text-ink-soft">{statusLabel}</span>
+      <span className="min-w-0 flex-1 truncate" title={goal.objective}>
+        {goal.objective}
       </span>
-      <span className="shrink-0 font-mono tabular-nums">{elapsed}</span>
-      {goal.status === 'running' ? (
-        <IconBtn
-          title={t('goalPause')}
-          onClick={() => {
-            void cancel();
-            setGoal({ ...goal, status: 'paused' });
-          }}
-        >
-          <Pause size={11} />
-        </IconBtn>
-      ) : (
-        <IconBtn
-          title={t('goalResume')}
-          onClick={() => {
-            void sendPrompt('继续执行当前目标。');
-            setGoal({ ...goal, status: 'running' });
-          }}
-        >
+      <span className="shrink-0 font-mono tabular-nums" title={`已用 ${goal.tokensUsed.toLocaleString()} tokens${goal.tokenBudget ? ` / 预算 ${goal.tokenBudget.toLocaleString()}` : ''}`}>
+        {formatElapsed(goal.timeUsedSeconds * 1000)}
+      </span>
+      {paused ? (
+        <IconBtn title={t('goalResume')} onClick={() => void controlGoal('resume')}>
           <Play size={11} />
         </IconBtn>
+      ) : (
+        <IconBtn title={t('goalPause')} onClick={() => void controlGoal('pause')}>
+          <Pause size={11} />
+        </IconBtn>
       )}
-      <IconBtn title={t('goalEdit')} onClick={() => onEdit(goal.text)}>
+      <IconBtn title={t('goalEdit')} onClick={() => onEdit(goal.objective)}>
         <Pencil size={11} />
       </IconBtn>
-      <IconBtn
-        title={t('goalDelete')}
-        onClick={() => {
-          void sendPrompt('请放弃并删除当前目标（DeleteGoal），停止目标模式。');
-          setGoal(undefined);
-        }}
-      >
+      <IconBtn title={t('goalDelete')} onClick={() => void controlGoal('clear')}>
         <CircleSlash size={11} />
       </IconBtn>
     </div>

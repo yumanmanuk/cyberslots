@@ -7,7 +7,7 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, CronTask, EngineId, PermissionMode, UnifiedMessage } from '@shared/types';
+import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode, UnifiedMessage } from '@shared/types';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
@@ -45,6 +45,12 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
   );
   ipcMain.handle(IPC.sessionCompact, (_e, sessionId: string) => sessions.compact(sessionId));
   ipcMain.handle(IPC.sessionSteer, (_e, sessionId: string, text: string) => sessions.steer(sessionId, text));
+  ipcMain.handle(IPC.sessionGoalSet, (_e, sessionId: string, objective: string) =>
+    sessions.setGoal(sessionId, objective),
+  );
+  ipcMain.handle(IPC.sessionGoalControl, (_e, sessionId: string, action: GoalControlAction) =>
+    sessions.controlGoal(sessionId, action),
+  );
   ipcMain.handle(IPC.sessionMarkRead, (_e, sessionId: string) => sessions.markRead(sessionId));
 
   ipcMain.handle(IPC.settingsGet, () => redactForRenderer(settings.get()));

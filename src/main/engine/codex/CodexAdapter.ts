@@ -13,6 +13,8 @@ import { randomUUID } from 'node:crypto';
 
 import type {
   EngineEvent,
+  GoalControlAction,
+  GoalInfo,
   PermissionMode,
   PermissionOptionView,
   PlanEntry,
@@ -290,6 +292,51 @@ export class CodexAdapter implements EngineAdapter {
     }
   }
 
+  // ----------------------------------------------------------------- goal
+  // Fully native: codex persists one goal per thread (thread/goal/set|clear)
+  // and pushes thread/goal/updated with real usage counters. No prompt
+  // bridging — kimi's ACP surface has no goal API, so the UI only shows
+  // goal controls for codex sessions.
+
+  async setGoal(objective: string): Promise<void> {
+    const res = await this.requireRpc().request<Json>('thread/goal/set', {
+      threadId: this.threadId,
+      objective,
+      status: 'active',
+    });
+    this.emitGoal((res.goal as Json | undefined) ?? null);
+  }
+
+  async controlGoal(action: GoalControlAction): Promise<void> {
+    const rpc = this.requireRpc();
+    if (action === 'clear') {
+      await rpc.request('thread/goal/clear', { threadId: this.threadId });
+      this.emit({ type: 'goal.update', goal: null });
+      return;
+    }
+    const res = await rpc.request<Json>('thread/goal/set', {
+      threadId: this.threadId,
+      status: action === 'pause' ? 'paused' : 'active',
+    });
+    this.emitGoal((res.goal as Json | undefined) ?? null);
+  }
+
+  private emitGoal(raw: Json | null): void {
+    if (!raw) {
+      this.emit({ type: 'goal.update', goal: null });
+      return;
+    }
+    const goal: GoalInfo = {
+      objective: String(raw.objective ?? ''),
+      status: String(raw.status ?? 'active') as GoalInfo['status'],
+      tokensUsed: Number(raw.tokensUsed ?? 0),
+      timeUsedSeconds: Number(raw.timeUsedSeconds ?? 0),
+      tokenBudget: raw.tokenBudget == null ? undefined : Number(raw.tokenBudget),
+    };
+    // Completed goals are announced then treated as cleared client-side.
+    this.emit({ type: 'goal.update', goal: goal.status === 'complete' ? null : goal });
+  }
+
   // -------------------------------------------------------- notifications
 
   private onNotification(method: string, params: Json): void {
@@ -323,6 +370,12 @@ export class CodexAdapter implements EngineAdapter {
         this.emit({ type: 'usage.update', used, size });
         return;
       }
+      case 'thread/goal/updated':
+        this.emitGoal((params.goal as Json | undefined) ?? null);
+        return;
+      case 'thread/goal/cleared':
+        this.emit({ type: 'goal.update', goal: null });
+        return;
       case 'turn/completed': {
         const turn = params.turn as Json | undefined;
         const status = String(turn?.status ?? 'completed');

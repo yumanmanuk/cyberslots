@@ -138,6 +138,17 @@ export interface UsageInfo {
   contextMax?: number;
 }
 
+/** Engine-native goal snapshot (codex thread/goal; kimi ACP has no goal surface). */
+export interface GoalInfo {
+  objective: string;
+  status: 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  tokenBudget?: number;
+}
+
+export type GoalControlAction = 'pause' | 'resume' | 'clear';
+
 // ------------------------------------------------------------ event model
 // Adapters emit these; the renderer store folds them into UnifiedMessages.
 
@@ -174,6 +185,8 @@ export type EngineEvent =
   | { type: 'models.update'; current: string; available: string[] }
   | { type: 'modes.update'; current: PermissionMode; available: PermissionMode[] }
   | { type: 'usage.update'; used: number; size: number; costUsd?: number }
+  /** Engine-side goal state changed (null = cleared/none). */
+  | { type: 'goal.update'; goal: GoalInfo | null }
   | { type: 'turn.ended'; turnId: number; stopReason: string; usage?: UsageInfo }
   | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider' };
 

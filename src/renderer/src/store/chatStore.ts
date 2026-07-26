@@ -11,6 +11,8 @@ import type {
   CronTask,
   EngineEvent,
   EngineEventEnvelope,
+  GoalControlAction,
+  GoalInfo,
   PermissionMode,
   SessionMeta,
   SlashCommandInfo,
@@ -26,13 +28,6 @@ export interface SidebarFilter {
 }
 
 export const DEFAULT_FILTER: SidebarFilter = { sort: 'updated', status: 'all', unreadOnly: false };
-
-/** Client-side goal bookkeeping (engine-side state lives in kimi's Goal tools). */
-export interface GoalState {
-  text: string;
-  startedAt: number;
-  status: 'running' | 'paused';
-}
 
 /** A message waiting to be sent once the running turn finishes. */
 export interface QueuedMessage {
@@ -62,7 +57,8 @@ interface ChatState {
   cronOpen: boolean;
   cronTasks: CronTask[];
   filter: SidebarFilter;
-  goals: Record<string, GoalState>;
+  /** Engine-native goal per session (codex thread/goal; pushed via goal.update). */
+  goals: Record<string, GoalInfo | undefined>;
   /** Per-session reasoning-effort override (codex only). */
   efforts: Record<string, string>;
   /** Per-session outbox: messages waiting for the current turn to finish. */
@@ -87,6 +83,8 @@ interface ChatState {
   removeQueued(sessionId: string, id: string): void;
   moveQueued(sessionId: string, from: number, to: number): void;
   steerQueued(sessionId: string, id: string): Promise<void>;
+  setGoal(objective: string): Promise<void>;
+  controlGoal(action: GoalControlAction): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
   loadCron(): Promise<void>;
@@ -334,6 +332,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  /** Engine-native goal (codex only — UI hides the control for kimi). */
+  async setGoal(objective) {
+    const { activeSessionId } = get();
+    if (activeSessionId) await window.cyberslots.sessionGoalSet(activeSessionId, objective);
+  },
+
+  async controlGoal(action) {
+    const { activeSessionId } = get();
+    if (activeSessionId) await window.cyberslots.sessionGoalControl(activeSessionId, action);
+  },
+
   async renameSession(id, title) {
     await window.cyberslots.sessionRename(id, title);
     set((s) => ({ sessions: s.sessions.map((m) => (m.id === id ? { ...m, title } : m)) }));
@@ -416,6 +425,9 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         ...ui,
         usage: { used: event.used, size: event.size, costUsd: event.costUsd },
       }));
+      return;
+    case 'goal.update':
+      set((s) => ({ goals: { ...s.goals, [sessionId]: event.goal ?? undefined } }));
       return;
     case 'turn.ended': {
       // Unread bookkeeping: main marks every finished session unread; the
