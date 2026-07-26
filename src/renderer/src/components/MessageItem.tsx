@@ -75,6 +75,14 @@ export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Eleme
         </div>
       );
 
+    case 'system':
+      // Announcements (e.g. goal completion) — quiet accent-tinted banner.
+      return (
+        <div className="mx-auto flex max-w-[90%] items-center gap-2 rounded-xl border border-accent/25 bg-accent-soft/60 px-4 py-2 text-[12px] text-ink-soft">
+          <span className="min-w-0 whitespace-pre-wrap">{msg.text}</span>
+        </div>
+      );
+
     default:
       return null;
   }

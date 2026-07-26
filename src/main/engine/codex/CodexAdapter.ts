@@ -67,6 +67,11 @@ export class CodexAdapter implements EngineAdapter {
   private turnDone: (() => void) | undefined;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly stderrTail: string[] = [];
+  /** Last goal snapshot — lets us synthesize the completion announcement
+   *  if the engine clears the goal without pushing a `complete` update. */
+  private lastGoal: GoalInfo | null = null;
+  private lastGoalAt = 0;
+  private userClearedGoal = false;
 
   constructor(
     private readonly opts: CodexAdapterOptions,
@@ -310,7 +315,9 @@ export class CodexAdapter implements EngineAdapter {
   async controlGoal(action: GoalControlAction): Promise<void> {
     const rpc = this.requireRpc();
     if (action === 'clear') {
+      this.userClearedGoal = true;
       await rpc.request('thread/goal/clear', { threadId: this.threadId });
+      this.lastGoal = null;
       this.emit({ type: 'goal.update', goal: null });
       return;
     }
@@ -323,6 +330,7 @@ export class CodexAdapter implements EngineAdapter {
 
   private emitGoal(raw: Json | null): void {
     if (!raw) {
+      this.lastGoal = null;
       this.emit({ type: 'goal.update', goal: null });
       return;
     }
@@ -333,8 +341,11 @@ export class CodexAdapter implements EngineAdapter {
       timeUsedSeconds: Number(raw.timeUsedSeconds ?? 0),
       tokenBudget: raw.tokenBudget == null ? undefined : Number(raw.tokenBudget),
     };
-    // Completed goals are announced then treated as cleared client-side.
-    this.emit({ type: 'goal.update', goal: goal.status === 'complete' ? null : goal });
+    this.lastGoal = goal.status === 'complete' ? null : goal;
+    this.lastGoalAt = Date.now();
+    // `complete` passes through untouched — the renderer announces the
+    // completion (objective + elapsed) before clearing its local state.
+    this.emit({ type: 'goal.update', goal });
   }
 
   // -------------------------------------------------------- notifications
@@ -373,9 +384,24 @@ export class CodexAdapter implements EngineAdapter {
       case 'thread/goal/updated':
         this.emitGoal((params.goal as Json | undefined) ?? null);
         return;
-      case 'thread/goal/cleared':
+      case 'thread/goal/cleared': {
+        // Engine-initiated clear right after an active goal (and not by the
+        // user) means the goal finished — synthesize the completion so the
+        // UI can announce objective + elapsed even without a `complete` push.
+        const finished = !this.userClearedGoal && this.lastGoal && this.lastGoal.status === 'active';
+        if (finished) {
+          // Top up the elapsed time since the last snapshot so "用时" is accurate.
+          const extraSec = this.lastGoalAt ? Math.round((Date.now() - this.lastGoalAt) / 1000) : 0;
+          this.emit({
+            type: 'goal.update',
+            goal: { ...this.lastGoal!, status: 'complete', timeUsedSeconds: this.lastGoal!.timeUsedSeconds + extraSec },
+          });
+        }
+        this.userClearedGoal = false;
+        this.lastGoal = null;
         this.emit({ type: 'goal.update', goal: null });
         return;
+      }
       case 'turn/completed': {
         const turn = params.turn as Json | undefined;
         const status = String(turn?.status ?? 'completed');

@@ -383,6 +383,11 @@ export class SessionManager {
     if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
     if (event.type === 'turn.ended' && prefs.taskComplete && !meta.title.startsWith('⏰')) {
       new Notification({ title: `任务完成：${meta.title}`, body: '回到窗口查看结果' }).show();
+    } else if (event.type === 'goal.update' && event.goal?.status === 'complete' && prefs.taskComplete) {
+      new Notification({
+        title: `Goal 执行完成：${meta.title}`,
+        body: event.goal.objective.slice(0, 100),
+      }).show();
     } else if (event.type === 'permission.request' && prefs.question) {
       new Notification({ title: `需要你的确认：${meta.title}`, body: event.title }).show();
     } else if (event.type === 'error' && prefs.error) {

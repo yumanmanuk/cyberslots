@@ -386,6 +386,15 @@ function mutateUi(set: SetFn, sessionId: string, fn: (ui: SessionUiState) => Ses
   set((s) => ({ ui: { ...s.ui, [sessionId]: fn(s.ui[sessionId] ?? emptyUi()) } }));
 }
 
+/** "X 秒" under a minute, otherwise "X 分 Y 秒" (en: "Xs" / "Xm Ys"). */
+function formatGoalDuration(seconds: number, lang: 'zh' | 'en'): string {
+  const s = Math.max(0, Math.round(seconds));
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  if (lang === 'zh') return m > 0 ? (rest > 0 ? `${m} 分 ${rest} 秒` : `${m} 分钟`) : `${s} 秒`;
+  return m > 0 ? (rest > 0 ? `${m}m ${rest}s` : `${m}m`) : `${s}s`;
+}
+
 function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEventEnvelope): void {
   // Any engine event counts as liveness — feeds the stall detector.
   mutateUi(set, sessionId, (ui) => ({ ...ui, lastActivityAt: Date.now() }));
@@ -426,9 +435,29 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         usage: { used: event.used, size: event.size, costUsd: event.costUsd },
       }));
       return;
-    case 'goal.update':
-      set((s) => ({ goals: { ...s.goals, [sessionId]: event.goal ?? undefined } }));
+    case 'goal.update': {
+      const g = event.goal;
+      if (g && g.status === 'complete') {
+        // 完成态：清状态条，并向消息流插一条完成公告（目标 + 真实用时）。
+        set((s) => ({ goals: { ...s.goals, [sessionId]: undefined } }));
+        const lang = get().settings?.language ?? 'zh';
+        const doneMsg: UnifiedMessage = {
+          kind: 'system',
+          id: crypto.randomUUID(),
+          turnId: -1,
+          text:
+            lang === 'zh'
+              ? `🎯 Goal「${g.objective}」执行完成 · 用时 ${formatGoalDuration(g.timeUsedSeconds, 'zh')}`
+              : `🎯 Goal “${g.objective}” completed · took ${formatGoalDuration(g.timeUsedSeconds, 'en')}`,
+          createdAt: Date.now(),
+        };
+        mutateUi(set, sessionId, (ui) => ({ ...ui, messages: [...ui.messages, doneMsg] }));
+        schedulePersist(get, sessionId);
+      } else {
+        set((s) => ({ goals: { ...s.goals, [sessionId]: g ?? undefined } }));
+      }
       return;
+    }
     case 'turn.ended': {
       // Unread bookkeeping: main marks every finished session unread; the
       // renderer immediately clears it for the session being viewed.
