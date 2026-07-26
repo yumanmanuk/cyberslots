@@ -4,7 +4,7 @@
  * Enter sends, Shift+Enter breaks line.
  */
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ArrowUp, ChevronDown, Square } from 'lucide-react';
 
 import type { PermissionMode } from '@shared/types';
@@ -158,6 +158,14 @@ function ModePicker({ sessionId }: { sessionId: string }): JSX.Element | null {
 }
 
 function Dropdown({ children, onClose }: { children: React.ReactNode; onClose: () => void }): JSX.Element {
+  // Close on Escape as well as outside click.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   return (
     <>
       <div className="fixed inset-0 z-10" onClick={onClose} />
