@@ -6,11 +6,11 @@
 
 import { app } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { WebContents } from 'electron';
 
-import type { EngineEvent, EngineEventEnvelope, PermissionMode, SessionMeta } from '@shared/types';
+import type { EngineEvent, EngineEventEnvelope, PermissionMode, SessionMeta, UnifiedMessage } from '@shared/types';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
@@ -90,9 +90,31 @@ export class SessionManager {
 
   async prompt(sessionId: string, text: string, attachments?: string[]): Promise<void> {
     const s = this.require(sessionId);
+    await this.ensureRuntime(s);
     this.touch(s.meta);
     await s.adapter?.prompt(text, attachments);
     this.touch(s.meta);
+  }
+
+  /** Lazily revive the engine process for sessions closed by app restart. */
+  private async ensureRuntime(s: LiveSession): Promise<void> {
+    if (s.adapter) return;
+    this.configWriter.sync(this.settings.get());
+    const adapter = this.buildAdapter(s.meta, s.meta.engineSessionId);
+    s.adapter = adapter;
+    s.meta.status = 'starting';
+    this.touch(s.meta);
+    try {
+      const { engineSessionId } = await adapter.start();
+      s.meta.engineSessionId = engineSessionId;
+      s.meta.status = 'idle';
+      this.touch(s.meta);
+    } catch (err) {
+      s.adapter = undefined;
+      s.meta.status = 'error';
+      this.touch(s.meta);
+      throw err;
+    }
   }
 
   async cancel(sessionId: string): Promise<void> {
@@ -136,6 +158,36 @@ export class SessionManager {
     await this.close(sessionId);
     this.sessions.delete(sessionId);
     this.persistMetas();
+    try {
+      rmSync(this.messagesFile(sessionId), { force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  // -------------------------------------------------- message persistence
+
+  getMessages(sessionId: string): UnifiedMessage[] {
+    try {
+      const f = this.messagesFile(sessionId);
+      if (!existsSync(f)) return [];
+      return JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
+    } catch {
+      return [];
+    }
+  }
+
+  saveMessages(sessionId: string, messages: UnifiedMessage[]): void {
+    try {
+      mkdirSync(join(app.getPath('userData'), 'messages'), { recursive: true });
+      writeFileSync(this.messagesFile(sessionId), JSON.stringify(messages), 'utf8');
+    } catch (err) {
+      console.error('[sessions] save messages failed:', err);
+    }
+  }
+
+  private messagesFile(sessionId: string): string {
+    return join(app.getPath('userData'), 'messages', `${sessionId}.json`);
   }
 
   /** Kill every child process — called on app quit (anti-orphan). */
@@ -145,7 +197,7 @@ export class SessionManager {
 
   // ---------------------------------------------------------------- private
 
-  private buildAdapter(meta: SessionMeta): EngineAdapter {
+  private buildAdapter(meta: SessionMeta, resumeSessionId?: string): EngineAdapter {
     if (meta.engine === 'kimi') {
       return new KimiAdapter(
         {
@@ -153,6 +205,7 @@ export class SessionManager {
           cwd: meta.cwd,
           modelId: meta.modelId,
           permissionMode: meta.permissionMode,
+          resumeSessionId,
         },
         (event) => this.onEngineEvent(meta.id, event),
       );

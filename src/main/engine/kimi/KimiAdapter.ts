@@ -48,6 +48,8 @@ export interface KimiAdapterOptions {
   cwd: string;
   modelId?: string;
   permissionMode?: PermissionMode;
+  /** Resume an existing engine session instead of creating a new one. */
+  resumeSessionId?: string;
   /** Optional explicit path to kimi dist/main.mjs (settings override). */
   cliEntry?: string;
 }
@@ -120,13 +122,9 @@ export class KimiAdapter implements EngineAdapter {
       'ACP initialize',
     );
 
-    const sess = await withTimeout(
-      this.client.newSession({ cwd: this.opts.cwd, mcpServers: [] }),
-      INIT_TIMEOUT_MS,
-      'ACP session/new',
-    );
+    const sess = await this.openSession();
     this.sessionId = sess.sessionId;
-    this.applyConfigOptions((sess as { configOptions?: unknown }).configOptions);
+    this.applyConfigOptions(sess.configOptions);
 
     if (this.opts.modelId) await this.setModel(this.opts.modelId).catch(() => undefined);
     if (this.opts.permissionMode && this.opts.permissionMode !== 'default') {
@@ -135,6 +133,37 @@ export class KimiAdapter implements EngineAdapter {
 
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.sessionId };
+  }
+
+  /** Resume the persisted engine session when possible, else start fresh. */
+  private async openSession(): Promise<{ sessionId: string; configOptions?: unknown }> {
+    const client = this.client!;
+    if (this.opts.resumeSessionId) {
+      try {
+        const res = await withTimeout(
+          client.resumeSession({
+            sessionId: this.opts.resumeSessionId,
+            cwd: this.opts.cwd,
+            mcpServers: [],
+          } as never),
+          INIT_TIMEOUT_MS,
+          'ACP session/resume',
+        );
+        return { sessionId: this.opts.resumeSessionId, configOptions: (res as { configOptions?: unknown }).configOptions };
+      } catch (err) {
+        this.emit({
+          type: 'error',
+          source: 'engine',
+          message: `会话恢复失败，已新建会话继续（历史上下文不在引擎侧）: ${errorMessage(err)}`,
+        });
+      }
+    }
+    const sess = await withTimeout(
+      client.newSession({ cwd: this.opts.cwd, mcpServers: [] }),
+      INIT_TIMEOUT_MS,
+      'ACP session/new',
+    );
+    return sess as { sessionId: string; configOptions?: unknown };
   }
 
   async dispose(): Promise<void> {

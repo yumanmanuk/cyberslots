@@ -108,13 +108,14 @@ function seedFromDevSecrets(): Pick<AppSettings, 'providers' | 'defaultModelId'>
     if (!existsSync(secretsPath)) return undefined;
     const raw = JSON.parse(readFileSync(secretsPath, 'utf8')) as Record<
       string,
-      { baseUrl: string; apiKey: string; model: string; maxContextSize: number }
+      { baseUrl: string; apiKey: string; model: string; maxContextSize: number; userAgent?: string }
     >;
     const providers: ProviderSettings[] = Object.entries(raw).map(([id, v]) => ({
       id,
       baseUrl: v.baseUrl,
       apiKey: v.apiKey,
       models: [{ alias: v.model, model: v.model, maxContextSize: v.maxContextSize }],
+      ...(v.userAgent ? { customHeaders: { 'User-Agent': v.userAgent } } : {}),
     }));
     // MiniMax is the verified-working provider for now (phase0 findings).
     const defaultModelId = raw['minimax']?.model ?? providers[0]?.models[0]?.alias ?? '';

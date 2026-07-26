@@ -50,6 +50,21 @@ const emptyUi = (): SessionUiState => ({
 
 let unsubscribe: (() => void) | undefined;
 
+/** Debounced per-session persistence of the folded message list. */
+const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function schedulePersist(get: () => ChatState, sessionId: string): void {
+  const prev = persistTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  persistTimers.set(
+    sessionId,
+    setTimeout(() => {
+      persistTimers.delete(sessionId);
+      const messages = get().ui[sessionId]?.messages;
+      if (messages) void window.cyberslots.sessionMessagesSave(sessionId, messages);
+    }, 400),
+  );
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   ui: {},
@@ -81,6 +96,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectSession(id) {
     set({ activeSessionId: id });
+    // Lazy-hydrate persisted history the first time a session is opened.
+    if (!get().ui[id]) {
+      void window.cyberslots.sessionMessagesGet(id).then((persisted) => {
+        const messages = persisted.map((m) =>
+          (m.kind === 'text' || m.kind === 'thinking') && m.streaming ? { ...m, streaming: false } : m,
+        );
+        set((s) => ({
+          ui: { ...s.ui, [id]: { ...(s.ui[id] ?? emptyUi()), messages: s.ui[id]?.messages.length ? s.ui[id]!.messages : messages } },
+        }));
+      });
+    }
   },
 
   async sendPrompt(text, attachments) {
@@ -95,6 +121,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       createdAt: Date.now(),
     };
     mutateUi(set, activeSessionId, (ui) => ({ ...ui, messages: [...ui.messages, userMsg] }));
+    schedulePersist(get, activeSessionId);
     // First user message becomes the session title.
     const session = get().sessions.find((s) => s.id === activeSessionId);
     if (session && session.title === '新会话') {
@@ -196,6 +223,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       return;
     default:
       mutateUi(set, sessionId, (ui) => ({ ...ui, messages: foldMessage(ui.messages, event) }));
+      schedulePersist(get, sessionId);
   }
 }
 

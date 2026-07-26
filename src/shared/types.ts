@@ -184,6 +184,8 @@ export interface ProviderSettings {
   baseUrl: string;
   apiKey: string;
   models: Array<{ alias: string; model: string; maxContextSize: number }>;
+  /** Extra headers merged into requests, e.g. a UA to pass coding-plan allowlists. */
+  customHeaders?: Record<string, string>;
 }
 
 export interface AppSettings {

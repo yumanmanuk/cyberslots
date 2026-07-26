@@ -14,7 +14,6 @@ import {
   ChevronRight,
   CircleAlert,
   FileText,
-  ListChecks,
   Loader2,
   Pencil,
   Search,
@@ -23,7 +22,6 @@ import {
 } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
-import { useChatStore } from '../store/chatStore';
 
 export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Element | null {
   switch (msg.kind) {
@@ -53,33 +51,12 @@ export default function MessageItem({ msg }: { msg: UnifiedMessage }): JSX.Eleme
       return <ToolCallRow msg={msg} />;
 
     case 'plan':
-      return (
-        <div className="rounded-lg border border-line bg-bg-panel px-4 py-3">
-          <div className="mb-1.5 flex items-center gap-2 text-ui font-medium text-ink-soft">
-            <ListChecks size={14} /> 任务清单
-          </div>
-          <ul className="space-y-1">
-            {msg.entries.map((e, i) => (
-              <li key={i} className="flex items-start gap-2 text-ui">
-                <span className="mt-0.5">
-                  {e.status === 'completed' ? (
-                    <Check size={13} className="text-ok" />
-                  ) : e.status === 'in_progress' ? (
-                    <Loader2 size={13} className="animate-spin text-accent" />
-                  ) : (
-                    <span className="block h-3 w-3 rounded-full border border-line" />
-                  )}
-                </span>
-                <span className={e.status === 'completed' ? 'text-ink-faint line-through' : ''}>{e.content}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
+      // Rendered by the sticky PlanWidget above the composer, not inline.
+      return null;
 
     case 'permission':
     case 'ask_user':
-      return <DecisionCard msg={msg} />;
+      return <DecisionRecord msg={msg} />;
 
     case 'error':
       return (
@@ -121,6 +98,37 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }
         <div className="whitespace-pre-wrap border-t border-line px-3 py-2 text-[12.5px] leading-6 text-ink-soft">
           {text}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compact historical record of a permission / ask-user exchange.
+ * Pending requests are actionable in the bottom PermissionSheet; here we
+ * only show a subtle one-liner so the stream keeps its narrative.
+ */
+function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permission' | 'ask_user' }> }): JSX.Element {
+  const title = msg.kind === 'ask_user' ? msg.question : msg.title;
+  const answered = msg.answeredOptionId !== undefined;
+  const chosen = msg.options.find((o) => o.optionId === msg.answeredOptionId);
+  const rejected = chosen ? chosen.kind.startsWith('reject') : msg.answeredOptionId === '__cancelled__';
+  return (
+    <div className="flex items-center gap-2 text-ui text-ink-faint">
+      {answered ? (
+        rejected ? <X size={13} className="shrink-0 text-err" /> : <Check size={13} className="shrink-0 text-ok" />
+      ) : (
+        <Loader2 size={13} className="shrink-0 animate-spin text-warn" />
+      )}
+      <span className="min-w-0 truncate">
+        {msg.kind === 'ask_user' ? '提问' : '授权'}：{title}
+      </span>
+      {answered ? (
+        <span className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${rejected ? 'bg-err/10 text-err' : 'bg-ok/10 text-ok'}`}>
+          {chosen?.name ?? '已取消'}
+        </span>
+      ) : (
+        <span className="shrink-0 rounded bg-warn/10 px-1.5 py-0.5 text-[11px] text-warn">等待处理（见下方弹层）</span>
       )}
     </div>
   );
@@ -192,43 +200,4 @@ function prefixLines(text: string, prefix: string): string {
     .split('\n')
     .map((l) => prefix + l)
     .join('\n');
-}
-
-function DecisionCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permission' | 'ask_user' }> }): JSX.Element {
-  const answerPermission = useChatStore((s) => s.answerPermission);
-  const answered = msg.answeredOptionId !== undefined;
-  const title = msg.kind === 'ask_user' ? msg.question : msg.title;
-
-  return (
-    <div className="rounded-xl border border-warn/40 bg-warn/5 px-4 py-3">
-      <div className="mb-2 text-ui font-medium">
-        {msg.kind === 'ask_user' ? '🤔 ' : '🔐 '}
-        {title}
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {msg.options.map((o) => {
-          const chosen = msg.answeredOptionId === o.optionId;
-          const rejecting = o.kind.startsWith('reject');
-          return (
-            <button
-              key={o.optionId}
-              disabled={answered}
-              onClick={() => void answerPermission(msg.requestId, o.optionId)}
-              className={`rounded-lg border px-3 py-1.5 text-ui transition ${
-                chosen
-                  ? 'border-accent bg-accent-soft font-medium text-accent'
-                  : answered
-                    ? 'border-line text-ink-faint'
-                    : rejecting
-                      ? 'border-line text-ink-soft hover:border-err hover:text-err'
-                      : 'border-line bg-bg-input text-ink hover:border-accent hover:text-accent'
-              }`}
-            >
-              {o.name}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
 }

@@ -5,11 +5,12 @@
 
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 
-import type { AnswerPermissionRequest, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
+import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, PermissionMode } from '@shared/types';
+import type { AppSettings, PermissionMode, UnifiedMessage } from '@shared/types';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
+import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
 
 export function registerIpc(sessions: SessionManager, settings: SettingsStore): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
@@ -32,6 +33,10 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore): 
     sessions.rename(sessionId, title),
   );
   ipcMain.handle(IPC.sessionDelete, (_e, sessionId: string) => sessions.delete(sessionId));
+  ipcMain.handle(IPC.sessionMessagesGet, (_e, sessionId: string) => sessions.getMessages(sessionId));
+  ipcMain.handle(IPC.sessionMessagesSave, (_e, sessionId: string, messages: UnifiedMessage[]) =>
+    sessions.saveMessages(sessionId, messages),
+  );
 
   ipcMain.handle(IPC.settingsGet, () => redactForRenderer(settings.get()));
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) =>
@@ -45,6 +50,14 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore): 
       : await dialog.showOpenDialog({ properties: ['openDirectory'] });
     return result.canceled ? null : (result.filePaths[0] ?? null);
   });
+
+  ipcMain.handle(IPC.fsTree, (_e, root: string, sub?: string) => listTree(root, sub));
+  ipcMain.handle(IPC.fsRead, (_e, path: string) => readFilePreview(path));
+  ipcMain.handle(IPC.fsWrite, (_e, path: string, text: string, root: string) =>
+    writeFileChecked(path, text, root),
+  );
+  ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
+  ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
 }
 
 /** API keys never cross into the renderer — masked for display only. */

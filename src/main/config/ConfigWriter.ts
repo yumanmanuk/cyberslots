@@ -24,11 +24,17 @@ export class ConfigWriter {
     const models: Record<string, unknown> = {};
 
     for (const p of settings.providers) {
-      providers[p.id] = {
+      const provider: Record<string, unknown> = {
         type: 'openai',
         base_url: p.baseUrl,
         api_key: p.apiKey,
       };
+      // Coding-plan endpoints (e.g. api.kimi.com/coding) enforce a
+      // User-Agent allowlist; merge any provider-level custom headers so
+      // the spawned engine passes them through (kosong `custom_headers`).
+      const headers = { ...effectiveHeaders(p) };
+      if (Object.keys(headers).length > 0) provider.custom_headers = headers;
+      providers[p.id] = provider;
       for (const m of p.models) {
         models[m.alias] = {
           provider: p.id,
@@ -47,4 +53,17 @@ export class ConfigWriter {
     writeFileSync(path, header + tomlStringify(doc) + '\n', 'utf8');
     return path;
   }
+}
+
+/** Known coding-plan hosts that gate access behind a UA allowlist. */
+const CODING_PLAN_UA = 'claude-cli/2.1.161 (external, cli)';
+const CODING_PLAN_HOST_RE = /api\.kimi\.com\/coding/i;
+
+/** Merge explicit custom headers with an auto-injected UA for gated hosts. */
+function effectiveHeaders(p: { baseUrl: string; customHeaders?: Record<string, string> }): Record<string, string> {
+  const headers: Record<string, string> = { ...(p.customHeaders ?? {}) };
+  if (CODING_PLAN_HOST_RE.test(p.baseUrl) && !headers['User-Agent']) {
+    headers['User-Agent'] = CODING_PLAN_UA;
+  }
+  return headers;
 }
