@@ -74,7 +74,17 @@ export class SettingsStore {
   }
 
   set(patch: Partial<AppSettings>): AppSettings {
-    const next = { ...this.get(), ...patch };
+    const current = this.get();
+    const next = { ...current, ...patch };
+    // The renderer only ever sees masked keys ("sk-xxxx…abcd"). If a patch
+    // carries a masked/empty key, keep the stored secret for that provider.
+    if (patch.providers) {
+      next.providers = patch.providers.map((p) => {
+        const old = current.providers.find((o) => o.id === p.id);
+        const masked = !p.apiKey || p.apiKey.includes('…');
+        return masked && old ? { ...p, apiKey: old.apiKey } : p;
+      });
+    }
     this.persist(next);
     this.cached = next;
     return next;

@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, ChevronDown, Square } from 'lucide-react';
+import { ArrowUp, ChevronDown, Square, Zap } from 'lucide-react';
 
 import type { PermissionMode } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
@@ -57,6 +57,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         <div className="flex items-center gap-2 px-3 pb-2.5">
           <ModelPicker sessionId={sessionId} />
           <ModePicker sessionId={sessionId} />
+          <SwarmToggle />
           <div className="flex-1" />
           {busy ? (
             <button
@@ -82,6 +83,22 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         <div className="mx-auto mt-1.5 max-w-3xl text-center text-[11px] text-ink-faint">只读规划模式 — 不会执行任何工具</div>
       )}
     </div>
+  );
+}
+
+function SwarmToggle(): JSX.Element {
+  const swarmBoost = useChatStore((s) => s.swarmBoost);
+  return (
+    <button
+      title={swarmBoost ? 'Swarm 已开：发送时指示模型并行委派子代理' : '开启 Swarm：任务自动拆解给子代理集群'}
+      onClick={() => useChatStore.setState({ swarmBoost: !swarmBoost })}
+      className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition ${
+        swarmBoost ? 'bg-accent-soft font-medium text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+      }`}
+    >
+      <Zap size={13} fill={swarmBoost ? 'currentColor' : 'none'} />
+      Swarm
+    </button>
   );
 }
 

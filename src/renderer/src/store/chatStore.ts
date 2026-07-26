@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 
 import type {
+  AppSettings,
   EngineEvent,
   EngineEventEnvelope,
   PermissionMode,
@@ -29,7 +30,11 @@ interface ChatState {
   ui: Record<string, SessionUiState>;
   activeSessionId: string | null;
   creating: boolean;
+  settings: AppSettings | null;
+  settingsOpen: boolean;
+  swarmBoost: boolean;
   init(): Promise<void>;
+  saveSettings(patch: Partial<AppSettings>): Promise<void>;
   createSession(req: SessionCreateRequest): Promise<void>;
   selectSession(id: string): void;
   sendPrompt(text: string, attachments?: string[]): Promise<void>;
@@ -70,14 +75,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
   ui: {},
   activeSessionId: null,
   creating: false,
+  settings: null,
+  settingsOpen: false,
+  swarmBoost: false,
 
   async init() {
-    const sessions = await window.cyberslots.sessionList();
-    set({ sessions });
+    const [sessions, settings] = await Promise.all([
+      window.cyberslots.sessionList(),
+      window.cyberslots.settingsGet(),
+    ]);
+    set({ sessions, settings });
     unsubscribe?.();
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
     });
+  },
+
+  async saveSettings(patch) {
+    const settings = await window.cyberslots.settingsSet(patch);
+    set({ settings });
   },
 
   async createSession(req) {
@@ -110,8 +126,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async sendPrompt(text, attachments) {
-    const { activeSessionId } = get();
+    const { activeSessionId, swarmBoost } = get();
     if (!activeSessionId) return;
+    const finalText = swarmBoost
+      ? `请优先使用 AgentSwarm 并行子代理拆解与执行以下任务（可并行的子任务尽量委派给子代理）：\n${text}`
+      : text;
     const userMsg: UnifiedMessage = {
       kind: 'user',
       id: crypto.randomUUID(),
@@ -131,7 +150,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessions: s.sessions.map((m) => (m.id === activeSessionId ? { ...m, title } : m)),
       }));
     }
-    await window.cyberslots.sessionPrompt({ sessionId: activeSessionId, text, attachments });
+    await window.cyberslots.sessionPrompt({ sessionId: activeSessionId, text: finalText, attachments });
   },
 
   async cancel() {

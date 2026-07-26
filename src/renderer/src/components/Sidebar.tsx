@@ -3,7 +3,7 @@
  * plus the "new session" entry.
  */
 
-import { Plus, Trash2, Loader2, CircleDot } from 'lucide-react';
+import { Plus, Settings, Trash2, Loader2, CircleDot } from 'lucide-react';
 
 import { useChatStore } from '../store/chatStore';
 import type { SessionMeta } from '@shared/types';
@@ -17,13 +17,22 @@ export default function Sidebar(): JSX.Element {
     <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-bg-panel">
       <div className="flex items-center justify-between px-3 pb-2 pt-3">
         <span className="text-ui font-semibold tracking-wide text-ink-soft">赛博老虎机</span>
-        <button
-          title="新会话"
-          onClick={() => useChatStore.setState({ activeSessionId: null })}
-          className="rounded-md p-1.5 text-ink-soft hover:bg-bg-hover hover:text-ink"
-        >
-          <Plus size={16} />
-        </button>
+        <div className="flex items-center">
+          <button
+            title="设置"
+            onClick={() => useChatStore.setState({ settingsOpen: true })}
+            className="rounded-md p-1.5 text-ink-soft hover:bg-bg-hover hover:text-ink"
+          >
+            <Settings size={15} />
+          </button>
+          <button
+            title="新会话"
+            onClick={() => useChatStore.setState({ activeSessionId: null })}
+            className="rounded-md p-1.5 text-ink-soft hover:bg-bg-hover hover:text-ink"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
       </div>
       <nav className="flex-1 overflow-y-auto px-2 pb-3">
         <div className="px-1 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-ink-faint">
