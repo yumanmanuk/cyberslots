@@ -270,6 +270,16 @@ export class SessionManager {
     this.forward(sessionId, { type: 'session.meta', patch: { unread: false } });
   }
 
+  /** 归档/还原 — 只改展示态，不碰引擎进程与消息数据（区别于删除）。 */
+  setArchived(sessionId: string, archived: boolean): void {
+    const s = this.require(sessionId);
+    s.meta.archived = archived;
+    // 归档顺手清未读 — 隐藏的会话不该继续亮红点。
+    if (archived) s.meta.unread = false;
+    this.touch(s.meta);
+    this.forward(sessionId, { type: 'session.meta', patch: { archived, unread: s.meta.unread } });
+  }
+
   /** Project → Workspace 升级：把同 cwd 的散装 Project 会话挂到工作区下。 */
   assignWorkspace(cwd: string, workspaceId: string): void {
     for (const s of this.sessions.values()) {

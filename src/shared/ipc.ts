@@ -37,6 +37,7 @@ export const IPC = {
   sessionGoalSet: 'session:goal-set',
   sessionGoalControl: 'session:goal-control',
   sessionMarkRead: 'session:mark-read',
+  sessionSetArchived: 'session:set-archived',
   sessionAssignWorkspace: 'session:assign-workspace',
   workspaceAnnounce: 'workspace:announce',
   settingsGet: 'settings:get',
@@ -126,6 +127,8 @@ export interface CyberSlotsApi {
   sessionGoalSet(sessionId: string, objective: string): Promise<void>;
   sessionGoalControl(sessionId: string, action: GoalControlAction): Promise<void>;
   sessionMarkRead(sessionId: string): Promise<void>;
+  /** 归档/还原：归档仅从侧栏隐藏，数据与引擎会话全保留（区别于删除）。 */
+  sessionSetArchived(sessionId: string, archived: boolean): Promise<void>;
   /** 把某个 Project（按 cwd 分组）的会话挂到工作区下（Project → Workspace 升级）。 */
   sessionAssignWorkspace(cwd: string, workspaceId: string): Promise<void>;
   /** 工作区目录集变化后，向其会话注入一次性目录公告前缀。 */

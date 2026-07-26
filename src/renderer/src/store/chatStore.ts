@@ -55,6 +55,8 @@ interface ChatState {
   settingsOpen: boolean;
   swarmBoost: boolean;
   cronOpen: boolean;
+  /** 「已归档会话」查看入口（模态）。 */
+  archivedOpen: boolean;
   cronTasks: CronTask[];
   filter: SidebarFilter;
   /** Engine-native goal per session (codex thread/goal; pushed via goal.update). */
@@ -102,6 +104,8 @@ interface ChatState {
   setGoal(objective: string): Promise<void>;
   controlGoal(action: GoalControlAction): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
+  /** 归档/还原：仅影响侧栏展示，数据与引擎会话全保留（区别于删除）。 */
+  archiveSession(id: string, archived: boolean): Promise<void>;
   deleteSession(id: string): Promise<void>;
   loadCron(): Promise<void>;
   saveCron(task: CronTask): Promise<void>;
@@ -142,6 +146,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   settingsOpen: false,
   swarmBoost: false,
   cronOpen: false,
+  archivedOpen: false,
   cronTasks: [],
   filter: DEFAULT_FILTER,
   goals: {},
@@ -438,6 +443,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async renameSession(id, title) {
     await window.cyberslots.sessionRename(id, title);
     set((s) => ({ sessions: s.sessions.map((m) => (m.id === id ? { ...m, title } : m)) }));
+  },
+
+  async archiveSession(id, archived) {
+    await window.cyberslots.sessionSetArchived(id, archived);
+    set((s) => ({
+      sessions: s.sessions.map((m) => (m.id === id ? { ...m, archived, unread: archived ? false : m.unread } : m)),
+      // 归档当前正打开的会话 → 退回新会话页（它已从侧栏消失）。
+      activeSessionId: archived && s.activeSessionId === id ? null : s.activeSessionId,
+    }));
   },
 
   async deleteSession(id) {

@@ -53,6 +53,9 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
     sessions.controlGoal(sessionId, action),
   );
   ipcMain.handle(IPC.sessionMarkRead, (_e, sessionId: string) => sessions.markRead(sessionId));
+  ipcMain.handle(IPC.sessionSetArchived, (_e, sessionId: string, archived: boolean) =>
+    sessions.setArchived(sessionId, archived),
+  );
   ipcMain.handle(IPC.sessionAssignWorkspace, (_e, cwd: string, workspaceId: string) =>
     sessions.assignWorkspace(cwd, workspaceId),
   );

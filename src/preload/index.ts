@@ -30,6 +30,7 @@ const api: CyberSlotsApi = {
   sessionGoalSet: (sessionId, objective) => ipcRenderer.invoke(IPC.sessionGoalSet, sessionId, objective),
   sessionGoalControl: (sessionId, action) => ipcRenderer.invoke(IPC.sessionGoalControl, sessionId, action),
   sessionMarkRead: (sessionId) => ipcRenderer.invoke(IPC.sessionMarkRead, sessionId),
+  sessionSetArchived: (sessionId, archived) => ipcRenderer.invoke(IPC.sessionSetArchived, sessionId, archived),
   sessionAssignWorkspace: (cwd, workspaceId) => ipcRenderer.invoke(IPC.sessionAssignWorkspace, cwd, workspaceId),
   workspaceAnnounce: (workspaceId) => ipcRenderer.invoke(IPC.workspaceAnnounce, workspaceId),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),

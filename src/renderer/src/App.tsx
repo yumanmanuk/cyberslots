@@ -9,6 +9,7 @@ import NewSessionView from './components/NewSessionView';
 import ErrorBoundary from './components/ErrorBoundary';
 import SettingsView from './components/SettingsView';
 import ScheduledView from './components/ScheduledView';
+import ArchivedView from './components/ArchivedView';
 
 export default function App(): JSX.Element {
   const t = useT();
@@ -82,6 +83,7 @@ export default function App(): JSX.Element {
       </div>
 
       <ScheduledView />
+      <ArchivedView />
     </div>
   );
 }

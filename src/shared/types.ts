@@ -56,6 +56,8 @@ export interface SessionMeta {
   workspaceId?: string;
   /** Marks sessions that finished a turn while not being viewed. */
   unread?: boolean;
+  /** 归档：不在侧栏展示，从「已归档」入口查看/还原；与删除（discard）不同，数据全保留。 */
+  archived?: boolean;
   /**
    * Fallback-fork context: serialized parent history injected before the
    * first prompt when the engine has no native session/fork. Cleared after use.

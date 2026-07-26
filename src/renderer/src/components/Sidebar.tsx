@@ -9,6 +9,7 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
   CalendarClock,
   Check,
   CircleDot,
@@ -48,6 +49,7 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
 
   const visible = useMemo(() => applyFilter(sessions, filter), [sessions, filter]);
   const groups = useMemo(() => groupSessions(visible, workspaces), [visible, workspaces]);
+  const archivedCount = useMemo(() => sessions.filter((s) => s.archived).length, [sessions]);
 
   // 分组头“+”快捷创建（默认主引擎 kimi）
   const createSession = useChatStore((s) => s.createSession);
@@ -123,6 +125,16 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
           <CalendarClock size={15} />
           {t('scheduled')}
         </button>
+        {archivedCount > 0 && (
+          <button
+            onClick={() => useChatStore.setState({ archivedOpen: true })}
+            className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+          >
+            <Archive size={15} />
+            <span className="min-w-0 flex-1 truncate text-left">{t('archivedEntry')}</span>
+            <span className="shrink-0 rounded-md bg-bg-active px-1.5 text-[10.5px] tabular-nums text-ink-faint">{archivedCount}</span>
+          </button>
+        )}
         <div className="mt-1 flex items-center justify-between px-2.5 pt-1">
           <span className="text-[11px] text-ink-faint">{t('appName')}</span>
           <GearMenu />
@@ -168,7 +180,8 @@ function groupSessions(sessions: SessionMeta[], workspaces: WorkspaceInfo[]): Gr
 }
 
 function applyFilter(sessions: SessionMeta[], f: SidebarFilter): SessionMeta[] {
-  let out = sessions;
+  // 归档的会话不进侧栏 — 只在「已归档」入口里查看。
+  let out = sessions.filter((s) => !s.archived);
   if (f.status !== 'all') {
     out = out.filter((s) => {
       switch (f.status) {
@@ -345,6 +358,7 @@ function ProjectGroup({
 function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void }): JSX.Element {
   const t = useT();
   const deleteSession = useChatStore((s) => s.deleteSession);
+  const archiveSession = useChatStore((s) => s.archiveSession);
   const [confirming, setConfirming] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -360,6 +374,11 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
     void deleteSession(meta.id);
   };
 
+  const onArchive = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    void archiveSession(meta.id, true);
+  };
+
   return (
     <div
       onClick={onClick}
@@ -372,6 +391,13 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
       <span className="min-w-0 flex-1 truncate">{meta.title}</span>
       {meta.unread && <span title="未读" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
       <span className="text-[10px] tabular-nums text-ink-faint group-hover:hidden">{timeAgo(meta.updatedAt)}</span>
+      <button
+        title={t('archive')}
+        onClick={onArchive}
+        className="hidden rounded-md p-0.5 text-ink-faint transition hover:text-ink group-hover:block"
+      >
+        <Archive size={13} />
+      </button>
       <button
         title={confirming ? t('confirmDelete') : t('remove')}
         onClick={onDelete}
