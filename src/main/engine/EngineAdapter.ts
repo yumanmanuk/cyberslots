@@ -12,7 +12,7 @@ export interface EngineAdapter {
   /** Spawn/connect and create the underlying engine session. */
   start(): Promise<{ engineSessionId: string }>;
   /** Send a user prompt; resolves when the turn ends. */
-  prompt(text: string, attachments?: string[]): Promise<void>;
+  prompt(text: string, attachments?: string[], effort?: string): Promise<void>;
   /** Interrupt the active turn. */
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<void>;
@@ -26,6 +26,13 @@ export interface EngineAdapter {
    * to history replay).
    */
   fork?(): Promise<{ engineSessionId: string } | null>;
+  /** Compact/summarize the conversation context. Optional per engine. */
+  compact?(): Promise<void>;
+  /**
+   * Inject user input into the in-flight turn (codex turn/steer).
+   * Returns false when there is no steerable active turn.
+   */
+  steer?(text: string): Promise<boolean>;
   /** Kill the engine process and release resources. */
   dispose(): Promise<void>;
 }

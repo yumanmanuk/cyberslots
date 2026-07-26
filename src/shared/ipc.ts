@@ -29,8 +29,13 @@ export const IPC = {
   sessionMessagesGet: 'session:messages-get',
   sessionMessagesSave: 'session:messages-save',
   sessionFork: 'session:fork',
+  sessionForkEngine: 'session:fork-engine',
+  sessionCompact: 'session:compact',
+  sessionSteer: 'session:steer',
+  sessionMarkRead: 'session:mark-read',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  themeSync: 'window:theme-sync',
   cronList: 'cron:list',
   cronSave: 'cron:save',
   cronDelete: 'cron:delete',
@@ -52,6 +57,8 @@ export interface SessionCreateRequest {
   modelId?: string;
   permissionMode?: PermissionMode;
   title?: string;
+  /** Bind the session to a named multi-folder workspace. */
+  workspaceId?: string;
 }
 
 export interface SessionPromptRequest {
@@ -59,6 +66,8 @@ export interface SessionPromptRequest {
   text: string;
   /** Absolute paths attached via drag/@ mention. */
   attachments?: string[];
+  /** Reasoning effort override (codex turn/start). */
+  effort?: string;
 }
 
 export interface AnswerPermissionRequest {
@@ -85,7 +94,7 @@ export interface FileContent {
   ext: string;
 }
 
-export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt';
+export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt' | 'terminal';
 
 /** Renderer-facing API exposed by the preload bridge. */
 export interface CyberSlotsApi {
@@ -102,8 +111,15 @@ export interface CyberSlotsApi {
   sessionMessagesGet(sessionId: string): Promise<UnifiedMessage[]>;
   sessionMessagesSave(sessionId: string, messages: UnifiedMessage[]): Promise<void>;
   sessionFork(sessionId: string): Promise<SessionMeta>;
+  sessionForkEngine(sessionId: string, engine: EngineId): Promise<SessionMeta>;
+  sessionCompact(sessionId: string): Promise<void>;
+  /** Steer the in-flight turn; resolves false when not steerable. */
+  sessionSteer(sessionId: string, text: string): Promise<boolean>;
+  sessionMarkRead(sessionId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** Push the active theme to main so the native title bar matches. */
+  themeSync(theme: AppSettings['theme']): Promise<void>;
   cronList(): Promise<CronTask[]>;
   cronSave(task: CronTask): Promise<CronTask[]>;
   cronDelete(id: string): Promise<CronTask[]>;
@@ -115,4 +131,6 @@ export interface CyberSlotsApi {
   fsGitStatus(root: string): Promise<Record<string, string>>;
   openIn(target: OpenTarget, path: string): Promise<void>;
   onEngineEvent(listener: (e: EngineEventEnvelope) => void): () => void;
+  /** Absolute path of a dropped File (drag-and-drop attachments). */
+  getPathForFile(file: File): string;
 }

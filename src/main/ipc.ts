@@ -7,17 +7,18 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, CronTask, PermissionMode, UnifiedMessage } from '@shared/types';
+import type { AppSettings, CronTask, EngineId, PermissionMode, UnifiedMessage } from '@shared/types';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
+import { applyWindowTheme } from './windowTheme';
 import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
 
 export function registerIpc(sessions: SessionManager, settings: SettingsStore, cron: CronService): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
   ipcMain.handle(IPC.sessionPrompt, (_e, req: SessionPromptRequest) =>
-    sessions.prompt(req.sessionId, req.text, req.attachments),
+    sessions.prompt(req.sessionId, req.text, req.attachments, req.effort),
   );
   ipcMain.handle(IPC.sessionCancel, (_e, sessionId: string) => sessions.cancel(sessionId));
   ipcMain.handle(IPC.sessionSetModel, (_e, sessionId: string, modelId: string) =>
@@ -39,11 +40,22 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
     sessions.saveMessages(sessionId, messages),
   );
   ipcMain.handle(IPC.sessionFork, (_e, sessionId: string) => sessions.fork(sessionId));
+  ipcMain.handle(IPC.sessionForkEngine, (_e, sessionId: string, engine: EngineId) =>
+    sessions.forkToEngine(sessionId, engine),
+  );
+  ipcMain.handle(IPC.sessionCompact, (_e, sessionId: string) => sessions.compact(sessionId));
+  ipcMain.handle(IPC.sessionSteer, (_e, sessionId: string, text: string) => sessions.steer(sessionId, text));
+  ipcMain.handle(IPC.sessionMarkRead, (_e, sessionId: string) => sessions.markRead(sessionId));
 
   ipcMain.handle(IPC.settingsGet, () => redactForRenderer(settings.get()));
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) =>
     redactForRenderer(settings.set(patch)),
   );
+
+  ipcMain.handle(IPC.themeSync, (e, theme: AppSettings['theme']) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) applyWindowTheme(win, theme);
+  });
 
   ipcMain.handle(IPC.cronList, () => cron.list());
   ipcMain.handle(IPC.cronSave, (_e, task: CronTask) => cron.save(task));

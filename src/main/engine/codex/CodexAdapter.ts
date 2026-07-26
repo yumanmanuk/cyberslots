@@ -189,7 +189,7 @@ export class CodexAdapter implements EngineAdapter {
 
   // ------------------------------------------------------------- actions
 
-  async prompt(text: string, attachments?: string[]): Promise<void> {
+  async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     const rpc = this.requireRpc();
     const turnId = ++this.turnId;
     this.emit({ type: 'turn.started', turnId });
@@ -207,6 +207,7 @@ export class CodexAdapter implements EngineAdapter {
       approvalPolicy: modeCfg.approvalPolicy,
     };
     if (this.modelId) params.model = this.modelId;
+    if (effort) params.effort = effort;
 
     try {
       const done = new Promise<void>((resolve) => {
@@ -266,6 +267,26 @@ export class CodexAdapter implements EngineAdapter {
       return id ? { engineSessionId: id } : null;
     } catch {
       return null;
+    }
+  }
+
+  /** Native compaction; progress streams through normal turn/item events. */
+  async compact(): Promise<void> {
+    await this.requireRpc().request('thread/compact/start', { threadId: this.threadId });
+  }
+
+  /** Native mid-turn steering (turn/steer). Review/compact turns reject it. */
+  async steer(text: string): Promise<boolean> {
+    if (!this.activeCodexTurnId) return false;
+    try {
+      await this.requireRpc().request('turn/steer', {
+        threadId: this.threadId,
+        turnId: this.activeCodexTurnId,
+        input: [{ type: 'text', text }],
+      });
+      return true;
+    } catch {
+      return false; // ActiveTurnNotSteerable etc. — caller re-queues
     }
   }
 

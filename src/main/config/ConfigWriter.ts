@@ -33,7 +33,9 @@ export class ConfigWriter {
 
     for (const p of settings.providers) {
       const provider: Record<string, unknown> = {
-        type: 'openai',
+        // kosong provider types: "openai" = chat completions,
+        // "openai_responses" = Responses API (双协议均已实测，phase0/第6轮).
+        type: p.protocol === 'openai_responses' ? 'openai_responses' : 'openai',
         base_url: p.baseUrl,
         api_key: p.apiKey,
       };

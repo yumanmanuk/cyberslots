@@ -50,8 +50,11 @@ export class AiServerHost {
     const runDir = this.materialize();
     const port = await findFreePort();
 
-    const kimi = settings.providers.find((p) => p.id === 'kimi');
-    const minimax = settings.providers.find((p) => p.id === 'minimax');
+    // Protocol-driven slot selection (自动路由): the first chat-completions
+    // provider feeds the Responses↔Chat conversion path ("kimi" slot),
+    // the first responses provider rides the passthrough ("minimax" slot).
+    const chatProvider = settings.providers.find((p) => p.protocol === 'openai_chat');
+    const responsesProvider = settings.providers.find((p) => p.protocol === 'openai_responses');
 
     const child = utilityProcess.fork(join(runDir, 'codex-server.js'), [], {
       serviceName: 'cyberslots-ai-server',
@@ -59,10 +62,10 @@ export class AiServerHost {
       env: {
         ...process.env,
         CODEX_PORT_OVERRIDE: String(port),
-        KIMI_OPENAI_BASE_URL: kimi?.baseUrl ?? '',
-        KIMI_API_KEY: kimi?.apiKey ?? '',
-        MINIMAX_OPENAI_BASE_URL: minimax?.baseUrl ?? '',
-        MINIMAX_API_KEY: minimax?.apiKey ?? '',
+        KIMI_OPENAI_BASE_URL: chatProvider?.baseUrl ?? '',
+        KIMI_API_KEY: chatProvider?.apiKey ?? '',
+        MINIMAX_OPENAI_BASE_URL: responsesProvider?.baseUrl ?? '',
+        MINIMAX_API_KEY: responsesProvider?.apiKey ?? '',
       },
     });
     child.stdout?.on('data', (d: Buffer) => console.log('[ai-server]', d.toString().trim()));

@@ -15,8 +15,31 @@ import type {
   SessionMeta,
   SlashCommandInfo,
   UnifiedMessage,
+  WorkspaceInfo,
 } from '@shared/types';
 import type { SessionCreateRequest } from '@shared/ipc';
+
+export interface SidebarFilter {
+  sort: 'updated' | 'created';
+  status: 'all' | 'running' | 'done' | 'awaiting' | 'error';
+  unreadOnly: boolean;
+}
+
+export const DEFAULT_FILTER: SidebarFilter = { sort: 'updated', status: 'all', unreadOnly: false };
+
+/** Client-side goal bookkeeping (engine-side state lives in kimi's Goal tools). */
+export interface GoalState {
+  text: string;
+  startedAt: number;
+  status: 'running' | 'paused';
+}
+
+/** A message waiting to be sent once the running turn finishes. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  attachments?: string[];
+}
 
 export interface SessionUiState {
   messages: UnifiedMessage[];
@@ -24,6 +47,8 @@ export interface SessionUiState {
   models: { current: string; available: string[] };
   modes: { current: PermissionMode; available: PermissionMode[] };
   commands: SlashCommandInfo[];
+  /** Timestamp of the latest engine event — drives the heartbeat indicator. */
+  lastActivityAt?: number;
 }
 
 interface ChatState {
@@ -36,16 +61,32 @@ interface ChatState {
   swarmBoost: boolean;
   cronOpen: boolean;
   cronTasks: CronTask[];
+  filter: SidebarFilter;
+  goals: Record<string, GoalState>;
+  /** Per-session reasoning-effort override (codex only). */
+  efforts: Record<string, string>;
+  /** Per-session outbox: messages waiting for the current turn to finish. */
+  queues: Record<string, QueuedMessage[]>;
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
+  addWorkspace(name: string, folders: string[]): Promise<WorkspaceInfo>;
+  updateWorkspace(ws: WorkspaceInfo): Promise<void>;
+  removeWorkspace(id: string): Promise<void>;
   createSession(req: SessionCreateRequest): Promise<void>;
   selectSession(id: string): void;
   forkSession(id: string): Promise<void>;
+  forkToEngine(id: string, engine: SessionMeta['engine']): Promise<void>;
+  compactSession(): Promise<void>;
   sendPrompt(text: string, attachments?: string[]): Promise<void>;
+  sendPromptTo(sessionId: string, text: string, attachments?: string[]): Promise<void>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
   answerPermission(requestId: string, optionId?: string): Promise<void>;
+  enqueue(text: string, attachments?: string[]): void;
+  removeQueued(sessionId: string, id: string): void;
+  moveQueued(sessionId: string, from: number, to: number): void;
+  steerQueued(sessionId: string, id: string): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
   loadCron(): Promise<void>;
@@ -88,6 +129,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   swarmBoost: false,
   cronOpen: false,
   cronTasks: [],
+  filter: DEFAULT_FILTER,
+  goals: {},
+  efforts: {},
+  queues: {},
 
   async init() {
     const [sessions, settings] = await Promise.all([
@@ -95,6 +140,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       window.cyberslots.settingsGet(),
     ]);
     set({ sessions, settings });
+    void window.cyberslots.themeSync(settings.theme);
     unsubscribe?.();
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
@@ -102,8 +148,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async saveSettings(patch) {
+    const prevTheme = get().settings?.theme;
     const settings = await window.cyberslots.settingsSet(patch);
     set({ settings });
+    if (settings.theme !== prevTheme) void window.cyberslots.themeSync(settings.theme);
+  },
+
+  async addWorkspace(name, folders) {
+    const ws: WorkspaceInfo = { id: crypto.randomUUID(), name, folders, createdAt: Date.now() };
+    await get().saveSettings({ workspaces: [...(get().settings?.workspaces ?? []), ws] });
+    return ws;
+  },
+
+  async updateWorkspace(ws) {
+    const workspaces = (get().settings?.workspaces ?? []).map((w) => (w.id === ws.id ? ws : w));
+    await get().saveSettings({ workspaces });
+  },
+
+  async removeWorkspace(id) {
+    const workspaces = (get().settings?.workspaces ?? []).filter((w) => w.id !== id);
+    await get().saveSettings({ workspaces });
   },
 
   async createSession(req) {
@@ -122,6 +186,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   selectSession(id) {
     set({ activeSessionId: id });
+    void window.cyberslots.sessionMarkRead(id);
+    set((s) => ({ sessions: s.sessions.map((m) => (m.id === id ? { ...m, unread: false } : m)) }));
     // Lazy-hydrate persisted history the first time a session is opened.
     if (!get().ui[id]) {
       void window.cyberslots.sessionMessagesGet(id).then((persisted) => {
@@ -147,9 +213,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  /** 换引擎继续聊：history-replay branch onto the other engine. */
+  async forkToEngine(id, engine) {
+    set({ creating: true });
+    try {
+      const meta = await window.cyberslots.sessionForkEngine(id, engine);
+      set((s) => ({ sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)] }));
+      get().selectSession(meta.id);
+    } finally {
+      set({ creating: false });
+    }
+  },
+
+  async compactSession() {
+    const { activeSessionId } = get();
+    if (activeSessionId) await window.cyberslots.sessionCompact(activeSessionId);
+  },
+
   async sendPrompt(text, attachments) {
-    const { activeSessionId, swarmBoost } = get();
+    const { activeSessionId } = get();
     if (!activeSessionId) return;
+    await get().sendPromptTo(activeSessionId, text, attachments);
+  },
+
+  async sendPromptTo(sessionId, text, attachments) {
+    const { swarmBoost, efforts } = get();
     const finalText = swarmBoost
       ? `请优先使用 AgentSwarm 并行子代理拆解与执行以下任务（可并行的子任务尽量委派给子代理）：\n${text}`
       : text;
@@ -161,18 +249,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments,
       createdAt: Date.now(),
     };
-    mutateUi(set, activeSessionId, (ui) => ({ ...ui, messages: [...ui.messages, userMsg] }));
-    schedulePersist(get, activeSessionId);
+    mutateUi(set, sessionId, (ui) => ({ ...ui, messages: [...ui.messages, userMsg] }));
+    schedulePersist(get, sessionId);
     // First user message becomes the session title.
-    const session = get().sessions.find((s) => s.id === activeSessionId);
+    const session = get().sessions.find((s) => s.id === sessionId);
     if (session && session.title === '新会话') {
       const title = text.slice(0, 24) || '新会话';
-      void window.cyberslots.sessionRename(activeSessionId, title);
+      void window.cyberslots.sessionRename(sessionId, title);
       set((s) => ({
-        sessions: s.sessions.map((m) => (m.id === activeSessionId ? { ...m, title } : m)),
+        sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, title } : m)),
       }));
     }
-    await window.cyberslots.sessionPrompt({ sessionId: activeSessionId, text: finalText, attachments });
+    await window.cyberslots.sessionPrompt({
+      sessionId,
+      text: finalText,
+      attachments,
+      effort: efforts[sessionId],
+    });
   },
 
   async cancel() {
@@ -187,7 +280,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   async setMode(mode) {
     const { activeSessionId } = get();
-    if (activeSessionId) await window.cyberslots.sessionSetMode(activeSessionId, mode);
+    if (!activeSessionId) return;
+    await window.cyberslots.sessionSetMode(activeSessionId, mode);
+    // Optimistic: kimi doesn't always push current_mode_update after
+    // setSessionMode, which left the mode switch looking dead in the UI.
+    mutateUi(set, activeSessionId, (ui) => ({ ...ui, modes: { ...ui.modes, current: mode } }));
   },
 
   async answerPermission(requestId, optionId) {
@@ -198,6 +295,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
         requestId,
         optionId,
       });
+    }
+  },
+
+  enqueue(text, attachments) {
+    const { activeSessionId } = get();
+    if (!activeSessionId) return;
+    const item: QueuedMessage = { id: crypto.randomUUID(), text, attachments };
+    set((s) => ({ queues: { ...s.queues, [activeSessionId]: [...(s.queues[activeSessionId] ?? []), item] } }));
+  },
+
+  removeQueued(sessionId, id) {
+    set((s) => ({ queues: { ...s.queues, [sessionId]: (s.queues[sessionId] ?? []).filter((q) => q.id !== id) } }));
+  },
+
+  moveQueued(sessionId, from, to) {
+    set((s) => {
+      const list = [...(s.queues[sessionId] ?? [])];
+      if (from < 0 || from >= list.length || to < 0 || to >= list.length) return {};
+      const [item] = list.splice(from, 1);
+      list.splice(to, 0, item!);
+      return { queues: { ...s.queues, [sessionId]: list } };
+    });
+  },
+
+  /** Steer: codex injects into the running turn; when not steerable the
+   *  item jumps to the queue head instead (kimi 降级路径). */
+  async steerQueued(sessionId, id) {
+    const item = (get().queues[sessionId] ?? []).find((q) => q.id === id);
+    if (!item) return;
+    const ok = await window.cyberslots.sessionSteer(sessionId, item.text);
+    if (ok) {
+      get().removeQueued(sessionId, id);
+    } else {
+      const list = get().queues[sessionId] ?? [];
+      const idx = list.findIndex((q) => q.id === id);
+      if (idx > 0) get().moveQueued(sessionId, idx, 0);
     }
   },
 
@@ -245,6 +378,8 @@ function mutateUi(set: SetFn, sessionId: string, fn: (ui: SessionUiState) => Ses
 }
 
 function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEventEnvelope): void {
+  // Any engine event counts as liveness — feeds the stall detector.
+  mutateUi(set, sessionId, (ui) => ({ ...ui, lastActivityAt: Date.now() }));
   switch (event.type) {
     case 'session.status':
       set((s) => ({
@@ -282,6 +417,25 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         usage: { used: event.used, size: event.size, costUsd: event.costUsd },
       }));
       return;
+    case 'turn.ended': {
+      // Unread bookkeeping: main marks every finished session unread; the
+      // renderer immediately clears it for the session being viewed.
+      const active = get().activeSessionId === sessionId;
+      if (active) void window.cyberslots.sessionMarkRead(sessionId);
+      set((s) => ({
+        sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, unread: !active } : m)),
+      }));
+      mutateUi(set, sessionId, (ui) => ({ ...ui, messages: foldMessage(ui.messages, event) }));
+      schedulePersist(get, sessionId);
+      // 自动派发等待队列的下一条（稍作延迟，让引擎回到 idle）。
+      const queue = get().queues[sessionId] ?? [];
+      if (queue.length > 0 && event.stopReason !== 'error') {
+        const [next, ...rest] = queue;
+        set((s) => ({ queues: { ...s.queues, [sessionId]: rest } }));
+        setTimeout(() => void get().sendPromptTo(sessionId, next!.text, next!.attachments), 500);
+      }
+      return;
+    }
     default:
       mutateUi(set, sessionId, (ui) => ({ ...ui, messages: foldMessage(ui.messages, event) }));
       schedulePersist(get, sessionId);

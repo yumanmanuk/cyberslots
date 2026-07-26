@@ -92,6 +92,15 @@ export async function openIn(target: OpenTarget, path: string): Promise<void> {
     case 'wt':
       await spawnDetached(['wt', '-d', quoted]);
       return;
+    case 'terminal': {
+      // 快捷“打开终端”：Windows Terminal 优先，缺失时退回 PowerShell 窗口。
+      try {
+        await spawnDetached(['wt', '-d', quoted]);
+      } catch {
+        await spawnDetached(['start', 'powershell', '-NoExit'], quoted);
+      }
+      return;
+    }
     case 'gitbash': {
       // Git Bash: open a login shell rooted at the path.
       const bash = process.env.PROGRAMFILES

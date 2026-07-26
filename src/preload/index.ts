@@ -3,7 +3,7 @@
  * contextBridge. Only IPC passthrough; zero logic.
  */
 
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import type { CyberSlotsApi } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
@@ -24,8 +24,13 @@ const api: CyberSlotsApi = {
   sessionMessagesSave: (sessionId, messages) =>
     ipcRenderer.invoke(IPC.sessionMessagesSave, sessionId, messages),
   sessionFork: (sessionId) => ipcRenderer.invoke(IPC.sessionFork, sessionId),
+  sessionForkEngine: (sessionId, engine) => ipcRenderer.invoke(IPC.sessionForkEngine, sessionId, engine),
+  sessionCompact: (sessionId) => ipcRenderer.invoke(IPC.sessionCompact, sessionId),
+  sessionSteer: (sessionId, text) => ipcRenderer.invoke(IPC.sessionSteer, sessionId, text),
+  sessionMarkRead: (sessionId) => ipcRenderer.invoke(IPC.sessionMarkRead, sessionId),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
+  themeSync: (theme) => ipcRenderer.invoke(IPC.themeSync, theme),
   cronList: () => ipcRenderer.invoke(IPC.cronList),
   cronSave: (task) => ipcRenderer.invoke(IPC.cronSave, task),
   cronDelete: (id) => ipcRenderer.invoke(IPC.cronDelete, id),
@@ -42,6 +47,8 @@ const api: CyberSlotsApi = {
     ipcRenderer.on(IPC.engineEvent, wrapped);
     return () => ipcRenderer.removeListener(IPC.engineEvent, wrapped);
   },
+  /** Absolute path of a dropped File (drag-and-drop attachments). */
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 };
 
 contextBridge.exposeInMainWorld('cyberslots', api);

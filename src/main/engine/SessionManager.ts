@@ -5,6 +5,7 @@
  */
 
 import { app } from 'electron';
+import { BrowserWindow, Notification } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -55,13 +56,22 @@ export class SessionManager {
   async create(req: SessionCreateRequest): Promise<SessionMeta> {
     const id = randomUUID();
     const settings = this.settings.get();
-    const cwd = req.cwd || this.makeScratchDir(id);
+    const workspace = req.workspaceId ? settings.workspaces.find((w) => w.id === req.workspaceId) : undefined;
+    // Workspace sessions run in the first root; the remaining roots are
+    // announced to the engine via a one-shot context prefix (kimi ACP has
+    // no stable multi-root field yet — 方案 P1 的提示注入路径).
+    const cwd = workspace?.folders[0] ?? req.cwd ?? '';
     const meta: SessionMeta = {
       id,
       engine: req.engine,
       title: req.title ?? '新会话',
-      cwd,
-      chatMode: req.cwd ? 'work' : 'chat',
+      cwd: cwd || this.makeScratchDir(id),
+      chatMode: cwd ? 'work' : 'chat',
+      workspaceId: workspace?.id,
+      contextSeed:
+        workspace && workspace.folders.length > 1
+          ? `本会话绑定多根工作区「${workspace.name}」，包含以下根目录（当前工作目录是第一个，其余目录也属于本项目范围，可用绝对路径访问）：\n${workspace.folders.join('\n')}`
+          : undefined,
       modelId: req.modelId ?? settings.defaultModelId,
       permissionMode: req.permissionMode ?? settings.defaultPermissionMode,
       status: 'starting',
@@ -96,7 +106,7 @@ export class SessionManager {
     return meta;
   }
 
-  async prompt(sessionId: string, text: string, attachments?: string[]): Promise<void> {
+  async prompt(sessionId: string, text: string, attachments?: string[], effort?: string): Promise<void> {
     const s = this.require(sessionId);
     await this.ensureRuntime(s);
     this.touch(s.meta);
@@ -107,7 +117,7 @@ export class SessionManager {
       s.meta.contextSeed = undefined;
       this.persistMetas();
     }
-    await s.adapter?.prompt(engineText, attachments);
+    await s.adapter?.prompt(engineText, attachments, effort);
     this.touch(s.meta);
   }
 
@@ -168,6 +178,49 @@ export class SessionManager {
     return meta;
   }
 
+  /**
+   * “换引擎继续聊”：历史重放式分支到另一个引擎（引擎侧无法跨引擎
+   * 迁移会话，所以始终走 contextSeed 前缀注入）。
+   */
+  forkToEngine(sessionId: string, engine: SessionMeta['engine']): SessionMeta {
+    const src = this.require(sessionId);
+    const id = randomUUID();
+    const history = this.getMessages(sessionId);
+    const meta: SessionMeta = {
+      ...src.meta,
+      id,
+      engine,
+      engineSessionId: undefined,
+      title: `⇄ ${src.meta.title.replace(/^[⑂⇄] /, '')}`,
+      parentId: src.meta.id,
+      contextSeed: serializeHistory(history),
+      status: 'closed',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+    };
+    this.sessions.set(id, { meta, adapter: undefined });
+    this.persistMetas();
+    this.saveMessages(id, history);
+    return meta;
+  }
+
+  async compact(sessionId: string): Promise<void> {
+    const s = this.require(sessionId);
+    await this.ensureRuntime(s);
+    if (!s.adapter?.compact) throw new Error(`引擎 ${s.meta.engine} 不支持上下文压缩`);
+    await s.adapter.compact();
+  }
+
+  /** Steer the running turn; false = not supported / not steerable (re-queue). */
+  async steer(sessionId: string, text: string): Promise<boolean> {
+    const s = this.require(sessionId);
+    if (!s.adapter?.steer) return false;
+    const ok = await s.adapter.steer(text);
+    if (ok) this.forward(sessionId, { type: 'user.echo', turnId: 0, text });
+    return ok;
+  }
+
   async setModel(sessionId: string, modelId: string): Promise<void> {
     const s = this.require(sessionId);
     await s.adapter?.setModel(modelId);
@@ -195,6 +248,14 @@ export class SessionManager {
     const s = this.require(sessionId);
     s.meta.title = title;
     this.touch(s.meta);
+  }
+
+  markRead(sessionId: string): void {
+    const s = this.sessions.get(sessionId);
+    if (!s || !s.meta.unread) return;
+    s.meta.unread = false;
+    this.touch(s.meta);
+    this.forward(sessionId, { type: 'session.meta', patch: { unread: false } });
   }
 
   async close(sessionId: string): Promise<void> {
@@ -293,9 +354,26 @@ export class SessionManager {
         s.meta.modelId = event.current;
       } else if (event.type === 'modes.update' && event.current) {
         s.meta.permissionMode = event.current;
+      } else if (event.type === 'turn.ended') {
+        s.meta.unread = true;
+        this.persistMetas();
       }
+      this.maybeNotify(s.meta, event);
     }
     this.forward(sessionId, event);
+  }
+
+  /** System notifications per user preference; only when the window is unfocused. */
+  private maybeNotify(meta: SessionMeta, event: EngineEvent): void {
+    const prefs = this.settings.get().notifications;
+    if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
+    if (event.type === 'turn.ended' && prefs.taskComplete && !meta.title.startsWith('⏰')) {
+      new Notification({ title: `任务完成：${meta.title}`, body: '回到窗口查看结果' }).show();
+    } else if (event.type === 'permission.request' && prefs.question) {
+      new Notification({ title: `需要你的确认：${meta.title}`, body: event.title }).show();
+    } else if (event.type === 'error' && prefs.error) {
+      new Notification({ title: `出错了：${meta.title}`, body: event.message.slice(0, 120) }).show();
+    }
   }
 
   private forward(sessionId: string, event: EngineEvent): void {

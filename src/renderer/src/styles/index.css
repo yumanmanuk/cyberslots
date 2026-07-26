@@ -66,6 +66,17 @@ body,
   overflow: hidden;
 }
 
+/* Frameless window: header strips are drag regions, controls opt out. */
+.drag {
+  -webkit-app-region: drag;
+}
+.drag button,
+.drag input,
+.drag select,
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
 body {
   @apply bg-bg text-ink font-sans antialiased;
   font-size: 14px;

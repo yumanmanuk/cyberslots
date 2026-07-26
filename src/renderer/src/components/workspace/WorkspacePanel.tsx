@@ -16,7 +16,12 @@ import FilePreview from './FilePreview';
 interface Props {
   sessionId: string;
   root: string;
+  /** Controlled tab — owned by ChatView's right icon rail. */
+  tab: PanelTab;
+  onTabChange: (tab: PanelTab) => void;
 }
+
+export type PanelTab = 'files' | 'changes' | 'agents';
 
 interface ChangeEntry {
   path: string;
@@ -26,8 +31,7 @@ interface ChangeEntry {
   count: number;
 }
 
-export default function WorkspacePanel({ sessionId, root }: Props): JSX.Element {
-  const [tab, setTab] = useState<'changes' | 'files' | 'agents'>('files');
+export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Props): JSX.Element {
   const [openFile, setOpenFile] = useState<string | null>(null);
   const changes = useChangedFiles(sessionId);
   const agents = useAgentActivity(sessionId);
@@ -35,16 +39,16 @@ export default function WorkspacePanel({ sessionId, root }: Props): JSX.Element 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
       <div className="flex shrink-0 items-center gap-1 border-b border-line px-2 py-1.5">
-        <TabButton active={tab === 'files'} onClick={() => setTab('files')} icon={<FolderTree size={13} />} label="文件" />
+        <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
         <TabButton
           active={tab === 'changes'}
-          onClick={() => setTab('changes')}
+          onClick={() => onTabChange('changes')}
           icon={<FileDiff size={13} />}
           label={changes.length > 0 ? `变更 ${changes.length}` : '变更'}
         />
         <TabButton
           active={tab === 'agents'}
-          onClick={() => setTab('agents')}
+          onClick={() => onTabChange('agents')}
           icon={<Bot size={13} />}
           label={agents.length > 0 ? `Agents ${agents.length}` : 'Agents'}
         />

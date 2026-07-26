@@ -12,6 +12,8 @@ import { SessionManager } from './engine/SessionManager';
 import { CronService } from './cron/CronService';
 import { AiServerHost } from './proxy/AiServerHost';
 import { registerIpc } from './ipc';
+import { THEME_CHROME, TITLEBAR_HEIGHT, applyWindowTheme } from './windowTheme';
+import type { AppSettings } from '@shared/types';
 
 const isDev = !!process.env.ELECTRON_RENDERER_URL;
 
@@ -32,16 +34,21 @@ let sessions: SessionManager | undefined;
 let cron: CronService | undefined;
 let proxy: AiServerHost | undefined;
 
-function createWindow(): void {
+function createWindow(theme: AppSettings['theme']): void {
+  const chrome = THEME_CHROME[theme] ?? THEME_CHROME.notion;
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 960,
     minHeight: 600,
     title: '赛博老虎机',
-    backgroundColor: '#FFFCF0',
+    backgroundColor: chrome.bg,
     show: false,
     autoHideMenuBar: true,
+    // Frameless-with-overlay: the renderer owns the header strip so the
+    // window chrome follows the active theme (主题切换时顶部融为一体).
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: chrome.bg, symbolColor: chrome.symbol, height: TITLEBAR_HEIGHT },
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       sandbox: false,
@@ -50,6 +57,7 @@ function createWindow(): void {
     },
   });
 
+  applyWindowTheme(mainWindow, theme);
   mainWindow.once('ready-to-show', () => mainWindow?.show());
 
   // External links open in the default browser, never in-app.
@@ -85,10 +93,10 @@ if (!gotLock) {
     cron = new CronService(sessions);
     registerIpc(sessions, settings, cron);
     cron.start();
-    createWindow();
+    createWindow(settings.get().theme);
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      if (BrowserWindow.getAllWindows().length === 0) createWindow(settings.get().theme);
     });
   });
 

@@ -52,6 +52,10 @@ export interface SessionMeta {
   pinned: boolean;
   /** Set when this session was forked off another one (sidechat). */
   parentId?: string;
+  /** Sidebar grouping: id of the WorkspaceInfo this session belongs to. */
+  workspaceId?: string;
+  /** Marks sessions that finished a turn while not being viewed. */
+  unread?: boolean;
   /**
    * Fallback-fork context: serialized parent history injected before the
    * first prompt when the engine has no native session/fork. Cleared after use.
@@ -188,21 +192,52 @@ export interface EngineEventEnvelope {
 
 // ------------------------------------------------------------- settings
 
+/** Wire protocol a provider endpoint speaks — drives automatic routing
+ *  (kimi config.toml `type` and the embedded proxy's convert/passthrough
+ *  slot selection). */
+export type ProviderProtocol = 'openai_chat' | 'openai_responses';
+
 export interface ProviderSettings {
-  id: string; // 'kimi' | 'minimax' | custom
+  id: string; // stable unique id (preset id or custom-<uuid>)
+  /** Display name, e.g. "Kimi For Coding". */
+  name: string;
   baseUrl: string;
+  protocol: ProviderProtocol;
   apiKey: string;
   models: Array<{ alias: string; model: string; maxContextSize: number }>;
   /** Extra headers merged into requests, e.g. a UA to pass coding-plan allowlists. */
   customHeaders?: Record<string, string>;
 }
 
+/** A named multi-folder workspace (sidebar top-level group). */
+export interface WorkspaceInfo {
+  id: string;
+  name: string;
+  /** Absolute folder paths; the first one is the engine cwd. */
+  folders: string[];
+  createdAt: number;
+}
+
+export interface NotificationSettings {
+  /** Notify when a turn finishes while the window is unfocused. */
+  taskComplete: boolean;
+  /** Notify on permission / ask-user requests. */
+  question: boolean;
+  /** Notify on engine/provider errors. */
+  error: boolean;
+}
+
+export type AppLanguage = 'zh' | 'en';
+
 export interface AppSettings {
   providers: ProviderSettings[];
   defaultModelId: string;
   theme: 'notion' | 'light' | 'dark';
+  language: AppLanguage;
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';
+  notifications: NotificationSettings;
+  workspaces: WorkspaceInfo[];
 }
 
 // ------------------------------------------------------------ cron tasks

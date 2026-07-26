@@ -263,6 +263,12 @@ export class KimiAdapter implements EngineAdapter {
     }
   }
 
+  /** Context compaction rides the CLI's native /compact slash command
+   *  (listed in available_commands, phase 0). Runs as a normal turn. */
+  async compact(): Promise<void> {
+    await this.prompt('/compact');
+  }
+
   answerPermission(requestId: string, optionId?: string): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;

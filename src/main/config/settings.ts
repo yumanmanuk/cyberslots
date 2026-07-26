@@ -30,9 +30,35 @@ const DEFAULTS: AppSettings = {
   providers: [],
   defaultModelId: '',
   theme: 'notion',
+  language: 'zh',
   defaultPermissionMode: 'default',
   sendKey: 'enter',
+  notifications: { taskComplete: true, question: true, error: true },
+  workspaces: [],
 };
+
+/** Backfill fields added over time so old settings.json keep working. */
+function migrate(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    language: settings.language ?? 'zh',
+    notifications: { ...DEFAULTS.notifications, ...(settings.notifications ?? {}) },
+    workspaces: settings.workspaces ?? [],
+    providers: settings.providers.map((p) => ({
+      ...p,
+      name: p.name || presetName(p.id) || p.id,
+      // Pre-generic builds had no protocol: kimi-ish endpoints spoke chat
+      // completions, everything else rode the responses passthrough.
+      protocol: p.protocol ?? (/kimi|moonshot|deepseek/i.test(`${p.id} ${p.baseUrl}`) ? 'openai_chat' : 'openai_responses'),
+    })),
+  };
+}
+
+function presetName(id: string): string | undefined {
+  if (/^kimi$/i.test(id)) return 'Kimi For Coding';
+  if (/^minimax$/i.test(id)) return 'MiniMax';
+  return undefined;
+}
 
 export class SettingsStore {
   private cached: AppSettings | undefined;
@@ -51,7 +77,7 @@ export class SettingsStore {
     if (existsSync(this.file)) {
       try {
         const stored = JSON.parse(readFileSync(this.file, 'utf8')) as StoredSettings;
-        settings = { ...DEFAULTS, ...stored, providers: stored.providers.map(decryptProvider) };
+        settings = migrate({ ...DEFAULTS, ...stored, providers: stored.providers.map(decryptProvider) });
         storedHash = stored.devSeedHash;
       } catch (err) {
         console.error('[settings] failed to read settings.json, using defaults:', err);
@@ -136,7 +162,9 @@ function seedFromDevSecrets():
     >;
     const providers: ProviderSettings[] = Object.entries(raw).map(([id, v]) => ({
       id,
+      name: id === 'kimi' ? 'Kimi For Coding' : id === 'minimax' ? 'MiniMax' : id,
       baseUrl: v.baseUrl,
+      protocol: id === 'minimax' ? 'openai_responses' : 'openai_chat',
       apiKey: v.apiKey,
       models: [{ alias: v.model, model: v.model, maxContextSize: v.maxContextSize }],
       ...(v.userAgent ? { customHeaders: { 'User-Agent': v.userAgent } } : {}),
