@@ -9,6 +9,7 @@
  */
 
 import { app, safeStorage } from 'electron';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -21,6 +22,8 @@ interface StoredProvider extends Omit<ProviderSettings, 'apiKey'> {
 
 interface StoredSettings extends Omit<AppSettings, 'providers'> {
   providers: StoredProvider[];
+  /** Hash of .dev/secrets.json at seed time — reseed when it changes (dev only). */
+  devSeedHash?: string;
 }
 
 const DEFAULTS: AppSettings = {
@@ -33,6 +36,7 @@ const DEFAULTS: AppSettings = {
 
 export class SettingsStore {
   private cached: AppSettings | undefined;
+  private devSeedHash: string | undefined;
 
   constructor(private readonly dir = app.getPath('userData')) {}
 
@@ -43,21 +47,27 @@ export class SettingsStore {
   get(): AppSettings {
     if (this.cached) return this.cached;
     let settings = { ...DEFAULTS };
+    let storedHash: string | undefined;
     if (existsSync(this.file)) {
       try {
         const stored = JSON.parse(readFileSync(this.file, 'utf8')) as StoredSettings;
         settings = { ...DEFAULTS, ...stored, providers: stored.providers.map(decryptProvider) };
+        storedHash = stored.devSeedHash;
       } catch (err) {
         console.error('[settings] failed to read settings.json, using defaults:', err);
       }
     }
-    if (settings.providers.length === 0) {
-      const seeded = seedFromDevSecrets();
-      if (seeded) {
-        settings.providers = seeded.providers;
-        settings.defaultModelId = seeded.defaultModelId;
-        this.persist(settings);
-      }
+    // Dev reseed: whenever .dev/secrets.json changes, it wins — stale seeded
+    // providers caused real confusion during testing (wrong endpoint/model).
+    const seed = seedFromDevSecrets();
+    if (seed && (settings.providers.length === 0 || storedHash !== seed.hash)) {
+      settings.providers = seed.providers;
+      settings.defaultModelId = seed.defaultModelId;
+      this.devSeedHash = seed.hash;
+      this.persist(settings);
+      console.log('[settings] providers (re)seeded from .dev/secrets.json');
+    } else {
+      this.devSeedHash = storedHash;
     }
     this.cached = settings;
     return settings;
@@ -75,6 +85,7 @@ export class SettingsStore {
     const stored: StoredSettings = {
       ...settings,
       providers: settings.providers.map(encryptProvider),
+      devSeedHash: this.devSeedHash,
     };
     writeFileSync(this.file, JSON.stringify(stored, null, 2), 'utf8');
   }
@@ -101,12 +112,15 @@ function decryptProvider(p: StoredProvider): ProviderSettings {
   return { ...rest, apiKey };
 }
 
-function seedFromDevSecrets(): Pick<AppSettings, 'providers' | 'defaultModelId'> | undefined {
+function seedFromDevSecrets():
+  | (Pick<AppSettings, 'providers' | 'defaultModelId'> & { hash: string })
+  | undefined {
   try {
     // In dev, app.getAppPath() is the project root.
     const secretsPath = join(app.getAppPath(), '.dev', 'secrets.json');
     if (!existsSync(secretsPath)) return undefined;
-    const raw = JSON.parse(readFileSync(secretsPath, 'utf8')) as Record<
+    const rawText = readFileSync(secretsPath, 'utf8');
+    const raw = JSON.parse(rawText) as Record<
       string,
       { baseUrl: string; apiKey: string; model: string; maxContextSize: number; userAgent?: string }
     >;
@@ -119,8 +133,8 @@ function seedFromDevSecrets(): Pick<AppSettings, 'providers' | 'defaultModelId'>
     }));
     // MiniMax is the verified-working provider for now (phase0 findings).
     const defaultModelId = raw['minimax']?.model ?? providers[0]?.models[0]?.alias ?? '';
-    console.log('[settings] seeded providers from .dev/secrets.json');
-    return { providers, defaultModelId };
+    const hash = createHash('sha256').update(rawText).digest('hex').slice(0, 16);
+    return { providers, defaultModelId, hash };
   } catch (err) {
     console.error('[settings] dev secrets seed failed:', err);
     return undefined;

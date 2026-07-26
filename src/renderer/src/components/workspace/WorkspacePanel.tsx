@@ -70,25 +70,36 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
   );
 }
 
-/** Aggregate tool-call diffs into a per-file change summary. */
+/** Aggregate tool-call activity into a per-file change summary.
+ *  Prefers structured diffs; falls back to edit/write tool locations
+ *  (some engines report file writes without a diff payload). */
 function useChangedFiles(sessionId: string): ChangeEntry[] {
   const messages = useChatStore((s) => s.ui[sessionId]?.messages);
   return useMemo(() => {
     const byPath = new Map<string, ChangeEntry>();
-    for (const m of messages ?? []) {
-      if (m.kind !== 'tool_call') continue;
-      const diff = (m as Extract<UnifiedMessage, { kind: 'tool_call' }>).content?.diff;
-      if (!diff?.path) continue;
-      const adds = diff.newText ? diff.newText.split('\n').length : 0;
-      const dels = diff.oldText ? diff.oldText.split('\n').length : 0;
-      const prev = byPath.get(diff.path);
-      byPath.set(diff.path, {
-        path: diff.path,
-        name: diff.path.split(/[\\/]/).pop() ?? diff.path,
+    const bump = (path: string, adds: number, dels: number): void => {
+      const prev = byPath.get(path);
+      byPath.set(path, {
+        path,
+        name: path.split(/[\\/]/).pop() ?? path,
         adds: (prev?.adds ?? 0) + adds,
         dels: (prev?.dels ?? 0) + dels,
         count: (prev?.count ?? 0) + 1,
       });
+    };
+    for (const m of messages ?? []) {
+      if (m.kind !== 'tool_call') continue;
+      const tc = m as Extract<UnifiedMessage, { kind: 'tool_call' }>;
+      const diff = tc.content?.diff;
+      if (diff?.path) {
+        bump(
+          diff.path,
+          diff.newText ? diff.newText.split('\n').length : 0,
+          diff.oldText ? diff.oldText.split('\n').length : 0,
+        );
+      } else if ((tc.toolKind === 'edit' || tc.toolKind === 'delete' || tc.toolKind === 'move') && tc.status === 'completed') {
+        for (const loc of tc.locations ?? []) bump(loc, 0, 0);
+      }
     }
     return [...byPath.values()];
   }, [messages]);
@@ -117,8 +128,14 @@ function ChangesList({ changes, onOpen }: { changes: ChangeEntry[]; onOpen: (pat
           >
             <span className="min-w-0 flex-1 truncate">{c.name}</span>
             {c.count > 1 && <span className="rounded bg-bg-active px-1 text-[10px] text-ink-faint">×{c.count}</span>}
-            <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
-            <span className="font-mono text-[11px] text-err">-{c.dels}</span>
+            {c.adds + c.dels > 0 ? (
+              <>
+                <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
+                <span className="font-mono text-[11px] text-err">-{c.dels}</span>
+              </>
+            ) : (
+              <span className="rounded bg-warn/10 px-1 text-[10px] text-warn">已写入</span>
+            )}
           </button>
         ))}
       </div>

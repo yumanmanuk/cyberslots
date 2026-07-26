@@ -1,0 +1,46 @@
+/**
+ * ErrorBoundary — last line of defense: a component crash degrades to an
+ * inline error card instead of unmounting the whole app (white screen).
+ */
+
+import { Component, type ReactNode } from 'react';
+
+interface Props {
+  children: ReactNode;
+}
+
+interface State {
+  error: Error | null;
+}
+
+export default class ErrorBoundary extends Component<Props, State> {
+  override state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  override componentDidCatch(error: Error, info: { componentStack?: string | null }): void {
+    console.error('[ErrorBoundary]', error, info.componentStack);
+  }
+
+  override render(): ReactNode {
+    if (this.state.error) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-8">
+          <div className="text-sm font-medium text-err">界面渲染出错（已隔离，应用仍在运行）</div>
+          <pre className="max-h-48 max-w-2xl overflow-auto rounded-lg bg-bg-panel px-4 py-3 font-mono text-[12px] text-ink-soft">
+            {this.state.error.message}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            className="rounded-lg border border-line bg-bg-input px-4 py-1.5 text-ui hover:border-accent hover:text-accent"
+          >
+            重试渲染
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}

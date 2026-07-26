@@ -4,6 +4,7 @@
  * keeps only a compact historical record; actions live here.
  */
 
+import { useMemo } from 'react';
 import { KeyRound, MessageCircleQuestion } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
@@ -12,12 +13,17 @@ import { useChatStore } from '../store/chatStore';
 type Decision = Extract<UnifiedMessage, { kind: 'permission' | 'ask_user' }>;
 
 export default function PermissionSheet({ sessionId }: { sessionId: string }): JSX.Element | null {
-  const pending = useChatStore((s) =>
-    (s.ui[sessionId]?.messages ?? []).filter(
-      (m): m is Decision => (m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined,
-    ),
-  );
+  // Select the stable messages reference; derive with useMemo. Returning a
+  // fresh array from the selector would loop useSyncExternalStore forever.
+  const messages = useChatStore((s) => s.ui[sessionId]?.messages);
   const answerPermission = useChatStore((s) => s.answerPermission);
+  const pending = useMemo(
+    () =>
+      (messages ?? []).filter(
+        (m): m is Decision => (m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined,
+      ),
+    [messages],
+  );
   const current = pending[0];
   if (!current) return null;
 
