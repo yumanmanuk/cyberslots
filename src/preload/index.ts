@@ -23,8 +23,13 @@ const api: CyberSlotsApi = {
   sessionMessagesGet: (sessionId) => ipcRenderer.invoke(IPC.sessionMessagesGet, sessionId),
   sessionMessagesSave: (sessionId, messages) =>
     ipcRenderer.invoke(IPC.sessionMessagesSave, sessionId, messages),
+  sessionFork: (sessionId) => ipcRenderer.invoke(IPC.sessionFork, sessionId),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
+  cronList: () => ipcRenderer.invoke(IPC.cronList),
+  cronSave: (task) => ipcRenderer.invoke(IPC.cronSave, task),
+  cronDelete: (id) => ipcRenderer.invoke(IPC.cronDelete, id),
+  cronRunNow: (id) => ipcRenderer.invoke(IPC.cronRunNow, id),
   dialogPickFolder: () => ipcRenderer.invoke(IPC.dialogPickFolder),
   fsTree: (root, sub) => ipcRenderer.invoke(IPC.fsTree, root, sub),
   fsRead: (path) => ipcRenderer.invoke(IPC.fsRead, path),

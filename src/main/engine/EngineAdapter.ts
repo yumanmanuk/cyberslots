@@ -19,6 +19,13 @@ export interface EngineAdapter {
   setMode(mode: PermissionMode): Promise<void>;
   /** Answer a pending permission / ask-user request. */
   answerPermission(requestId: string, optionId?: string): void;
+  /**
+   * Fork the live engine session into an independent copy (sidechat).
+   * Optional — engines without native fork omit it; implementations
+   * return null when the CLI rejects the method (client then falls back
+   * to history replay).
+   */
+  fork?(): Promise<{ engineSessionId: string } | null>;
   /** Kill the engine process and release resources. */
   dispose(): Promise<void>;
 }

@@ -3,10 +3,33 @@
  * plus the "new session" entry.
  */
 
-import { Plus, Settings, Trash2, Loader2, CircleDot } from 'lucide-react';
+import { CalendarClock, Plus, Settings, Trash2, Loader2, CircleDot } from 'lucide-react';
 
 import { useChatStore } from '../store/chatStore';
 import type { SessionMeta } from '@shared/types';
+
+/** Order sessions so fork branches nest right under their parent. */
+function arrange(sessions: SessionMeta[]): Array<{ meta: SessionMeta; depth: number }> {
+  const byParent = new Map<string, SessionMeta[]>();
+  const ids = new Set(sessions.map((s) => s.id));
+  const roots: SessionMeta[] = [];
+  for (const s of sessions) {
+    if (s.parentId && ids.has(s.parentId)) {
+      const list = byParent.get(s.parentId) ?? [];
+      list.push(s);
+      byParent.set(s.parentId, list);
+    } else {
+      roots.push(s);
+    }
+  }
+  const out: Array<{ meta: SessionMeta; depth: number }> = [];
+  const walk = (meta: SessionMeta, depth: number): void => {
+    out.push({ meta, depth });
+    for (const child of byParent.get(meta.id) ?? []) walk(child, Math.min(depth + 1, 3));
+  };
+  for (const r of roots) walk(r, 0);
+  return out;
+}
 
 export default function Sidebar(): JSX.Element {
   const sessions = useChatStore((s) => s.sessions);
@@ -18,6 +41,13 @@ export default function Sidebar(): JSX.Element {
       <div className="flex items-center justify-between px-3 pb-2 pt-3">
         <span className="text-ui font-semibold tracking-wide text-ink-soft">赛博老虎机</span>
         <div className="flex items-center">
+          <button
+            title="定时任务"
+            onClick={() => useChatStore.setState({ cronOpen: true })}
+            className="rounded-md p-1.5 text-ink-soft hover:bg-bg-hover hover:text-ink"
+          >
+            <CalendarClock size={15} />
+          </button>
           <button
             title="设置"
             onClick={() => useChatStore.setState({ settingsOpen: true })}
@@ -41,19 +71,20 @@ export default function Sidebar(): JSX.Element {
         {sessions.length === 0 && (
           <div className="px-2 py-6 text-center text-ui text-ink-faint">还没有会话</div>
         )}
-        {sessions.map((s) => (
-          <SessionRow key={s.id} meta={s} active={s.id === activeSessionId} onClick={() => selectSession(s.id)} />
+        {arrange(sessions).map(({ meta, depth }) => (
+          <SessionRow key={meta.id} meta={meta} depth={depth} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
         ))}
       </nav>
     </aside>
   );
 }
 
-function SessionRow({ meta, active, onClick }: { meta: SessionMeta; active: boolean; onClick: () => void }): JSX.Element {
+function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void }): JSX.Element {
   const deleteSession = useChatStore((s) => s.deleteSession);
   return (
     <div
       onClick={onClick}
+      style={depth > 0 ? { paddingLeft: `${8 + depth * 14}px` } : undefined}
       className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-ui ${
         active ? 'bg-bg-active text-ink' : 'text-ink-soft hover:bg-bg-hover'
       }`}

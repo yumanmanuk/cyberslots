@@ -6,7 +6,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { FileDiff, FolderTree } from 'lucide-react';
+import { Bot, FileDiff, FolderTree, Loader2 } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../../store/chatStore';
@@ -27,9 +27,10 @@ interface ChangeEntry {
 }
 
 export default function WorkspacePanel({ sessionId, root }: Props): JSX.Element {
-  const [tab, setTab] = useState<'changes' | 'files'>('files');
+  const [tab, setTab] = useState<'changes' | 'files' | 'agents'>('files');
   const [openFile, setOpenFile] = useState<string | null>(null);
   const changes = useChangedFiles(sessionId);
+  const agents = useAgentActivity(sessionId);
 
   return (
     <aside className="flex w-[340px] shrink-0 flex-col border-l border-line bg-bg-panel/40">
@@ -41,6 +42,12 @@ export default function WorkspacePanel({ sessionId, root }: Props): JSX.Element 
           icon={<FileDiff size={13} />}
           label={changes.length > 0 ? `变更 ${changes.length}` : '变更'}
         />
+        <TabButton
+          active={tab === 'agents'}
+          onClick={() => setTab('agents')}
+          icon={<Bot size={13} />}
+          label={agents.length > 0 ? `Agents ${agents.length}` : 'Agents'}
+        />
       </div>
 
       <div className="min-h-0 flex-1">
@@ -48,8 +55,10 @@ export default function WorkspacePanel({ sessionId, root }: Props): JSX.Element 
           <FilePreview path={openFile} root={root} onClose={() => setOpenFile(null)} />
         ) : tab === 'files' ? (
           <FileTree root={root} onOpenFile={setOpenFile} />
-        ) : (
+        ) : tab === 'changes' ? (
           <ChangesList changes={changes} onOpen={setOpenFile} />
+        ) : (
+          <AgentsList agents={agents} />
         )}
       </div>
     </aside>
@@ -139,6 +148,79 @@ function ChangesList({ changes, onOpen }: { changes: ChangeEntry[]; onOpen: (pat
           </button>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- agents tab
+
+interface AgentEntry {
+  id: string;
+  title: string;
+  status: string;
+  detail?: string;
+  startedAt: number;
+}
+
+/** Surface subagent / swarm activity from the tool-call stream.
+ *  kimi delegates via Agent / AgentSwarm / Task tool calls — match on
+ *  title so engine-side naming tweaks degrade gracefully to "no rows". */
+function useAgentActivity(sessionId: string): AgentEntry[] {
+  const messages = useChatStore((s) => s.ui[sessionId]?.messages);
+  return useMemo(() => {
+    const out: AgentEntry[] = [];
+    for (const m of messages ?? []) {
+      if (m.kind !== 'tool_call') continue;
+      const tc = m as Extract<UnifiedMessage, { kind: 'tool_call' }>;
+      if (!/\b(agent|swarm|subagent|delegate)\b/i.test(`${tc.title} ${tc.toolKind}`)) continue;
+      out.push({
+        id: tc.toolCallId,
+        title: tc.title,
+        status: tc.status,
+        detail: tc.content?.text?.slice(0, 200),
+        startedAt: tc.createdAt,
+      });
+    }
+    return out;
+  }, [messages]);
+}
+
+function AgentsList({ agents }: { agents: AgentEntry[] }): JSX.Element {
+  if (agents.length === 0) {
+    return (
+      <div className="px-4 py-8 text-center text-ui leading-6 text-ink-faint">
+        本会话还没有子代理活动
+        <br />
+        开启 Composer 里的 ⚡Swarm 后发送任务可触发并行委派
+      </div>
+    );
+  }
+  return (
+    <div className="flex-1 space-y-2 overflow-y-auto p-2">
+      {agents.map((a) => (
+        <div key={a.id} className="rounded-lg border border-line bg-bg px-3 py-2">
+          <div className="flex items-center gap-2">
+            {a.status === 'in_progress' || a.status === 'pending' ? (
+              <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+            ) : (
+              <Bot size={12} className={`shrink-0 ${a.status === 'failed' ? 'text-err' : 'text-ok'}`} />
+            )}
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{a.title}</span>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] ${
+                a.status === 'failed'
+                  ? 'bg-err/10 text-err'
+                  : a.status === 'completed'
+                    ? 'bg-ok/10 text-ok'
+                    : 'bg-accent-soft text-accent'
+              }`}
+            >
+              {a.status}
+            </span>
+          </div>
+          {a.detail && <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-[11px] text-ink-faint">{a.detail}</div>}
+        </div>
+      ))}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import ChatView from './components/ChatView';
 import NewSessionView from './components/NewSessionView';
 import ErrorBoundary from './components/ErrorBoundary';
 import SettingsView from './components/SettingsView';
+import ScheduledView from './components/ScheduledView';
 
 export default function App(): JSX.Element {
   const init = useChatStore((s) => s.init);
@@ -25,6 +26,7 @@ export default function App(): JSX.Element {
         </ErrorBoundary>
       </main>
       <SettingsView />
+      <ScheduledView />
     </div>
   );
 }

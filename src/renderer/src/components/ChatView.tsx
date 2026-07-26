@@ -4,7 +4,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { GitBranch, PanelRightClose, PanelRightOpen } from 'lucide-react';
 
 import { useChatStore, type SessionUiState } from '../store/chatStore';
 import MessageItem from './MessageItem';
@@ -16,6 +16,8 @@ import WorkspacePanel from './workspace/WorkspacePanel';
 export default function ChatView({ sessionId }: { sessionId: string }): JSX.Element {
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
+  const creating = useChatStore((s) => s.creating);
+  const forkSession = useChatStore((s) => s.forkSession);
   const [panelOpen, setPanelOpen] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -45,6 +47,16 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           )}
           <div className="flex-1" />
           <UsageBar ui={ui} />
+          {meta?.engine === 'kimi' && (
+            <button
+              title="开分支（sidechat）：基于当前会话状态另开一条独立对话"
+              disabled={creating || meta.status === 'starting'}
+              onClick={() => void forkSession(sessionId)}
+              className="rounded-md p-1.5 text-ink-soft hover:bg-bg-hover hover:text-ink disabled:opacity-40"
+            >
+              <GitBranch size={15} />
+            </button>
+          )}
           {isWork && (
             <button
               title={panelOpen ? '收起工作区面板' : '展开工作区面板'}

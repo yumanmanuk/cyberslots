@@ -92,7 +92,14 @@ export class SessionManager {
     const s = this.require(sessionId);
     await this.ensureRuntime(s);
     this.touch(s.meta);
-    await s.adapter?.prompt(text, attachments);
+    // Fallback-fork branches carry the parent history as a one-shot prefix.
+    let engineText = text;
+    if (s.meta.contextSeed) {
+      engineText = `${s.meta.contextSeed}\n\n用户消息：${text}`;
+      s.meta.contextSeed = undefined;
+      this.persistMetas();
+    }
+    await s.adapter?.prompt(engineText, attachments);
     this.touch(s.meta);
   }
 
@@ -121,6 +128,38 @@ export class SessionManager {
     await this.require(sessionId).adapter?.cancel();
   }
 
+  /**
+   * Sidechat: fork an existing session into an independent branch.
+   * Preferred path is the engine's native session/fork; kimi CLI 0.29.1
+   * rejects it (-32601, scripts/probe-fork.mjs), so we fall back to a
+   * fresh engine session seeded with the serialized parent history on
+   * first prompt. Either way the client copies the folded message list
+   * so the branch renders the full context immediately.
+   */
+  async fork(sessionId: string): Promise<SessionMeta> {
+    const src = this.require(sessionId);
+    await this.ensureRuntime(src);
+    const native = src.adapter?.fork ? await src.adapter.fork() : null;
+    const id = randomUUID();
+    const history = this.getMessages(sessionId);
+    const meta: SessionMeta = {
+      ...src.meta,
+      id,
+      engineSessionId: native?.engineSessionId, // undefined → fresh session on revive
+      title: `⑂ ${src.meta.title.replace(/^⑂ /, '')}`,
+      parentId: src.meta.id,
+      contextSeed: native ? undefined : serializeHistory(history),
+      status: 'closed', // revived lazily on first prompt
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      pinned: false,
+    };
+    this.sessions.set(id, { meta, adapter: undefined });
+    this.persistMetas();
+    this.saveMessages(id, history);
+    return meta;
+  }
+
   async setModel(sessionId: string, modelId: string): Promise<void> {
     const s = this.require(sessionId);
     await s.adapter?.setModel(modelId);
@@ -137,6 +176,11 @@ export class SessionManager {
 
   answerPermission(sessionId: string, requestId: string, optionId?: string): void {
     this.require(sessionId).adapter?.answerPermission(requestId, optionId);
+  }
+
+  /** Push a user-message echo to the renderer for prompts sent from main (cron). */
+  announceUser(sessionId: string, text: string): void {
+    this.forward(sessionId, { type: 'user.echo', turnId: 0, text });
   }
 
   rename(sessionId: string, title: string): void {
@@ -276,4 +320,26 @@ export class SessionManager {
       console.error('[sessions] load failed:', err);
     }
   }
+}
+
+const SEED_MAX_CHARS = 12_000;
+
+/** Compact user/assistant transcript used as fallback-fork context. */
+function serializeHistory(messages: UnifiedMessage[]): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    if (m.kind === 'user') lines.push(`用户: ${m.text}`);
+    else if (m.kind === 'text') lines.push(`助手: ${m.text}`);
+  }
+  let transcript = lines.join('\n\n');
+  if (transcript.length > SEED_MAX_CHARS) {
+    transcript = `…（更早内容已截断）\n${transcript.slice(-SEED_MAX_CHARS)}`;
+  }
+  return [
+    '以下是本分支会话从父会话继承的对话历史，供你了解上下文：',
+    '<history>',
+    transcript,
+    '</history>',
+    '请基于以上上下文回答用户接下来的消息。',
+  ].join('\n');
 }

@@ -239,6 +239,30 @@ export class KimiAdapter implements EngineAdapter {
     await this.requireClient().setSessionMode({ sessionId: this.sessionId, modeId: mode });
   }
 
+  /** Native sidechat fork via ACP unstable_forkSession.
+   *  Probed on kimi CLI 0.29.1: responds -32601 "Method not found" —
+   *  callers must treat null as "unsupported" and fall back to history
+   *  replay (scripts/probe-fork.mjs). Kept as the preferred path so newer
+   *  CLIs upgrade to a true engine-side fork automatically. */
+  async fork(): Promise<{ engineSessionId: string } | null> {
+    const client = this.requireClient();
+    try {
+      const res = await withTimeout(
+        client.unstable_forkSession({
+          sessionId: this.sessionId,
+          cwd: this.opts.cwd,
+          mcpServers: [],
+        } as never),
+        INIT_TIMEOUT_MS,
+        'ACP session/fork',
+      );
+      const forkedId = String((res as { sessionId?: unknown }).sessionId ?? '');
+      return forkedId ? { engineSessionId: forkedId } : null;
+    } catch {
+      return null; // Method not found / timeout → unsupported
+    }
+  }
+
   answerPermission(requestId: string, optionId?: string): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;

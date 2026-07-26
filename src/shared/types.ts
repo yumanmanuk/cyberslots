@@ -50,6 +50,13 @@ export interface SessionMeta {
   createdAt: number;
   updatedAt: number;
   pinned: boolean;
+  /** Set when this session was forked off another one (sidechat). */
+  parentId?: string;
+  /**
+   * Fallback-fork context: serialized parent history injected before the
+   * first prompt when the engine has no native session/fork. Cleared after use.
+   */
+  contextSeed?: string;
 }
 
 // ---------------------------------------------------------- message model
@@ -134,6 +141,8 @@ export type EngineEvent =
   | { type: 'session.status'; status: SessionStatus; detail?: string }
   | { type: 'session.meta'; patch: Partial<SessionMeta> }
   | { type: 'turn.started'; turnId: number }
+  /** Echo of a user prompt injected outside the renderer (cron runs). */
+  | { type: 'user.echo'; turnId: number; text: string }
   | { type: 'text.delta'; turnId: number; text: string }
   | { type: 'thinking.delta'; turnId: number; text: string }
   | {
@@ -194,4 +203,23 @@ export interface AppSettings {
   theme: 'notion' | 'light' | 'dark';
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';
+}
+
+// ------------------------------------------------------------ cron tasks
+
+export interface CronTask {
+  id: string;
+  name: string;
+  /** Standard 5-field cron: `min hour day-of-month month day-of-week`. */
+  cron: string;
+  prompt: string;
+  engine: EngineId;
+  /** Working directory ('' = headless chat session in a scratch dir). */
+  cwd: string;
+  enabled: boolean;
+  createdAt: number;
+  lastRunAt?: number;
+  lastResult?: 'ok' | 'error';
+  /** Session created by the most recent run — lets the user inspect output. */
+  lastSessionId?: string;
 }

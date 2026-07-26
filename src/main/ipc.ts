@@ -7,12 +7,13 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, PermissionMode, UnifiedMessage } from '@shared/types';
+import type { AppSettings, CronTask, PermissionMode, UnifiedMessage } from '@shared/types';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
+import type { CronService } from './cron/CronService';
 import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
 
-export function registerIpc(sessions: SessionManager, settings: SettingsStore): void {
+export function registerIpc(sessions: SessionManager, settings: SettingsStore, cron: CronService): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
   ipcMain.handle(IPC.sessionPrompt, (_e, req: SessionPromptRequest) =>
@@ -37,11 +38,17 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore): 
   ipcMain.handle(IPC.sessionMessagesSave, (_e, sessionId: string, messages: UnifiedMessage[]) =>
     sessions.saveMessages(sessionId, messages),
   );
+  ipcMain.handle(IPC.sessionFork, (_e, sessionId: string) => sessions.fork(sessionId));
 
   ipcMain.handle(IPC.settingsGet, () => redactForRenderer(settings.get()));
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) =>
     redactForRenderer(settings.set(patch)),
   );
+
+  ipcMain.handle(IPC.cronList, () => cron.list());
+  ipcMain.handle(IPC.cronSave, (_e, task: CronTask) => cron.save(task));
+  ipcMain.handle(IPC.cronDelete, (_e, id: string) => cron.delete(id));
+  ipcMain.handle(IPC.cronRunNow, (_e, id: string) => cron.runNow(id));
 
   ipcMain.handle(IPC.dialogPickFolder, async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);

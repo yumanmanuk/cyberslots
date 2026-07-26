@@ -8,6 +8,7 @@ import { create } from 'zustand';
 
 import type {
   AppSettings,
+  CronTask,
   EngineEvent,
   EngineEventEnvelope,
   PermissionMode,
@@ -33,10 +34,13 @@ interface ChatState {
   settings: AppSettings | null;
   settingsOpen: boolean;
   swarmBoost: boolean;
+  cronOpen: boolean;
+  cronTasks: CronTask[];
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
   createSession(req: SessionCreateRequest): Promise<void>;
   selectSession(id: string): void;
+  forkSession(id: string): Promise<void>;
   sendPrompt(text: string, attachments?: string[]): Promise<void>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<void>;
@@ -44,6 +48,10 @@ interface ChatState {
   answerPermission(requestId: string, optionId?: string): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
+  loadCron(): Promise<void>;
+  saveCron(task: CronTask): Promise<void>;
+  deleteCron(id: string): Promise<void>;
+  runCronNow(id: string): Promise<void>;
 }
 
 const emptyUi = (): SessionUiState => ({
@@ -78,6 +86,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   settings: null,
   settingsOpen: false,
   swarmBoost: false,
+  cronOpen: false,
+  cronTasks: [],
 
   async init() {
     const [sessions, settings] = await Promise.all([
@@ -122,6 +132,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ui: { ...s.ui, [id]: { ...(s.ui[id] ?? emptyUi()), messages: s.ui[id]?.messages.length ? s.ui[id]!.messages : messages } },
         }));
       });
+    }
+  },
+
+  /** Sidechat: branch off the given session and jump into the branch. */
+  async forkSession(id) {
+    set({ creating: true });
+    try {
+      const meta = await window.cyberslots.sessionFork(id);
+      set((s) => ({ sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)] }));
+      get().selectSession(meta.id);
+    } finally {
+      set({ creating: false });
     }
   },
 
@@ -191,6 +213,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
     }));
   },
+
+  async loadCron() {
+    set({ cronTasks: await window.cyberslots.cronList() });
+  },
+
+  async saveCron(task) {
+    set({ cronTasks: await window.cyberslots.cronSave(task) });
+  },
+
+  async deleteCron(id) {
+    set({ cronTasks: await window.cyberslots.cronDelete(id) });
+  },
+
+  async runCronNow(id) {
+    await window.cyberslots.cronRunNow(id);
+    // Refresh sessions shortly after — the run creates a new visible session.
+    setTimeout(() => {
+      void window.cyberslots.sessionList().then((sessions) => set({ sessions }));
+    }, 1200);
+  },
 }));
 
 // ------------------------------------------------------------ event folding
@@ -252,6 +294,12 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
   switch (event.type) {
     case 'turn.started':
       return messages;
+
+    case 'user.echo':
+      return [
+        ...messages,
+        { kind: 'user', id: crypto.randomUUID(), turnId: event.turnId, text: event.text, createdAt: now },
+      ];
 
     case 'text.delta':
     case 'thinking.delta': {

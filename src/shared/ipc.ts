@@ -6,6 +6,7 @@
 
 import type {
   AppSettings,
+  CronTask,
   EngineEventEnvelope,
   EngineId,
   PermissionMode,
@@ -27,8 +28,13 @@ export const IPC = {
   sessionDelete: 'session:delete',
   sessionMessagesGet: 'session:messages-get',
   sessionMessagesSave: 'session:messages-save',
+  sessionFork: 'session:fork',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  cronList: 'cron:list',
+  cronSave: 'cron:save',
+  cronDelete: 'cron:delete',
+  cronRunNow: 'cron:run-now',
   enginesStatus: 'engines:status',
   dialogPickFolder: 'dialog:pick-folder',
   fsTree: 'fs:tree',
@@ -95,8 +101,13 @@ export interface CyberSlotsApi {
   sessionDelete(sessionId: string): Promise<void>;
   sessionMessagesGet(sessionId: string): Promise<UnifiedMessage[]>;
   sessionMessagesSave(sessionId: string, messages: UnifiedMessage[]): Promise<void>;
+  sessionFork(sessionId: string): Promise<SessionMeta>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  cronList(): Promise<CronTask[]>;
+  cronSave(task: CronTask): Promise<CronTask[]>;
+  cronDelete(id: string): Promise<CronTask[]>;
+  cronRunNow(id: string): Promise<void>;
   dialogPickFolder(): Promise<string | null>;
   fsTree(root: string, sub?: string): Promise<FsNode[]>;
   fsRead(path: string): Promise<FileContent>;
