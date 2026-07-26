@@ -106,12 +106,26 @@ function useChangedFiles(sessionId: string): ChangeEntry[] {
           diff.newText ? diff.newText.split('\n').length : 0,
           diff.oldText ? diff.oldText.split('\n').length : 0,
         );
-      } else if ((tc.toolKind === 'edit' || tc.toolKind === 'delete' || tc.toolKind === 'move') && tc.status === 'completed') {
-        for (const loc of tc.locations ?? []) bump(loc, 0, 0);
+      } else if (isWriteLike(tc) && tc.status === 'completed') {
+        const paths = tc.locations?.length ? tc.locations : pathsFromTitle(tc.title);
+        for (const loc of paths) bump(loc, 0, 0);
       }
     }
     return [...byPath.values()];
   }, [messages]);
+}
+
+/** Write-ish tool calls, by ACP kind or by title verb (kimi uses
+ *  "Writing <path>" / "Editing <path>" with kind variance across tools). */
+function isWriteLike(tc: Extract<UnifiedMessage, { kind: 'tool_call' }>): boolean {
+  if (['edit', 'write', 'delete', 'move'].includes(tc.toolKind)) return true;
+  return /^(writing|editing|creating|deleting|moving)\b/i.test(tc.title);
+}
+
+/** Extract file paths from titles like "Writing D:/proj/file.txt". */
+function pathsFromTitle(title: string): string[] {
+  const m = title.match(/(?:[A-Za-z]:[\\/]|\.{0,2}\/)[^\s'"]+/g);
+  return m ?? [];
 }
 
 function ChangesList({ changes, onOpen }: { changes: ChangeEntry[]; onOpen: (path: string) => void }): JSX.Element {
@@ -163,8 +177,8 @@ interface AgentEntry {
 }
 
 /** Surface subagent / swarm activity from the tool-call stream.
- *  kimi delegates via Agent / AgentSwarm / Task tool calls — match on
- *  title so engine-side naming tweaks degrade gracefully to "no rows". */
+ *  Match only the leading verb/tool-name — matching anywhere hits
+ *  workspace paths like "D:/ai-agent/…" (found in Work-mode e2e). */
 function useAgentActivity(sessionId: string): AgentEntry[] {
   const messages = useChatStore((s) => s.ui[sessionId]?.messages);
   return useMemo(() => {
@@ -172,7 +186,10 @@ function useAgentActivity(sessionId: string): AgentEntry[] {
     for (const m of messages ?? []) {
       if (m.kind !== 'tool_call') continue;
       const tc = m as Extract<UnifiedMessage, { kind: 'tool_call' }>;
-      if (!/\b(agent|swarm|subagent|delegate)\b/i.test(`${tc.title} ${tc.toolKind}`)) continue;
+      const agentish =
+        /^(agent|swarm|subagent|delegat|spawn)/i.test(tc.title.trim()) ||
+        /agent|swarm/i.test(tc.toolKind);
+      if (!agentish) continue;
       out.push({
         id: tc.toolCallId,
         title: tc.title,
