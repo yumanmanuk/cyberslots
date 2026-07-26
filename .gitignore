@@ -1,0 +1,37 @@
+# ==== Secrets & local dev (NEVER commit) ====
+.dev/
+.env
+.env.*
+*.local
+secrets.json
+**/config.local.toml
+
+# ==== Dependencies ====
+node_modules/
+.pnp
+.pnp.js
+
+# ==== Build outputs ====
+out/
+dist/
+dist-electron/
+build/
+release/
+*.tsbuildinfo
+
+# ==== Runtime data (portable ./data lives next to exe) ====
+data/
+logs/
+*.log
+
+# ==== Editor / OS ====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ==== Test / coverage ====
+coverage/
+.nyc_output/
