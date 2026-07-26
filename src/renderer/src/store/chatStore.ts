@@ -44,6 +44,10 @@ export interface SessionUiState {
   commands: SlashCommandInfo[];
   /** Timestamp of the latest engine event — drives the heartbeat indicator. */
   lastActivityAt?: number;
+  /** 持久化历史已加载。不能拿「ui 条目存在」当依据 — 任意 main 侧
+   *  事件（如归档 meta patch）都会预先创建空 ui，曾导致打开归档会话
+   *  时历史永远不加载（e2e 实测）。 */
+  hydrated?: boolean;
 }
 
 interface ChatState {
@@ -229,13 +233,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   /** Lazy-hydrate persisted history the first time a session is rendered. */
   hydrateSession(id) {
-    if (get().ui[id]) return;
+    if (get().ui[id]?.hydrated) return;
     void window.cyberslots.sessionMessagesGet(id).then((persisted) => {
       const messages = persisted.map((m) =>
         (m.kind === 'text' || m.kind === 'thinking') && m.streaming ? { ...m, streaming: false } : m,
       );
       set((s) => ({
-        ui: { ...s.ui, [id]: { ...(s.ui[id] ?? emptyUi()), messages: s.ui[id]?.messages.length ? s.ui[id]!.messages : messages } },
+        ui: {
+          ...s.ui,
+          [id]: {
+            ...(s.ui[id] ?? emptyUi()),
+            // 不覆盖已在流入的实时消息；只在流为空时用持久化历史。
+            messages: s.ui[id]?.messages.length ? s.ui[id]!.messages : messages,
+            hydrated: true,
+          },
+        },
       }));
     });
   },

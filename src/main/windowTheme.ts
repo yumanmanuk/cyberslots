@@ -16,7 +16,7 @@ interface ChromeColors {
 // 顶栏/侧栏 = 画布色（--bg-canvas），原生右上角窗口控制按钮区同色 →
 // 整条顶栏无缝；主内容浮层（--bg）带左上大圆角浮在画布上。
 export const THEME_CHROME: Record<AppSettings['theme'], ChromeColors> = {
-  notion: { bg: '#F7F6F3', symbol: '#37352F' },
+  notion: { bg: '#EFECE4', symbol: '#37352F' },
   light: { bg: '#F2F2F4', symbol: '#1F1F21' },
   dark: { bg: '#0F0E0E', symbol: '#CECDC3' },
 };

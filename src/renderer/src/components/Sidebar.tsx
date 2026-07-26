@@ -6,7 +6,7 @@
  * branches indent under their parent.
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -34,6 +34,18 @@ import { useT, type MsgKey } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
+
+/** Escape 关闭弹层（侧栏内的裸 popover 用）。 */
+function useEscClose(open: boolean, onClose: () => void): void {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+}
 
 export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element {
   const t = useT();
@@ -436,6 +448,7 @@ function FilterMenu(): JSX.Element {
   const t = useT();
   const filter = useChatStore((s) => s.filter);
   const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
   const dirty = JSON.stringify(filter) !== JSON.stringify(DEFAULT_FILTER);
   const patch = (p: Partial<SidebarFilter>): void => useChatStore.setState({ filter: { ...filter, ...p } });
 
@@ -517,6 +530,7 @@ function GearMenu(): JSX.Element {
   const settings = useChatStore((s) => s.settings);
   const saveSettings = useChatStore((s) => s.saveSettings);
   const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
 
   return (
     <div className="relative">
@@ -577,6 +591,7 @@ interface DotMenuItem {
 
 function DotMenu({ items }: { items: DotMenuItem[] }): JSX.Element {
   const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
   return (
     <div className="relative">
       <button
