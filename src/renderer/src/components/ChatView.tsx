@@ -1,8 +1,8 @@
 /**
  * ChatView — conversation stream + composer for the active session.
  * Right side hosts one auxiliary panel at a time (workspace files /
- * sidechat branch / plan preview) plus a collapsible icon rail with
- * hover-peek flyout (item 3/4/8).
+ * sidechat branch / plan preview). The icon rail is persistent; its top
+ * button folds/expands that panel area (item 3/4/8).
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -10,6 +10,7 @@ import {
   Bot,
   FileDiff,
   FolderTree,
+  Loader2,
   MessagesSquare,
   PanelRightClose,
   PanelRightOpen,
@@ -21,10 +22,10 @@ import { useT } from '../i18n';
 import MessageItem from './MessageItem';
 import Composer from './Composer';
 import PermissionSheet from './PermissionSheet';
-import PlanWidget from './PlanWidget';
 import WorkspacePanel, { type PanelTab } from './workspace/WorkspacePanel';
 import SideChatPanel from './SideChatPanel';
 import PlanDocPanel from './PlanDocPanel';
+import TurnRail from './TurnRail';
 
 type RightPanel = 'workspace' | 'sidechat' | 'plan' | null;
 
@@ -33,15 +34,13 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const creating = useChatStore((s) => s.creating);
-  const railCollapsed = useChatStore((s) => s.railCollapsed);
-  const toggleRail = useChatStore((s) => s.toggleRail);
   const sidechatId = useChatStore((s) => s.sidechats[sessionId]);
   const planPreviewId = useChatStore((s) => s.planPreview[sessionId]);
   const openSidechat = useChatStore((s) => s.openSidechat);
   const [rightPanel, setRightPanel] = useState<RightPanel>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>('files');
-  const [railPeek, setRailPeek] = useState(false);
-  const peekTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [lastPanel, setLastPanel] = useState<Exclude<RightPanel, null>>('workspace');
+  const [sidechatOpening, setSidechatOpening] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
 
@@ -58,6 +57,11 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   useEffect(() => {
     if (planPreviewId) setRightPanel('plan');
   }, [planPreviewId]);
+
+  // 记住最近打开的面板，折叠后顶部按钮可一键展开回原面板。
+  useEffect(() => {
+    if (rightPanel) setLastPanel(rightPanel);
+  }, [rightPanel]);
 
   const onScroll = (): void => {
     const el = scrollRef.current;
@@ -79,25 +83,69 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       setRightPanel(null);
       return;
     }
-    await openSidechat(sessionId);
-    setRightPanel('sidechat');
-  };
-
-  const peekEnter = (): void => {
-    clearTimeout(peekTimer.current);
-    setRailPeek(true);
-  };
-  const peekLeave = (): void => {
-    clearTimeout(peekTimer.current);
-    peekTimer.current = setTimeout(() => setRailPeek(false), 250);
+    // 分支可能要先拉起引擎（fork/预热），期间 rail 图标转 loading。
+    setSidechatOpening(true);
+    try {
+      await openSidechat(sessionId);
+      setRightPanel('sidechat');
+    } finally {
+      setSidechatOpening(false);
+    }
   };
 
   const planMsg = planPreviewId
     ? messages.find((m) => m.id === planPreviewId && m.kind === 'text')
     : undefined;
 
+  // 顶部按钮：折叠/展开右侧工作区面板（图标 rail 本身常驻不折叠）。
+  const toggleRightPanel = async (): Promise<void> => {
+    if (rightPanel) {
+      // 折叠 plan 面板时清掉预览标记，否则上面的 effect 会立刻重新弹出。
+      if (rightPanel === 'plan') useChatStore.getState().setPlanPreview(sessionId, undefined);
+      setRightPanel(null);
+      return;
+    }
+    if (lastPanel === 'workspace' && isWork) {
+      setRightPanel('workspace');
+      return;
+    }
+    if (lastPanel === 'sidechat' && meta) {
+      setSidechatOpening(true);
+      try {
+        await openSidechat(sessionId);
+        setRightPanel('sidechat');
+      } finally {
+        setSidechatOpening(false);
+      }
+      return;
+    }
+    if (lastPanel === 'plan' && planMsg) {
+      setRightPanel('plan');
+      return;
+    }
+    // 回退：work 会话优先工作区，普通会话展开 sidechat。
+    if (isWork) {
+      setRightPanel('workspace');
+    } else if (meta) {
+      setSidechatOpening(true);
+      try {
+        await openSidechat(sessionId);
+        setRightPanel('sidechat');
+      } finally {
+        setSidechatOpening(false);
+      }
+    }
+  };
+
   const railButtons = (
     <>
+      <RailButton
+        title={rightPanel ? t('collapseRail') : t('expandRail')}
+        active={!!rightPanel}
+        onClick={() => void toggleRightPanel()}
+      >
+        {rightPanel ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
+      </RailButton>
       {isWork && (
         <>
           <RailButton
@@ -131,16 +179,12 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
         <RailButton
           title={t('railBranch')}
           active={rightPanel === 'sidechat'}
-          disabled={creating || meta.status === 'starting'}
+          disabled={creating || sidechatOpening || meta.status === 'starting'}
           onClick={() => void onSidechat()}
         >
-          <MessagesSquare size={16} />
+          {sidechatOpening ? <Loader2 size={16} className="animate-spin text-accent" /> : <MessagesSquare size={16} />}
         </RailButton>
       )}
-      <div className="flex-1" />
-      <RailButton title={t('collapseRail')} onClick={toggleRail}>
-        <PanelRightClose size={15} />
-      </RailButton>
     </>
   );
 
@@ -153,23 +197,37 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             <span className="truncate rounded-md bg-bg-panel px-2 py-0.5 font-mono text-[11px] text-ink-soft">{meta.cwd}</span>
           )}
           <div className="flex-1" />
-          <Heartbeat sessionId={sessionId} busy={meta?.status === 'running' || meta?.status === 'awaiting'} />
+          <Heartbeat sessionId={sessionId} busy={meta?.status === 'running' || meta?.status === 'awaiting'} awaiting={meta?.status === 'awaiting'} />
         </header>
 
-        <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto">
-          <div className="mx-auto flex max-w-3xl flex-col gap-4 px-6 py-6">
-            {messages.length === 0 && (
-              <div className="py-16 text-center text-ui text-ink-faint">
-                {meta?.status === 'starting' ? '引擎启动中…' : '发送第一条消息开始对话'}
-              </div>
-            )}
-            {messages.map((m) => (
-              <MessageItem key={m.id} msg={m} sessionId={sessionId} />
-            ))}
+        {/* 消息滚动区 — relative 供刻度条测量锚点；左缘叠加 codex 同款回合导航刻度 */}
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollRef} onScroll={onScroll} className="relative h-full overflow-y-auto">
+            <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-4 px-6 py-6">
+              {messages.length === 0 && (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 text-ink-faint">
+                  {meta?.status === 'starting' ? (
+                    <>
+                      <Loader2 size={20} className="animate-spin text-accent" />
+                      <span className="text-[14px]">引擎启动中…</span>
+                    </>
+                  ) : (
+                    <span className="text-[14px]">发送第一条消息开始对话</span>
+                  )}
+                </div>
+              )}
+              {messages.map((m) =>
+                m.kind === 'plan' ? null : (
+                  <div key={m.id} data-msg-id={m.id}>
+                    <MessageItem msg={m} sessionId={sessionId} />
+                  </div>
+                ),
+              )}
+            </div>
           </div>
+          <TurnRail sessionId={sessionId} scrollRef={scrollRef} />
         </div>
 
-        <PlanWidget sessionId={sessionId} />
         <PermissionSheet sessionId={sessionId} />
         <Composer sessionId={sessionId} />
       </div>
@@ -192,34 +250,10 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
         />
       )}
 
-      {/* 右侧快捷图标 rail — 透明融入浮层，支持折叠 + 悬停浮出（item 3） */}
-      {!railCollapsed ? (
-        <div className="flex w-11 shrink-0 flex-col items-center gap-1 py-2.5 transition-all duration-200">
-          {railButtons}
-        </div>
-      ) : (
-        <>
-          {/* 折叠态：右缘悬浮小把手，悬停浮出、点击常驻 */}
-          <div className="absolute right-0 top-14 z-30" onMouseEnter={peekEnter} onMouseLeave={peekLeave}>
-            <button
-              title={t('expandRail')}
-              onClick={toggleRail}
-              className="flex h-8 w-6 items-center justify-center rounded-l-lg bg-bg-canvas text-ink-faint shadow-sm transition hover:text-ink"
-            >
-              <PanelRightOpen size={14} />
-            </button>
-          </div>
-          <div
-            onMouseEnter={peekEnter}
-            onMouseLeave={peekLeave}
-            className={`absolute bottom-0 right-0 top-0 z-20 flex w-11 flex-col items-center gap-1 rounded-l-2xl bg-bg-canvas py-2.5 shadow-lg transition-transform duration-200 ease-out ${
-              railPeek ? 'translate-x-0' : 'translate-x-full'
-            }`}
-          >
-            {railButtons}
-          </div>
-        </>
-      )}
+      {/* 右侧快捷图标 rail — 常驻不折叠；顶部按钮切换旁边的工作区面板 */}
+      <div className="flex w-11 shrink-0 flex-col items-center gap-1 py-2.5">
+        {railButtons}
+      </div>
     </div>
   );
 }
@@ -229,7 +263,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
  * rarely raise an error, they just go silent; this surfaces "seconds
  * since the last engine event" and escalates color when it stalls.
  */
-function Heartbeat({ sessionId, busy }: { sessionId: string; busy: boolean }): JSX.Element | null {
+function Heartbeat({ sessionId, busy, awaiting }: { sessionId: string; busy: boolean; awaiting?: boolean }): JSX.Element | null {
   const t = useT();
   const lastActivityAt = useChatStore((s) => s.ui[sessionId]?.lastActivityAt);
   const [, tick] = useState(0);
@@ -242,6 +276,16 @@ function Heartbeat({ sessionId, busy }: { sessionId: string; busy: boolean }): J
 
   if (!busy || !lastActivityAt) return null;
   const idleSec = Math.floor((Date.now() - lastActivityAt) / 1000);
+
+  // 等待授权不是停滞 — 引擎在等用户点按钮，不走静默升级逻辑。
+  if (awaiting) {
+    return (
+      <div className="flex items-center gap-1.5" title={t('hbAwaitingPerm')}>
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warn" />
+        <span className="text-[11px] text-warn">{t('hbAwaitingPerm')}</span>
+      </div>
+    );
+  }
 
   let dot = 'bg-ok animate-pulse';
   let label = t('hbWorking');
@@ -282,9 +326,8 @@ function RailButton({
       title={title}
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-8 w-8 items-center justify-center rounded-lg transition disabled:opacity-40 ${
-        active ? 'bg-accent-soft text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
-      }`}
+      className={`flex h-8 w-8 items-center justify-center rounded-lg transition disabled:opacity-40 ${active ? 'bg-accent-soft text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+        }`}
     >
       {children}
     </button>
