@@ -381,6 +381,8 @@ function ToolCallRow({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call'
           <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
         ) : msg.status === 'failed' ? (
           <X size={12} className="shrink-0 text-err" />
+        ) : msg.status === 'canceled' ? (
+          <X size={12} className="shrink-0 text-ink-faint" />
         ) : (
           <Check size={12} className="shrink-0 text-ok" />
         )}

@@ -346,7 +346,11 @@ export class SessionManager {
     try {
       const f = this.messagesFile(sessionId);
       if (!existsSync(f)) return [];
-      return reconcilePersistedMessages(JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[]);
+      const raw = JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
+      const reconciled = reconcilePersistedMessages(raw);
+      // 收敛后回写，避免磁盘文件长期留存 in_progress 脏状态。
+      if (reconciled !== raw) this.saveMessages(sessionId, reconciled);
+      return reconciled;
     } catch {
       return [];
     }
@@ -447,6 +451,9 @@ export class SessionManager {
       if (event.type === 'session.status') {
         s.meta.status = event.status;
         s.meta.updatedAt = Date.now();
+        // 持久化运行态：崩溃/重启后 loadPersistedMetas 才能据此识别
+        // 「上次仍在执行/待回答」并标记未读（否则中断的任务无痕）。
+        this.persistMetas();
       } else if (event.type === 'models.update') {
         s.meta.modelId = event.current;
       } else if (event.type === 'modes.update' && event.current) {
@@ -523,7 +530,14 @@ export class SessionManager {
       const metas = JSON.parse(readFileSync(this.metaFile, 'utf8')) as SessionMeta[];
       for (const meta of metas) {
         // Engine processes did not survive the restart — mark closed until resumed.
-        this.sessions.set(meta.id, { meta: { ...meta, status: 'closed' }, adapter: undefined });
+        // 上次仍在执行/待回答的会话 = 被重启打断：置未读，让侧栏有醒目
+        // 提示，用户不会把半截任务误当已完成。
+        const wasActive =
+          meta.status === 'running' || meta.status === 'awaiting' || meta.status === 'starting';
+        this.sessions.set(meta.id, {
+          meta: { ...meta, status: 'closed', unread: meta.unread || wasActive },
+          adapter: undefined,
+        });
       }
     } catch (err) {
       console.error('[sessions] load failed:', err);
@@ -541,7 +555,8 @@ function reconcilePersistedMessages(messages: UnifiedMessage[]): UnifiedMessage[
   const out = messages.map((m) => {
     if (m.kind === 'tool_call' && (m.status === 'pending' || m.status === 'in_progress')) {
       changed = true;
-      return { ...m, status: 'failed' as const };
+      // 被重启打断 ≠ 工具真的报错：用 canceled 与 failed 区分（灰色而非红色）。
+      return { ...m, status: 'canceled' as const };
     }
     if ((m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined) {
       changed = true;

@@ -67,7 +67,7 @@ export interface SessionMeta {
 
 // ---------------------------------------------------------- message model
 
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'canceled';
 
 export interface ToolCallContent {
   /** Best-effort textual output/diff preview extracted from the engine. */
