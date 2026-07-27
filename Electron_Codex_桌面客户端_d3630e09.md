@@ -2,7 +2,9 @@
 
 > 本文件是后续新对话的**唯一总指引**（as-built 版）：记录已定决策、已实现功能、关键实测结论、代码地图、遗留项与后续路线。
 > 历史决策依据见 `d:\ai-agent\handoff.md`；阶段 0 实测报告见 `cyberslots/docs/phase0-findings.md`。
-> 最后更新：2026-07-27 凌晨 · 代码仓库 `d:\ai-agent\cyberslots` · 最新 commit `b83f501`
+> 最后更新：2026-07-27 深夜 · 代码仓库 `d:\ai-agent\cyberslots` · 最新 commit `b83f501`
+>
+> 🆕 **2026-07-27 深夜追加（用户逐项体验后的功能完善，详见 §四已同步）**：多模型由 codex `model_catalog_json` 驱动（显示名/上下文窗口/输入模态/每模型思考深度档位）· 选中会话即预热引擎（取代惰性复活）· Plan 卡三态交互（卡片/预览收起/实施胶囊）· sidechat 可拖拽调宽 + 滑入动画 + 模型/思考深度选择· 会话行状态图标改版（右侧，蓝问号=待回答/红叹号=错/金点=未读）· 思考深度满档流光动画· 全局 Shift+Tab 切模式。
 >
 > ⚠ **2026-07-27 凌晨重大变更（本文尚未逐节同步，以下优先）**：详见 `cyberslots/docs/overnight-report.md`
 > 1. **模型配置架构推倒重做**（用户指示）：App 不再存储任何 provider/密钥；设置-模型页 = `~/.codex` 与 `~/.kimi-code` 配置的**只读快照** + 每引擎一个**协议路由开关**（开=进程级注入内置转换 server；codex 用 `-c` 覆盖零写入，kimi 用镜像 home；关=CLI 完全直连自己配置）。ConfigWriter/safeStorage/presets/dev-seed 均已删除；AiServerHost 双前端（codex-server + openai-server）。新模块 `src/main/config/engineConfigs.ts`。
@@ -57,10 +59,11 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 - 目录组头用文件夹开合图标（闭 Folder / 开 FolderOpen），不用旋转箭头
 - Workspace 组头：git 徽标文件夹图标 + ×N 目录数
 - 每个分组标题 hover 浮现 + 号：新建 Chat / 新建 Project 会话（弹目录选择）/ 新建工作区
+- 每个 Workspace/Project 会话行 hover 右侧浮现 + 号：一键在该工作区/项目目录下开新会话
 - Workspace 实体：命名 + 多文件夹（首目录为 cwd，其余目录经 contextSeed 前缀注入告知引擎）
 - Workspace 管理菜单（···）：重命名 / 打开终端 / 在编辑器打开 / 从侧栏移除
 - Project 组头菜单（···）：打开终端 / 在编辑器打开
-- 会话状态图标：运行中转圈（accent）/ 等待操作黄点脉冲 / 出错红三角 / 未读 accent 圆点
+- 会话行状态位（codex 风，统一在行尾）：运行中灰色转圈 / 等待回答蓝色问号（LLM 提问或待审批）/ 出错红色叹号 / 未读金色实心点（任务完成未查看）/ 空闲已读显相对时间；蓝色走主题化 `--info` token
 - 删除二段确认：垃圾桶 → 红色对勾 → 再点才删，3 秒未确认自动恢复
 - 筛选菜单（漏斗）：排序（更新时间/创建时间）+ 状态（全部/运行中/等待操作/出错/已完成）+ 仅未读 + 重置
 - fork 分支树缩进展示（⑂ 前缀）；换引擎分支 ⇄ 前缀
@@ -77,13 +80,14 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 - 工具调用卡片（read/edit/execute/fetch 状态四态 + 输出折叠）
 - 审批底部卡（Approve once / Approve for session / Reject）+ AskUserQuestion 表单卡
 - 任务清单 PlanWidget（sticky）
-- 消息持久化（debounce 写盘）+ 会话恢复（ensureRuntime 惰性复活 + ACP session/resume）
+- 回合统计行：有真实 usage 显示 ↑上行（含缓存比）/ ↓下行 / t/s / 用时；无真实 usage（kimi ACP 不推 usage_update）时只显用时，不再展示 `~` 估算 token
+- 消息持久化（debounce 写盘）+ 会话恢复：**选中会话即预热引擎**（sessionWarmUp IPC → ensureRuntime + ACP session/resume，取代“首条消息才惰性复活”），模型/思考深度/命令选择器立即就绪
 - cron/steer 等 main 侧发起的消息经 `user.echo` 事件回显气泡
 
 ### 4.4 Composer（输入区）
-- 功能条布局（左→右）：模式（Agent/Plan）→ 引擎徽章 → 权限 → ⚡Swarm → 🎯Goal ｜ 模型 → 思考深度（codex）→ 上下文圆环 → 展开 → 发送
-- Agent/Plan 分段切换 + 输入框内 Shift+Tab 循环切换
-- Plan 模式：只读规划提示，权限选择器隐藏
+- 功能条布局（左→右）：引擎图标 → 模式（Agent/Plan）→ 权限 → ⚡Swarm → 🎯Goal ｜ 模型 → 思考深度（codex）→ 上下文圆环 → 展开 → 发送
+- Agent/Plan 分段切换 + **全局 Shift+Tab** 循环切换（window 级监听，焦点在任意处均生效，阻止默认焦点导航）
+- Plan 模式：权限选择器隐藏（不再显示底部“只读规划”提示文字，避免切换时输入框上下跳动）
 - 权限（Agent 下）：手动审批 / 全自动 / YOLO
 - 引擎徽章点击 →「换引擎继续聊」：历史重放式分支到另一引擎（contextSeed 注入）
 - ⚡Swarm 开关：发送时注入 AgentSwarm 并行委派提示词
@@ -92,8 +96,8 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 - 上下文圆环：发送按钮旁 SVG 圆环显示占用比例（>65% 黄 >85% 红），点击弹详情卡，确认后触发 compact（kimi 发 `/compact`，codex 调 `thread/compact/start`）
 - 附件：拖拽文件 → 文件 chip 在输入框内、图片 chip 在输入框顶部，可单个移除（webUtils.getPathForFile 取绝对路径）
 - 展开按钮：长文输入大弹窗
-- 思考深度选择器（仅 codex 会话）：low/medium/high/xhigh，随 turn/start 的 effort 下发
-- 模型选择器：热切换（kimi unstable_setSessionModel；codex 下一 turn 生效）
+- 思考深度选择器（仅 codex 会话）：档位取自当前模型 catalog 的 `supported_reasoning_levels`（缺省 low/medium/high/xhigh），滑条交互；拉满档（xhigh）时轨道金色流光 + 滑块脉冲光环 + 档位文字渐变流光动画（index.css `effort-max-*`）
+- 模型选择器（右侧，与思考深度并排）：codex 候选来自 `model_catalog_json`（每项显示 displayName + 上下文窗口如 1M/256K + 图片模态图标），kimi 取 ACP 会话模型；**始终显示实际模型名**（无“默认”占位）；恢复态引擎未起时用持久化 modelId + catalog 兜底；切模型自动校正不支持的思考深度档；热切换（kimi unstable_setSessionModel；codex 下一 turn 生效）
 
 ### 4.5 发送队列与 steer
 - 忙碌时发送 = 入队：发送位置出现专属入队按钮（ListPlus，accent 圆钮）+ 旁置停止按钮
@@ -121,7 +125,9 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 ### 4.8 sidechat / 分支
 - kimi：ACP `unstable_forkSession` 实测 **-32601 未实现** → 降级「新 session + 历史重放」（contextSeed 一次性前缀，12K 字符截尾）
 - codex：原生 `thread/fork`
-- 客户端复制消息文件，分支立即可见完整历史；首次发消息时惰性复活引擎
+- 客户端复制消息文件，分支立即可见完整历史；打开即预热分支引擎（sessionWarmUp）
+- 右侧面板宽度可拖拽调节（左缘把手，300–720px，localStorage 记忆）+ 打开滑入动画（panel-in）
+- mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兜底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left）
 
 ### 4.9 定时任务（Cron）
 - 左下角入口 → 管理模态：列表（启停开关 / cron 表达式徽章 / 立即运行 / 编辑 / 删除）+ 新建表单
@@ -150,6 +156,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 - CodexAdapter（app-server v2）：thread start/resume/fork / turn start-interrupt-steer / item 事件映射（agentMessage、reasoning、commandExecution、fileChange、mcpToolCall、webSearch、collab）/ 审批 server-request 应答 / plan / tokenUsage / effort / compact / 权限模式映射（default=on-request+workspace-write，plan=read-only，auto=never，yolo=danger-full-access）
 - 内置 ai-server：resources/ai-server（上游 codex-server.js 原样 + config.js env shim），启动时复制到 userData 运行，key 只经 env 不落盘，仅 loopback 白名单，quota-guard 等团队功能关闭
 - 协议自动路由：第一个 `openai_chat` provider 喂转换槽（KIMI_*），第一个 `openai_responses` provider 喂直通槽（MINIMAX_*）
+- 多模型目录：codex `config.toml` 的 `model_catalog_json` 声明的 JSON（相对路径相对 CODEX_HOME），`engineConfigs.ts` 解析出每个模型的 slug（=codex `model` 参数）/ displayName / context_window / input_modalities / supported_reasoning_levels；`visibility:hidden` 跳过；直连模式候选 = 目录全部 slug（无目录回退 config 默认 model）；启动时读一次，改目录需重启应用
 - kimi config.toml `type` 映射：openai_chat→`openai`，openai_responses→`openai_responses`（双协议均实测可用）
 
 ### 4.13 打包
