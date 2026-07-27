@@ -334,6 +334,21 @@ body {
   }
 }
 
+/* 新消息入队时，头部条背景闪一下 accent 作为可见反馈 */
+.queue-bump {
+  animation: queue-bump 520ms ease-out;
+}
+
+@keyframes queue-bump {
+  from {
+    background-color: var(--accent-soft);
+  }
+
+  to {
+    background-color: transparent;
+  }
+}
+
 /* ============ effort maxed (xhigh) — 拉满档的骰子就要发光 ============
    轨道金色流光扫过 + 滑块脉冲光环 + 档位文字渐变流光。 */
 .effort-max-fill {

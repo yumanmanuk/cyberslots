@@ -412,13 +412,22 @@ function QueuePanel({
     return () => clearTimeout(timer);
   }, [steerNotice]);
 
+  // 队列新增消息时，头部条闪一下 accent（面板常折叠，给点可见反馈）。
+  const [bump, setBump] = useState(0);
+  const prevLen = useRef(queue.length);
+  useEffect(() => {
+    if (queue.length > prevLen.current) setBump((n) => n + 1);
+    prevLen.current = queue.length;
+  }, [queue.length]);
+
   if (queue.length === 0) return null;
 
   return (
     <div className="border-b border-line bg-bg-panel/70">
       <button
+        key={bump}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] transition hover:bg-bg-hover"
+        className="queue-bump flex w-full items-center gap-2 px-3 py-1.5 text-[12px] transition hover:bg-bg-hover"
       >
         <ChevronRight size={12} className={`shrink-0 text-ink-faint transition-transform ${open ? 'rotate-90' : ''}`} />
         <span className="min-w-0 flex-1 truncate text-left font-medium text-ink">
