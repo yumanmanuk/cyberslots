@@ -8,19 +8,21 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle,
   Archive,
   CalendarClock,
   Check,
-  CircleDot,
+  ChevronRight,
+  CircleAlert,
+  CircleHelp,
   Filter,
   Folder,
   FolderGit2,
   FolderOpen,
   FolderPlus,
+  Languages,
   Loader2,
+  Moon,
   MoreHorizontal,
-  PanelLeftClose,
   Pencil,
   Plus,
   Settings,
@@ -29,9 +31,10 @@ import {
 } from 'lucide-react';
 
 import { DEFAULT_FILTER, useChatStore, type SidebarFilter } from '../store/chatStore';
-import type { AppLanguage, AppSettings, SessionMeta, WorkspaceInfo } from '@shared/types';
+import type { AppLanguage, AppSettings, EngineId, SessionMeta, WorkspaceInfo } from '@shared/types';
 import { useT, type MsgKey } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
+import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
@@ -56,26 +59,24 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   const filter = useChatStore((s) => s.filter);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectSession = useChatStore((s) => s.selectSession);
-  const toggleSidebar = useChatStore((s) => s.toggleSidebar);
   const [wsDialog, setWsDialog] = useState<{ open: boolean; editing: WorkspaceInfo | null }>({ open: false, editing: null });
 
   const visible = useMemo(() => applyFilter(sessions, filter), [sessions, filter]);
   const groups = useMemo(() => groupSessions(visible, workspaces), [visible, workspaces]);
   const archivedCount = useMemo(() => sessions.filter((s) => s.archived).length, [sessions]);
 
-  // 分组头“+”快捷创建（默认主引擎 kimi）
+  // 分组头“+”快捷创建 — 先选引擎再建会话，避免进会话后切引擎产生分支
   const createSession = useChatStore((s) => s.createSession);
-  const quickNewChat = (): void => void createSession({ engine: 'kimi', cwd: '' });
-  const quickNewProject = async (): Promise<void> => {
+  const quickNewChat = (engine: EngineId): void => void createSession({ engine, cwd: '' });
+  const quickNewProject = async (engine: EngineId): Promise<void> => {
     const dir = await window.cyberslots.dialogPickFolder();
-    if (dir) await createSession({ engine: 'kimi', cwd: dir });
+    if (dir) await createSession({ engine, cwd: dir });
   };
 
   return (
     <aside
-      className={`flex w-64 shrink-0 flex-col ${
-        overlay ? 'h-full rounded-r-2xl bg-bg-canvas' : 'bg-transparent'
-      }`}
+      className={`flex w-64 shrink-0 flex-col ${overlay ? 'h-full rounded-r-2xl bg-bg-canvas' : 'bg-transparent'
+        }`}
     >
       {/* 新会话 + 小节工具条 */}
       <div className="flex items-center gap-1.5 px-3 pb-1 pt-3">
@@ -85,15 +86,6 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
         >
           <Plus size={14} /> {t('newSession')}
         </button>
-        {!overlay && (
-          <button
-            title={t('collapseSidebar')}
-            onClick={toggleSidebar}
-            className="shrink-0 rounded-lg p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
-          >
-            <PanelLeftClose size={15} />
-          </button>
-        )}
       </div>
       <div className="flex items-center justify-between px-4 pb-1 pt-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Sessions</span>
@@ -115,13 +107,13 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
           />
         ))}
 
-        <GroupHeader label={t('projects')} addTitle={t('newProject')} onAdd={() => void quickNewProject()} />
+        <GroupHeader label={t('projects')} addTitle={t('newProject')} onAddEngine={(engine) => void quickNewProject(engine)} />
         {groups.projects.length === 0 && <EmptyHint />}
         {groups.projects.map(({ cwd, name, sessions: list }) => (
           <ProjectGroup key={cwd} cwd={cwd} name={name} sessions={list} activeSessionId={activeSessionId} onSelect={selectSession} />
         ))}
 
-        <GroupHeader label={t('chats')} addTitle={t('newChat')} onAdd={quickNewChat} />
+        <GroupHeader label={t('chats')} addTitle={t('newChat')} onAddEngine={quickNewChat} />
         {groups.chats.length === 0 && <EmptyHint />}
         {arrange(groups.chats).map(({ meta, depth }) => (
           <SessionRow key={meta.id} meta={meta} depth={depth} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
@@ -237,18 +229,92 @@ function arrange(sessions: SessionMeta[]): Array<{ meta: SessionMeta; depth: num
 
 // ---------------------------------------------------------------- pieces
 
-function GroupHeader({ label, addTitle, onAdd }: { label: string; addTitle?: string; onAdd?: () => void }): JSX.Element {
+function GroupHeader({
+  label,
+  addTitle,
+  onAdd,
+  onAddEngine,
+}: {
+  label: string;
+  addTitle?: string;
+  onAdd?: () => void;
+  onAddEngine?: (engine: EngineId) => void;
+}): JSX.Element {
   return (
-    <div className="group/head flex items-center justify-between px-2 pb-0.5 pt-3">
+    <div className="group/head flex min-h-[34px] items-center justify-between px-2 pb-1 pt-3">
       <span className="text-[11px] font-semibold text-ink-faint">{label}</span>
-      {onAdd && (
-        <button
+      {onAddEngine ? (
+        <EnginePick
           title={addTitle}
-          onClick={onAdd}
-          className="rounded-md p-0.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
-        >
-          <Plus size={13} />
-        </button>
+          onPick={onAddEngine}
+          btnClass="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
+          iconSize={13}
+        />
+      ) : (
+        onAdd && (
+          <button
+            title={addTitle}
+            onClick={onAdd}
+            className="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
+          >
+            <Plus size={13} />
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
+/** 快捷创建的引擎二选一 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。 */
+const ENGINE_OPTIONS: EngineId[] = ['codex', 'kimi'];
+
+function EnginePick({
+  title,
+  onPick,
+  btnClass,
+  iconSize,
+}: {
+  title?: string;
+  onPick: (engine: EngineId) => void;
+  btnClass: string;
+  iconSize: number;
+}): JSX.Element {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  useEscClose(open, () => setOpen(false));
+  return (
+    <div className="relative">
+      <button
+        title={title}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(!open);
+        }}
+        className={btnClass}
+      >
+        <Plus size={iconSize} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-6 z-20 w-36 rounded-xl border border-line bg-bg-input py-1 shadow-lg">
+            <MenuSection label={t('pickEngine')} />
+            {ENGINE_OPTIONS.map((id) => (
+              <button
+                key={id}
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  setOpen(false);
+                  onPick(id);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover"
+              >
+                <EngineIcon engine={id} size={13} />
+                {ENGINE_LABELS[id]}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -274,6 +340,9 @@ function WorkspaceGroup({
 }): JSX.Element {
   const t = useT();
   const removeWorkspace = useChatStore((s) => s.removeWorkspace);
+  const createSession = useChatStore((s) => s.createSession);
+  // 组内还有对话时禁止移除（查全量列表，不受侧栏筛选器影响；已归档的不算）。
+  const hasSessions = useChatStore((s) => s.sessions.some((x) => x.workspaceId === workspace.id && !x.archived));
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -302,8 +371,21 @@ function WorkspaceGroup({
               label: t('openInEditor'),
               onClick: () => void window.cyberslots.openIn('vscode', workspace.folders[0] ?? ''),
             },
-            { icon: <Trash2 size={13} />, label: t('removeWorkspace'), danger: true, onClick: () => void removeWorkspace(workspace.id) },
+            {
+              icon: <Trash2 size={13} />,
+              label: t('removeWorkspace'),
+              danger: true,
+              disabled: hasSessions,
+              title: hasSessions ? t('removeWorkspaceBlocked') : undefined,
+              onClick: () => void removeWorkspace(workspace.id),
+            },
           ]}
+        />
+        <EnginePick
+          title={t('newSession')}
+          onPick={(engine) => void createSession({ engine, cwd: '', workspaceId: workspace.id })}
+          btnClass="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ink group-hover:opacity-100"
+          iconSize={14}
         />
       </div>
       {expanded &&
@@ -329,6 +411,7 @@ function ProjectGroup({
 }): JSX.Element {
   const t = useT();
   const convertProjectToWorkspace = useChatStore((s) => s.convertProjectToWorkspace);
+  const createSession = useChatStore((s) => s.createSession);
   const [expanded, setExpanded] = useState(true);
 
   /** Project → Workspace：选一个新目录，和现有 cwd 合并成多目录工作区，
@@ -357,6 +440,12 @@ function ProjectGroup({
             { icon: <SquareTerminal size={13} />, label: t('openTerminal'), onClick: () => void window.cyberslots.openIn('terminal', cwd) },
             { icon: <Folder size={13} />, label: t('openInEditor'), onClick: () => void window.cyberslots.openIn('vscode', cwd) },
           ]}
+        />
+        <EnginePick
+          title={t('newSession')}
+          onPick={(engine) => void createSession({ engine, cwd })}
+          btnClass="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ink group-hover:opacity-100"
+          iconSize={14}
         />
       </div>
       {expanded &&
@@ -395,14 +484,15 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
     <div
       onClick={onClick}
       style={{ paddingLeft: `${8 + depth * 14}px` }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2 text-ui ${
-        active ? 'bg-bg-active text-ink' : 'text-ink-soft hover:bg-bg-hover'
-      }`}
+      className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2 text-ui text-ink ${active ? 'bg-bg-active' : 'hover:bg-bg-hover'
+        }`}
     >
-      <StatusIcon status={meta.status} />
       <span className="min-w-0 flex-1 truncate">{meta.title}</span>
-      {meta.unread && <span title="未读" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
-      <span className="text-[10px] tabular-nums text-ink-faint group-hover:hidden">{timeAgo(meta.updatedAt)}</span>
+      {/* 右侧状态位（codex 风）：运行中灰色菜单 / 待回答黄色问号 /
+          报错红色叹号 / 未读（已完成未查看）金色实心点；否则显相对时间。 */}
+      <span className="flex shrink-0 items-center group-hover:hidden">
+        <RowIndicator meta={meta} />
+      </span>
       <button
         title={t('archive')}
         onClick={onArchive}
@@ -417,9 +507,8 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
           clearTimeout(timer.current);
           setConfirming(false);
         }}
-        className={`hidden rounded-md p-0.5 transition group-hover:block ${
-          confirming ? 'block bg-err/15 text-err' : 'text-ink-faint hover:text-err'
-        }`}
+        className={`hidden rounded-md p-0.5 transition group-hover:block ${confirming ? 'block bg-err/15 text-err' : 'text-ink-faint hover:text-err'
+          }`}
       >
         {confirming ? <Check size={13} /> : <Trash2 size={13} />}
       </button>
@@ -427,18 +516,21 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
   );
 }
 
-/** Prominent state icons: spinner=running, pulse=awaiting, triangle=error. */
-function StatusIcon({ status }: { status: SessionMeta['status'] }): JSX.Element | null {
-  switch (status) {
+/** 行尾状态指示（取代左侧小图标）：spinner=运行 / 黄问号=等回答 /
+ *  红叹号=报错 / 金点=未读；空闲已读显示相对时间。 */
+function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
+  switch (meta.status) {
     case 'running':
     case 'starting':
-      return <Loader2 size={13} className="shrink-0 animate-spin text-accent" />;
+      return <Loader2 size={13} className="shrink-0 animate-spin text-ink-soft" />;
     case 'awaiting':
-      return <CircleDot size={12} className="shrink-0 animate-pulse text-warn" />;
+      // 黄色醒目 — 需要用户行动（授权/回答），不能淹没在灰色里。
+      return <CircleHelp size={14} className="shrink-0 animate-pulse text-warn" />;
     case 'error':
-      return <AlertTriangle size={12} className="shrink-0 text-err" />;
+      return <CircleAlert size={13} className="shrink-0 text-err" />;
     default:
-      return <CircleDot size={11} className="shrink-0 text-ink-faint/50" />;
+      if (meta.unread) return <span title="任务已完成，未查看" className="h-2 w-2 shrink-0 rounded-full bg-accent" />;
+      return <span className="text-[10px] tabular-nums text-ink-faint">{timeAgo(meta.updatedAt)}</span>;
   }
 }
 
@@ -514,10 +606,16 @@ function MenuCheck({ label, checked, onClick }: { label: string; checked: boolea
 
 // -------------------------------------------------------------- gear menu
 
-const THEME_ITEMS: Array<{ id: AppSettings['theme']; key: MsgKey }> = [
-  { id: 'notion', key: 'themeNotion' },
-  { id: 'light', key: 'themeLight' },
-  { id: 'dark', key: 'themeDark' },
+const MODE_ITEMS: Array<{ id: AppSettings['themeMode']; key: MsgKey }> = [
+  { id: 'light', key: 'modeLight' },
+  { id: 'dark', key: 'modeDark' },
+  { id: 'system', key: 'modeSystem' },
+];
+
+const PALETTE_ITEMS: Array<{ id: AppSettings['themePalette']; key: MsgKey }> = [
+  { id: 'notion', key: 'paletteNotion' },
+  { id: 'solarized', key: 'paletteSolarized' },
+  { id: 'everforest', key: 'paletteEverforest' },
 ];
 
 const LANG_ITEMS: Array<{ id: AppLanguage; key: MsgKey }> = [
@@ -544,7 +642,7 @@ function GearMenu(): JSX.Element {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-8 right-0 z-20 w-48 rounded-xl border border-line bg-bg-input py-1.5 shadow-lg">
+          <div className="absolute bottom-8 right-0 z-20 w-44 rounded-xl border border-line bg-bg-input py-1.5 shadow-lg">
             <button
               onClick={() => {
                 setOpen(false);
@@ -555,26 +653,75 @@ function GearMenu(): JSX.Element {
               <Settings size={13} /> {t('settings')}
             </button>
             <div className="mx-3 my-1 border-t border-line" />
-            <MenuSection label={t('language')} />
-            {LANG_ITEMS.map((l) => (
-              <MenuCheck
-                key={l.id}
-                label={t(l.key)}
-                checked={settings?.language === l.id}
-                onClick={() => void saveSettings({ language: l.id })}
-              />
-            ))}
-            <MenuSection label={t('theme')} />
-            {THEME_ITEMS.map((th) => (
-              <MenuCheck
-                key={th.id}
-                label={t(th.key)}
-                checked={settings?.theme === th.id}
-                onClick={() => void saveSettings({ theme: th.id })}
-              />
-            ))}
+            <SubMenu icon={<Languages size={13} />} label={t('language')}>
+              {LANG_ITEMS.map((l) => (
+                <MenuCheck
+                  key={l.id}
+                  label={t(l.key)}
+                  checked={settings?.language === l.id}
+                  onClick={() => void saveSettings({ language: l.id })}
+                />
+              ))}
+            </SubMenu>
+            <SubMenu icon={<Moon size={13} />} label={t('theme')} align="bottom">
+              <MenuSection label={t('themeMode')} />
+              {MODE_ITEMS.map((m) => (
+                <MenuCheck
+                  key={m.id}
+                  label={t(m.key)}
+                  checked={settings?.themeMode === m.id}
+                  onClick={() => void saveSettings({ themeMode: m.id })}
+                />
+              ))}
+              <MenuSection label={t('themePalette')} />
+              {PALETTE_ITEMS.map((p) => (
+                <MenuCheck
+                  key={p.id}
+                  label={t(p.key)}
+                  checked={settings?.themePalette === p.id}
+                  onClick={() => void saveSettings({ themePalette: p.id })}
+                />
+              ))}
+            </SubMenu>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** 悬停展开、向右飞出的下级子菜单；带短暂关闭延迟，斜向移动不闪关。 */
+function SubMenu({ icon, label, align = 'top', children }: {
+  icon: React.ReactNode;
+  label: string;
+  align?: 'top' | 'bottom';
+  children: React.ReactNode;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const show = (): void => {
+    window.clearTimeout(timer.current);
+    setOpen(true);
+  };
+  const hide = (): void => {
+    timer.current = window.setTimeout(() => setOpen(false), 150);
+  };
+
+  return (
+    <div className="relative" onMouseEnter={show} onMouseLeave={hide}>
+      <button
+        onClick={() => setOpen(!open)}
+        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover ${open ? 'bg-bg-hover' : ''}`}
+      >
+        {icon}
+        <span className="flex-1">{label}</span>
+        <ChevronRight size={13} className="text-ink-faint" />
+      </button>
+      {open && (
+        <div className={`absolute left-full pl-1 ${align === 'top' ? '-top-1.5' : '-bottom-1.5'}`}>
+          <div className="w-36 rounded-xl border border-line bg-bg-input py-1.5 shadow-lg">{children}</div>
+        </div>
       )}
     </div>
   );
@@ -586,6 +733,8 @@ interface DotMenuItem {
   icon: React.ReactNode;
   label: string;
   danger?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
 }
 
@@ -610,14 +759,17 @@ function DotMenu({ items }: { items: DotMenuItem[] }): JSX.Element {
             {items.map((item) => (
               <button
                 key={item.label}
+                disabled={item.disabled}
+                title={item.title}
                 onClick={(e) => {
                   e.stopPropagation();
                   setOpen(false);
                   item.onClick();
                 }}
-                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition hover:bg-bg-hover ${
-                  item.danger ? 'text-err' : 'text-ink'
-                }`}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition ${item.disabled
+                  ? 'cursor-not-allowed text-ink-faint/50'
+                  : `hover:bg-bg-hover ${item.danger ? 'text-err' : 'text-ink'}`
+                  }`}
               >
                 {item.icon} {item.label}
               </button>

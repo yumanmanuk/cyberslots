@@ -10,20 +10,22 @@ import type { EngineId, WorkspaceInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
+import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
-const ENGINES: Array<{ id: EngineId; label: string; hint: string }> = [
-  { id: 'kimi', label: 'Kimi Code', hint: '主引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）' },
-  { id: 'codex', label: 'Codex', hint: '副引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）' },
+const ENGINES: Array<{ id: EngineId; hint: string }> = [
+  { id: 'codex', hint: '主引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）' },
+  { id: 'kimi', hint: '副引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）' },
 ];
 
 export default function NewSessionView(): JSX.Element {
   const t = useT();
   const createSession = useChatStore((s) => s.createSession);
   const creating = useChatStore((s) => s.creating);
+  const creatingEngine = useChatStore((s) => s.creatingEngine);
   const workspaces = useChatStore((s) => s.settings?.workspaces) ?? EMPTY_WORKSPACES;
-  const [engine, setEngine] = useState<EngineId>('kimi');
+  const [engine, setEngine] = useState<EngineId>('codex');
   const [error, setError] = useState<string | null>(null);
   const [wsDialogOpen, setWsDialogOpen] = useState(false);
 
@@ -55,11 +57,12 @@ export default function NewSessionView(): JSX.Element {
             key={e.id}
             title={e.hint}
             onClick={() => setEngine(e.id)}
-            className={`rounded-lg px-4 py-1.5 text-ui transition ${
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${
               engine === e.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
             }`}
           >
-            {e.label}
+            <EngineIcon engine={e.id} size={14} />
+            {ENGINE_LABELS[e.id]}
           </button>
         ))}
       </div>
@@ -114,7 +117,8 @@ export default function NewSessionView(): JSX.Element {
 
       {creating && (
         <div className="flex items-center gap-2 text-ui text-ink-soft">
-          <Loader2 size={14} className="animate-spin" /> {t('startingEngine')} {engine} …
+          <Loader2 size={14} className="animate-spin" /> {t('startingEngine')}{' '}
+          {ENGINE_LABELS[creatingEngine ?? engine]} …
         </div>
       )}
       {error && <div className="max-w-lg rounded-lg bg-err/10 px-4 py-2 text-ui text-err">{error}</div>}

@@ -8,9 +8,11 @@ import { create } from 'zustand';
 
 import type {
   AppSettings,
+  CodexCatalogModel,
   CronTask,
   EngineEvent,
   EngineEventEnvelope,
+  EngineId,
   GoalControlAction,
   GoalInfo,
   PermissionMode,
@@ -55,6 +57,9 @@ interface ChatState {
   ui: Record<string, SessionUiState>;
   activeSessionId: string | null;
   creating: boolean;
+  /** 正在创建的会话引擎 — 落地页据此显示「正在启动 X」。creating 是全局标记，
+   *  创建也可能来自侧栏 EnginePick，不能读落地页本地的引擎选择（曾因此选 codex 显示 kimi）。 */
+  creatingEngine: EngineId | null;
   settings: AppSettings | null;
   settingsOpen: boolean;
   swarmBoost: boolean;
@@ -69,13 +74,16 @@ interface ChatState {
   efforts: Record<string, string>;
   /** Per-session outbox: messages waiting for the current turn to finish. */
   queues: Record<string, QueuedMessage[]>;
-  /** 侧边栏/右侧图标 rail 折叠态（localStorage 持久）。 */
+  /** 侧边栏折叠态（localStorage 持久）。 */
   sidebarCollapsed: boolean;
-  railCollapsed: boolean;
   /** 主会话 → 右侧 sidechat 分支会话 id。 */
   sidechats: Record<string, string | undefined>;
   /** 会话 → 待右侧预览的 plan 文档消息 id（plan 模式回合结束时自动设置）。 */
   planPreview: Record<string, string | undefined>;
+  /** codex model_catalog_json 目录（init 时读取；模型/思考深度选择器用）。 */
+  codexCatalog: CodexCatalogModel[];
+  /** ~/.codex/config.toml 的 model_reasoning_effort（codex 全局默认档）。 */
+  codexDefaultEffort?: string;
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
   addWorkspace(name: string, folders: string[]): Promise<WorkspaceInfo>;
@@ -90,7 +98,6 @@ interface ChatState {
   openSidechat(parentId: string): Promise<void>;
   closeSidechat(parentId: string): void;
   toggleSidebar(): void;
-  toggleRail(): void;
   setPlanPreview(sessionId: string, messageId: string | undefined): void;
   forkToEngine(id: string, engine: SessionMeta['engine']): Promise<void>;
   compactSession(): Promise<void>;
@@ -102,9 +109,11 @@ interface ChatState {
   setMode(mode: PermissionMode): Promise<void>;
   answerPermission(requestId: string, optionId?: string): Promise<void>;
   enqueue(text: string, attachments?: string[]): void;
+  /** Enqueue into a specific session（PermissionSheet 补充说明用）。 */
+  enqueueTo(sessionId: string, text: string, attachments?: string[]): void;
   removeQueued(sessionId: string, id: string): void;
   moveQueued(sessionId: string, from: number, to: number): void;
-  steerQueued(sessionId: string, id: string): Promise<void>;
+  steerQueued(sessionId: string, id: string): Promise<'steered' | 'moved' | 'head' | 'none'>;
   setGoal(objective: string): Promise<void>;
   controlGoal(action: GoalControlAction): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
@@ -129,6 +138,12 @@ let unsubscribe: (() => void) | undefined;
 /** Debounced per-session persistence of the folded message list. */
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 function schedulePersist(get: () => ChatState, sessionId: string): void {
+  // 未水合前不落盘 — 此时 ui 里只有几条实时消息，写回会覆盖完整
+  // 历史文件（曾永久截断旧会话）。顺手触发水合，合并完成后再持久化。
+  if (!get().ui[sessionId]?.hydrated) {
+    get().hydrateSession(sessionId);
+    return;
+  }
   const prev = persistTimers.get(sessionId);
   if (prev) clearTimeout(prev);
   persistTimers.set(
@@ -146,6 +161,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   ui: {},
   activeSessionId: null,
   creating: false,
+  creatingEngine: null,
   settings: null,
   settingsOpen: false,
   swarmBoost: false,
@@ -157,9 +173,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   efforts: {},
   queues: {},
   sidebarCollapsed: localStorage.getItem('cs.sidebarCollapsed') === '1',
-  railCollapsed: localStorage.getItem('cs.railCollapsed') === '1',
   sidechats: {},
   planPreview: {},
+  codexCatalog: [],
+  codexDefaultEffort: undefined,
 
   async init() {
     const [sessions, settings] = await Promise.all([
@@ -167,7 +184,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       window.cyberslots.settingsGet(),
     ]);
     set({ sessions, settings });
-    void window.cyberslots.themeSync(settings.theme);
+    // codex 配置快照 — catalog 目录 + 默认思考深度（选择器的元信息源）。
+    void window.cyberslots.engineConfigsGet().then((snap) => {
+      set({
+        codexCatalog: snap.codex.catalogModels ?? [],
+        codexDefaultEffort: snap.codex.reasoningEffort,
+      });
+    });
     unsubscribe?.();
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
@@ -175,10 +198,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async saveSettings(patch) {
-    const prevTheme = get().settings?.theme;
     const settings = await window.cyberslots.settingsSet(patch);
     set({ settings });
-    if (settings.theme !== prevTheme) void window.cyberslots.themeSync(settings.theme);
   },
 
   async addWorkspace(name, folders) {
@@ -211,16 +232,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async createSession(req) {
-    set({ creating: true });
+    set({ creating: true, creatingEngine: req.engine });
     try {
       const meta = await window.cyberslots.sessionCreate(req);
       set((s) => ({
         sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
-        ui: { ...s.ui, [meta.id]: s.ui[meta.id] ?? emptyUi() },
+        // 新会话没有历史可水合 — 直接标记 hydrated，避免首条消息被水合门禁拖延落盘。
+        ui: { ...s.ui, [meta.id]: s.ui[meta.id] ?? { ...emptyUi(), hydrated: true } },
         activeSessionId: meta.id,
       }));
     } finally {
-      set({ creating: false });
+      set({ creating: false, creatingEngine: null });
     }
   },
 
@@ -229,6 +251,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void window.cyberslots.sessionMarkRead(id);
     set((s) => ({ sessions: s.sessions.map((m) => (m.id === id ? { ...m, unread: false } : m)) }));
     get().hydrateSession(id);
+    // 预热引擎：恢复态会话不再等首条消息才懒启动，选中即唤醒，
+    // 模型/思考深度选择器、命令等立即就绪，首次发送也无启动延迟。
+    void window.cyberslots.sessionWarmUp(id);
   },
 
   /** Lazy-hydrate persisted history the first time a session is rendered. */
@@ -238,29 +263,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messages = persisted.map((m) =>
         (m.kind === 'text' || m.kind === 'thinking') && m.streaming ? { ...m, streaming: false } : m,
       );
-      set((s) => ({
-        ui: {
-          ...s.ui,
-          [id]: {
-            ...(s.ui[id] ?? emptyUi()),
-            // 不覆盖已在流入的实时消息；只在流为空时用持久化历史。
-            messages: s.ui[id]?.messages.length ? s.ui[id]!.messages : messages,
-            hydrated: true,
+      set((s) => {
+        // 合并而非二选一 — 曾经「流非空就丢弃持久化历史」，与早于水合
+        // 到达的引擎事件（恢复降级报错等）竞态，导致历史被截断并回写覆盖。
+        const live = s.ui[id]?.messages ?? [];
+        const liveIds = new Set(live.map((m) => m.id));
+        return {
+          ui: {
+            ...s.ui,
+            [id]: {
+              ...(s.ui[id] ?? emptyUi()),
+              messages: [...messages.filter((m) => !liveIds.has(m.id)), ...live],
+              hydrated: true,
+            },
           },
-        },
-      }));
+        };
+      });
+      // 水合前被门禁的落盘在此补上（合并后的完整列表）。
+      schedulePersist(get, id);
     });
   },
 
   /** Sidechat: branch off the given session and jump into the branch. */
   async forkSession(id) {
-    set({ creating: true });
+    set({ creating: true, creatingEngine: get().sessions.find((s) => s.id === id)?.engine ?? null });
     try {
       const meta = await window.cyberslots.sessionFork(id);
       set((s) => ({ sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)] }));
       get().selectSession(meta.id);
     } finally {
-      set({ creating: false });
+      set({ creating: false, creatingEngine: null });
     }
   },
 
@@ -271,7 +303,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async openSidechat(parentId) {
     const existing = get().sidechats[parentId];
     if (existing && get().sessions.some((s) => s.id === existing)) return; // 已开
-    set({ creating: true });
+    set({ creating: true, creatingEngine: get().sessions.find((s) => s.id === parentId)?.engine ?? null });
     try {
       const parent = get().sessions.find((s) => s.id === parentId);
       const meta = await window.cyberslots.sessionFork(parentId);
@@ -288,8 +320,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (mode === 'plan') {
         mutateUi(set, meta.id, (ui) => ({ ...ui, modes: { ...ui.modes, current: 'plan' } }));
       }
+      void window.cyberslots.sessionWarmUp(meta.id); // 预热分支引擎
     } finally {
-      set({ creating: false });
+      set({ creating: false, creatingEngine: null });
     }
   },
 
@@ -303,25 +336,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ sidebarCollapsed: next });
   },
 
-  toggleRail() {
-    const next = !get().railCollapsed;
-    localStorage.setItem('cs.railCollapsed', next ? '1' : '0');
-    set({ railCollapsed: next });
-  },
-
   setPlanPreview(sessionId, messageId) {
     set((s) => ({ planPreview: { ...s.planPreview, [sessionId]: messageId } }));
   },
 
   /** 换引擎继续聊：history-replay branch onto the other engine. */
   async forkToEngine(id, engine) {
-    set({ creating: true });
+    set({ creating: true, creatingEngine: engine });
     try {
       const meta = await window.cyberslots.sessionForkEngine(id, engine);
       set((s) => ({ sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)] }));
       get().selectSession(meta.id);
     } finally {
-      set({ creating: false });
+      set({ creating: false, creatingEngine: null });
     }
   },
 
@@ -408,8 +435,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   enqueue(text, attachments) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
+    get().enqueueTo(activeSessionId, text, attachments);
+  },
+
+  enqueueTo(sessionId, text, attachments) {
     const item: QueuedMessage = { id: crypto.randomUUID(), text, attachments };
-    set((s) => ({ queues: { ...s.queues, [activeSessionId]: [...(s.queues[activeSessionId] ?? []), item] } }));
+    set((s) => ({ queues: { ...s.queues, [sessionId]: [...(s.queues[sessionId] ?? []), item] } }));
   },
 
   removeQueued(sessionId, id) {
@@ -430,21 +461,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
    *  item jumps to the queue head instead (kimi 降级路径). */
   async steerQueued(sessionId, id) {
     const item = (get().queues[sessionId] ?? []).find((q) => q.id === id);
-    if (!item) return;
+    if (!item) return 'none';
     const ok = await window.cyberslots.sessionSteer(sessionId, item.text);
     if (ok) {
       get().removeQueued(sessionId, id);
-    } else {
-      const list = get().queues[sessionId] ?? [];
-      const idx = list.findIndex((q) => q.id === id);
-      if (idx > 0) get().moveQueued(sessionId, idx, 0);
+      return 'steered';
     }
+    // kimi has no native steer: fall back to queue head; when already there,
+    // report 'head' so the UI can explain instead of looking dead.
+    const list = get().queues[sessionId] ?? [];
+    const idx = list.findIndex((q) => q.id === id);
+    if (idx > 0) {
+      get().moveQueued(sessionId, idx, 0);
+      return 'moved';
+    }
+    return 'head';
   },
 
   /** Engine-native goal (codex only — UI hides the control for kimi). */
   async setGoal(objective) {
     const { activeSessionId } = get();
-    if (activeSessionId) await window.cyberslots.sessionGoalSet(activeSessionId, objective);
+    if (!activeSessionId) return;
+    // 提问入气泡并标注「Sent as goal」（engine 的 thread/goal 不产出用户消息）。
+    const userMsg: UnifiedMessage = {
+      kind: 'user',
+      id: crypto.randomUUID(),
+      turnId: -1,
+      text: objective,
+      createdAt: Date.now(),
+      sentAsGoal: true,
+    };
+    mutateUi(set, activeSessionId, (ui) => ({ ...ui, messages: [...ui.messages, userMsg] }));
+    schedulePersist(get, activeSessionId);
+    // 首条消息即会话标题（与普通提问同规则）。
+    const session = get().sessions.find((s) => s.id === activeSessionId);
+    if (session && session.title === '新会话') {
+      const title = objective.slice(0, 24) || '新会话';
+      void window.cyberslots.sessionRename(activeSessionId, title);
+      set((s) => ({
+        sessions: s.sessions.map((m) => (m.id === activeSessionId ? { ...m, title } : m)),
+      }));
+    }
+    await window.cyberslots.sessionGoalSet(activeSessionId, objective);
   },
 
   async controlGoal(action) {
@@ -645,6 +703,21 @@ function looksLikePlanDoc(text: string): boolean {
   return /^#{1,4}\s/m.test(t) || /^([-*]|\d+\.)\s/m.test(t) || t.length > 300;
 }
 
+/** 给任意遗留的流式文本/思考段收尾（清 streaming 标志 → caret 止闪）。
+ *  新内容块（工具/计划/权限/另一段）开始时调用，无需等整个回合结束。 */
+function endStreaming(messages: UnifiedMessage[]): UnifiedMessage[] {
+  if (!messages.some((m) => (m.kind === 'text' || m.kind === 'thinking') && m.streaming)) return messages;
+  const now = Date.now();
+  return messages.map((m) => {
+    if ((m.kind === 'text' || m.kind === 'thinking') && m.streaming) {
+      // 思考段收尾时定格耗时（首个 delta → 收尾），供折叠头展示。
+      if (m.kind === 'thinking') return { ...m, streaming: false, durationMs: m.durationMs ?? now - m.createdAt };
+      return { ...m, streaming: false };
+    }
+    return m;
+  });
+}
+
 /** Pure fold of one message-affecting event into the message list. */
 function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMessage[] {
   const now = Date.now();
@@ -666,17 +739,20 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
         const updated = { ...last, text: last.text + event.text };
         return [...messages.slice(0, -1), updated];
       }
+      // 开启新的文本/思考段前，先给上一段流式内容收尾（黄色 caret 止闪）。
       return [
-        ...messages,
+        ...endStreaming(messages),
         { kind, id: crypto.randomUUID(), turnId: event.turnId, text: event.text, streaming: true, createdAt: now },
       ];
     }
 
     case 'tool.upsert': {
-      const idx = messages.findIndex((m) => m.kind === 'tool_call' && m.toolCallId === event.toolCallId);
+      // 工具调用开始 = 之前的文本流已结束，收尾遗留的流式 caret。
+      const base = endStreaming(messages);
+      const idx = base.findIndex((m) => m.kind === 'tool_call' && m.toolCallId === event.toolCallId);
       if (idx >= 0) {
-        const prev = messages[idx]!;
-        if (prev.kind !== 'tool_call') return messages;
+        const prev = base[idx]!;
+        if (prev.kind !== 'tool_call') return base;
         const merged: UnifiedMessage = {
           ...prev,
           title: event.title ?? prev.title,
@@ -685,12 +761,12 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
           content: event.content ?? prev.content,
           locations: event.locations ?? prev.locations,
         };
-        const next = [...messages];
+        const next = [...base];
         next[idx] = merged;
         return next;
       }
       return [
-        ...messages,
+        ...base,
         {
           kind: 'tool_call',
           id: crypto.randomUUID(),
@@ -707,21 +783,22 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
     }
 
     case 'plan.update': {
-      const idx = messages.findIndex((m) => m.kind === 'plan' && m.turnId === event.turnId);
+      const base = endStreaming(messages);
+      const idx = base.findIndex((m) => m.kind === 'plan' && m.turnId === event.turnId);
       if (idx >= 0) {
-        const next = [...messages];
+        const next = [...base];
         next[idx] = { ...(next[idx] as Extract<UnifiedMessage, { kind: 'plan' }>), entries: event.entries };
         return next;
       }
       return [
-        ...messages,
+        ...base,
         { kind: 'plan', id: crypto.randomUUID(), turnId: event.turnId, entries: event.entries, createdAt: now },
       ];
     }
 
     case 'permission.request':
       return [
-        ...messages,
+        ...endStreaming(messages),
         event.isQuestion
           ? {
               kind: 'ask_user',
@@ -754,6 +831,7 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
     case 'turn.ended': {
       const closed = messages.map((m) => {
         if ((m.kind === 'text' || m.kind === 'thinking') && m.turnId === event.turnId && m.streaming) {
+          if (m.kind === 'thinking') return { ...m, streaming: false, durationMs: m.durationMs ?? now - m.createdAt };
           return { ...m, streaming: false };
         }
         // 回合结束时仍未应答的授权/提问已无意义 — 标记取消，
@@ -773,6 +851,7 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
           stopReason: event.stopReason,
           usage: event.usage,
           durationMs: event.durationMs,
+          apiDurationMs: event.apiDurationMs,
           createdAt: now,
         },
       ];
