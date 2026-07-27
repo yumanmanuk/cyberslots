@@ -163,8 +163,13 @@ export class OpencodeServerHost {
   /**
    * 模型目录：GET /config/providers（= 已连接 + 启用的可用集，含 zen
    * 免费模型；绝不是 /provider 的 models.dev 全目录），按 server 代次缓存。
+   *
+   * force（用户显式点 ↻）= 重启 serve 进程再拉：opencode 无配置文件
+   * watcher，运行中实例握着旧快照（实测改 opencode.json 后仅重新 fetch
+   * 拿不到新模型）；会话服务端持久化 + adapter 懒重连，重启无损。
    */
   async getCatalog(force = false): Promise<OpencodeCatalog> {
+    if (force && this.child) this.stop();
     await this.ensure();
     if (!force && this.catalogCache && this.catalogCache.gen === this.generation) {
       return this.catalogCache.catalog;
@@ -186,7 +191,12 @@ export class OpencodeServerHost {
     this.child = undefined;
     this.baseUrl = '';
     this.generation++;
-    if (child) killEngineTree(child);
+    if (child) {
+      killEngineTree(child);
+      // 主动停机也通知监听者（后续 child exit 事件因 child 已换不会重复
+      // 广播）—— 正在等回合的 adapter 据此结束等待，避免队列永久卡死。
+      for (const fn of [...this.exitListeners]) fn();
+    }
   }
 }
 

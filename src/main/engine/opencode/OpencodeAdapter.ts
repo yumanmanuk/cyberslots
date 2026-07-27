@@ -88,10 +88,16 @@ export class OpencodeAdapter implements EngineAdapter {
     await this.host.ensure();
     this.hostExitUnsub = this.host.onExit(() => {
       if (this.disposed) return;
-      this.emit({ type: 'error', source: 'engine', message: 'opencode server 进程意外退出（下次发送时自动重启续接）' });
-      this.emit({ type: 'session.status', status: 'error', detail: 'server-exited' });
-      // 若正处回合中，结束等待避免队列卡死。
-      this.finishTurn('error');
+      if (this.turnDone) {
+        // 回合进行中服务器停机 = 真错误：报错 + 结束等待防队列卡死。
+        this.emit({ type: 'error', source: 'engine', message: 'opencode server 进程退出，当前回合中断（下次发送自动重启续接）' });
+        this.emit({ type: 'session.status', status: 'error', detail: 'server-exited' });
+        this.finishTurn('error');
+      } else {
+        // 空闲时停机（如强制刷新模型目录重启 serve）= 懒唤醒态，
+        // 非错误 —— 下次 prompt 的 ensureLive 自动重连续接。
+        this.emit({ type: 'session.status', status: 'closed', detail: 'server-stopped' });
+      }
     });
 
     this.catalog = await this.host.getCatalog();
