@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Bell, Box, FileLock2, Info, RefreshCw, Settings2 } from 'lucide-react';
 
-import type { AppSettings, CodexConfigSnapshot, EngineConfigsSnapshot, KimiConfigSnapshot, NotificationSettings, RouteSupport } from '@shared/types';
+import type { AppSettings, CodexConfigSnapshot, EngineConfigsSnapshot, KimiConfigSnapshot, NotificationSettings, OpencodeConfigSnapshot, RouteSupport } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { useT, type MsgKey } from '../i18n';
 
@@ -59,9 +59,8 @@ export default function SettingsView(): JSX.Element | null {
           <button
             key={c.id}
             onClick={() => setCategory(c.id)}
-            className={`mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${
-              category === c.id ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
-            }`}
+            className={`mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${category === c.id ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+              }`}
           >
             {c.icon} {t(c.key)}
           </button>
@@ -195,6 +194,7 @@ function ModelsPane(): JSX.Element {
             routing={routing.kimi}
             onToggle={(on) => setRouting('kimi', on)}
           />
+          <OpencodeConfigCard snap={snap.opencode} />
         </>
       )}
     </div>
@@ -342,6 +342,64 @@ function ReadonlyRow({ label, value }: { label: string; value: string }): JSX.El
   );
 }
 
+/** opencode 只读区块 — 无路由开关（不经 ai-server 协议代理），无 provider
+ *  管理（凭据/模型完全委托 opencode 自身：zen 免费模型免登录可用）。
+ *  已连接 provider 列表只展示已缓存的 catalog，按钮手动加载（会启动 server）。 */
+function OpencodeConfigCard({ snap }: { snap: OpencodeConfigSnapshot }): JSX.Element {
+  const catalog = useChatStore((s) => s.opencodeCatalog);
+  const loadCatalog = useChatStore((s) => s.loadOpencodeCatalog);
+  const providers = catalog
+    ? [...new Map(catalog.models.map((m) => [m.providerID, { name: m.providerName, count: 0 }])).entries()].map(
+      ([id, p]) => ({ id, name: p.name, count: catalog.models.filter((m) => m.providerID === id).length }),
+    )
+    : [];
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
+      <div className="mb-1 flex items-center gap-3">
+        <span className="text-[13px] font-semibold">opencode</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint" title={snap.configPath}>
+          {snap.configPath ?? ''}
+        </span>
+        <span className={`rounded-md px-1.5 text-[10px] ${snap.installed ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+          {snap.installed ? `已安装 ${snap.version ?? ''}` : '未安装'}
+        </span>
+      </div>
+      <div className="mb-3 text-[11px] leading-5 text-ink-faint">
+        新增 provider / 登录请在 opencode CLI 中操作（终端运行 <span className="font-mono">opencode auth login</span>），
+        本程序不管理凭据；zen 免费模型无需登录开箱即用。
+      </div>
+      {!snap.installed ? (
+        <div className="text-ui text-ink-faint">未找到 opencode CLI — 运行 npm i -g opencode-ai 安装后刷新。</div>
+      ) : (
+        <div className="space-y-1.5 text-[12px]">
+          {snap.cliPath && <ReadonlyRow label="CLI" value={snap.cliPath} />}
+          <ReadonlyRow label="opencode.json" value={snap.configExists ? '存在' : '未创建（可选）'} />
+          {catalog ? (
+            catalog.error ? (
+              <div className="text-[11.5px] text-err">provider 列表加载失败：{catalog.error}</div>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {providers.map((p) => (
+                  <span key={p.id} className="rounded-md bg-bg-panel px-1.5 py-0.5 font-mono text-[10.5px] text-ink-soft">
+                    {p.name} · {p.count} 模型
+                  </span>
+                ))}
+              </div>
+            )
+          ) : (
+            <button
+              onClick={() => void loadCatalog()}
+              className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover"
+            >
+              加载已连接 provider 列表（将启动 opencode server）
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------ notifications
 
 function NotificationsPane({ draft, setDraft }: PaneProps): JSX.Element {
@@ -426,9 +484,8 @@ function Segmented({
         <button
           key={o.id}
           onClick={() => onChange(o.id)}
-          className={`rounded-md transition ${small ? 'px-2 py-0.5 text-[10.5px]' : 'px-3.5 py-1.5 text-ui'} ${
-            value === o.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
-          }`}
+          className={`rounded-md transition ${small ? 'px-2 py-0.5 text-[10.5px]' : 'px-3.5 py-1.5 text-ui'} ${value === o.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
+            }`}
         >
           {o.label}
         </button>

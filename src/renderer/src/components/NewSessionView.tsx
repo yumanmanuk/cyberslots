@@ -1,6 +1,6 @@
 /**
- * NewSessionView — landing pane: pick engine (kimi / codex), then Chat
- * (no workspace) or Work (bound to a project folder).
+ * NewSessionView — landing pane: pick engine (kimi / codex / opencode),
+ * then Chat (no workspace) or Work (bound to a project folder).
  */
 
 import { useState } from 'react';
@@ -17,6 +17,7 @@ const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 const ENGINES: Array<{ id: EngineId; hint: string }> = [
   { id: 'codex', hint: '主引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）' },
   { id: 'kimi', hint: '副引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）' },
+  { id: 'opencode', hint: '第三引擎 · HTTP · 直连 opencode 已连接的 provider（zen 免费模型免登录可用）' },
 ];
 
 export default function NewSessionView(): JSX.Element {
@@ -57,9 +58,8 @@ export default function NewSessionView(): JSX.Element {
             key={e.id}
             title={e.hint}
             onClick={() => setEngine(e.id)}
-            className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${
-              engine === e.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
-            }`}
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${engine === e.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
+              }`}
           >
             <EngineIcon engine={e.id} size={14} />
             {ENGINE_LABELS[e.id]}

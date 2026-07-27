@@ -265,8 +265,8 @@ function GroupHeader({
   );
 }
 
-/** 快捷创建的引擎二选一 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。 */
-const ENGINE_OPTIONS: EngineId[] = ['codex', 'kimi'];
+/** 快捷创建的引擎选择 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。 */
+const ENGINE_OPTIONS: EngineId[] = ['codex', 'kimi', 'opencode'];
 
 function EnginePick({
   title,

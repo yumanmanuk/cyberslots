@@ -15,6 +15,7 @@ import type {
   EngineId,
   GoalControlAction,
   GoalInfo,
+  OpencodeCatalog,
   PermissionMode,
   SessionMeta,
   SlashCommandInfo,
@@ -84,6 +85,10 @@ interface ChatState {
   codexCatalog: CodexCatalogModel[];
   /** ~/.codex/config.toml 的 model_reasoning_effort（codex 全局默认档）。 */
   codexDefaultEffort?: string;
+  /** opencode 模型目录（懒加载 — 首个 opencode 会话的选择器触发，
+   *  来自 /config/providers；拉取会按需启动 opencode server）。 */
+  opencodeCatalog: OpencodeCatalog | null;
+  loadOpencodeCatalog(force?: boolean): Promise<void>;
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
   addWorkspace(name: string, folders: string[]): Promise<WorkspaceInfo>;
@@ -135,8 +140,26 @@ const emptyUi = (): SessionUiState => ({
 
 let unsubscribe: (() => void) | undefined;
 
+/** loadOpencodeCatalog 的 in-flight 标记（模块级，不入 store）。 */
+let opencodeCatalogLoading = false;
+
 /** Debounced per-session persistence of the folded message list. */
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const persistLastRun = new Map<string, number>();
+const PERSIST_DEBOUNCE = 400;
+// 连续流式（每个 delta 都重置防抖）时最长 2s 强制落盘一次，
+// 把「崩溃/热重启丢失的尾部输出」窗口从「整段回合」压到 ~2s。
+const PERSIST_MAX_WAIT = 2000;
+
+function persistNow(get: () => ChatState, sessionId: string): void {
+  const prev = persistTimers.get(sessionId);
+  if (prev) clearTimeout(prev);
+  persistTimers.delete(sessionId);
+  persistLastRun.set(sessionId, Date.now());
+  const messages = get().ui[sessionId]?.messages;
+  if (messages) void window.cyberslots.sessionMessagesSave(sessionId, messages);
+}
+
 function schedulePersist(get: () => ChatState, sessionId: string): void {
   // 未水合前不落盘 — 此时 ui 里只有几条实时消息，写回会覆盖完整
   // 历史文件（曾永久截断旧会话）。顺手触发水合，合并完成后再持久化。
@@ -144,16 +167,25 @@ function schedulePersist(get: () => ChatState, sessionId: string): void {
     get().hydrateSession(sessionId);
     return;
   }
+  const last = persistLastRun.get(sessionId) ?? 0;
+  if (Date.now() - last >= PERSIST_MAX_WAIT) {
+    persistNow(get, sessionId);
+    return;
+  }
   const prev = persistTimers.get(sessionId);
   if (prev) clearTimeout(prev);
-  persistTimers.set(
-    sessionId,
-    setTimeout(() => {
-      persistTimers.delete(sessionId);
-      const messages = get().ui[sessionId]?.messages;
-      if (messages) void window.cyberslots.sessionMessagesSave(sessionId, messages);
-    }, 400),
-  );
+  persistTimers.set(sessionId, setTimeout(() => persistNow(get, sessionId), PERSIST_DEBOUNCE));
+}
+
+/** 立即落盘（回合结束等关键节点，不等防抖）。 */
+function flushPersist(get: () => ChatState, sessionId: string): void {
+  if (!get().ui[sessionId]?.hydrated) return;
+  persistNow(get, sessionId);
+}
+
+/** 退出前把所有挂起的落盘立即写完（尽力而为，减少尾部丢失）。 */
+function flushAllPersist(get: () => ChatState): void {
+  for (const id of [...persistTimers.keys()]) persistNow(get, id);
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -177,6 +209,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   planPreview: {},
   codexCatalog: [],
   codexDefaultEffort: undefined,
+  opencodeCatalog: null,
+
+  /** 懒加载 opencode 模型目录（in-flight 去重；失败结果也缓存，避免风暴重试）。 */
+  async loadOpencodeCatalog(force) {
+    if (!force && (get().opencodeCatalog || opencodeCatalogLoading)) return;
+    opencodeCatalogLoading = true;
+    try {
+      const catalog = await window.cyberslots.opencodeCatalogGet(force);
+      set({ opencodeCatalog: catalog });
+    } catch (err) {
+      set({ opencodeCatalog: { models: [], defaults: {}, error: err instanceof Error ? err.message : String(err) } });
+    } finally {
+      opencodeCatalogLoading = false;
+    }
+  },
 
   async init() {
     const [sessions, settings] = await Promise.all([
@@ -195,6 +242,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
     });
+    // 退出/刷新前把挂起的消息落盘写完，尽量不丢正在执行任务的尾部。
+    window.addEventListener('beforeunload', () => flushAllPersist(get));
   },
 
   async saveSettings(patch) {
@@ -667,7 +716,8 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
           }
         }
       }
-      schedulePersist(get, sessionId);
+      // 回合结束立即落盘（完成的产出必须持久化，不受防抖/崩溃影响）。
+      flushPersist(get, sessionId);
       // 自动派发等待队列的下一条（稍作延迟，让引擎回到 idle）。
       const queue = get().queues[sessionId] ?? [];
       if (queue.length > 0 && event.stopReason !== 'error') {

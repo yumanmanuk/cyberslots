@@ -33,6 +33,7 @@ import type { CodexCatalogModel, EngineId, PermissionMode } from '@shared/types'
 import { useChatStore, type QueuedMessage } from '../store/chatStore';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import OpencodeModelPicker from './OpencodeModelPicker';
 import PlanWidget from './PlanWidget';
 
 const PERM_LABEL_KEYS: Record<string, MsgKey> = {
@@ -267,8 +268,12 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
             <div className="flex-1" />
 
-            <ModelPicker sessionId={sessionId} />
-            {meta?.engine === 'codex' && <EffortPicker sessionId={sessionId} />}
+            {meta?.engine === 'opencode' ? (
+              <OpencodeModelPicker sessionId={sessionId} />
+            ) : (
+              <ModelPicker sessionId={sessionId} />
+            )}
+            {(meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} />}
             <ContextRing sessionId={sessionId} />
             <button
               title={t('expandInput')}
@@ -278,16 +283,17 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
               <Maximize2 size={13} />
             </button>
             {busy ? (
-              <div className="flex items-center gap-1.5">
-                {/* 执行中与发送按钮同位同款，仅图标变为时钟（加入等待队列）；无输入时禁用不隐藏，位置不跳动 */}
+              text.trim() || attachments.length > 0 ? (
+                // 有输入 → 与发送按钮合并为「加入等待队列」（时钟），本轮结束后自动发送
                 <button
                   onClick={() => send()}
-                  disabled={!text.trim() && attachments.length === 0}
                   title={t('enqueue')}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90 disabled:opacity-30"
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90"
                 >
                   <Clock size={15} />
                 </button>
+              ) : (
+                // 输入为空 → 同位显示中止按钮
                 <button
                   onClick={() => void cancel()}
                   title={t('stop')}
@@ -295,7 +301,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
                 >
                   <Square size={13} fill="currentColor" />
                 </button>
-              </div>
+              )
             ) : (
               <button
                 onClick={() => send()}
@@ -541,7 +547,8 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
   const forkToEngine = useChatStore((s) => s.forkToEngine);
   const [open, setOpen] = useState(false);
   if (!meta) return null;
-  const other: EngineId = meta.engine === 'kimi' ? 'codex' : 'kimi';
+  // 三引擎：列出除当前引擎外的全部选项（二元切换已成历史）。
+  const others = (['codex', 'kimi', 'opencode'] as EngineId[]).filter((e) => e !== meta.engine);
 
   return (
     <div className="relative">
@@ -555,18 +562,21 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
           <div className="px-3 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">{t('continueWith')}</div>
-          <DropdownItem
-            active={false}
-            onClick={() => {
-              setOpen(false);
-              void forkToEngine(sessionId, other);
-            }}
-          >
-            <span className="flex items-center gap-2">
-              <EngineIcon engine={other} size={13} />
-              {ENGINE_LABELS[other]}
-            </span>
-          </DropdownItem>
+          {others.map((other) => (
+            <DropdownItem
+              key={other}
+              active={false}
+              onClick={() => {
+                setOpen(false);
+                void forkToEngine(sessionId, other);
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <EngineIcon engine={other} size={13} />
+                {ENGINE_LABELS[other]}
+              </span>
+            </DropdownItem>
+          ))}
         </Dropdown>
       )}
     </div>
@@ -730,7 +740,7 @@ function fmtCtxWindow(n: number): string {
 function resolveEffort(
   override: string | undefined,
   cfgDefault: string | undefined,
-  entry: CodexCatalogModel | undefined,
+  entry: Pick<CodexCatalogModel, 'efforts' | 'defaultEffort'> | undefined,
 ): string {
   const efforts = entry?.efforts ?? EFFORTS;
   for (const c of [override, cfgDefault, entry?.defaultEffort, 'medium']) {
@@ -740,22 +750,34 @@ function resolveEffort(
 }
 
 /** 思考深度 — codex 桌面版同款滑条交互：弹层里一条 4 档滑轨，
- *  拖动/点击档位即选，标题行实时显示当前档位名。sidechat 复用（align="left"）。 */
-export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string; align?: 'left' | 'right' }): JSX.Element {
+ *  拖动/点击档位即选，标题行实时显示当前档位名。sidechat 复用（align="left"）。
+ *  opencode：档位 = 模型 reasoning variants 键名（none/high 等），无 variants
+ *  的模型自动隐藏；未显式选择时不下发 variant（跟随 server 默认）。 */
+export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string; align?: 'left' | 'right' }): JSX.Element | null {
   const t = useT();
   const override = useChatStore((s) => s.efforts[sessionId]);
   const cfgDefault = useChatStore((s) => s.codexDefaultEffort);
   const models = useChatStore((s) => s.ui[sessionId]?.models);
-  const metaModelId = useChatStore((s) => s.sessions.find((m) => m.id === sessionId)?.modelId);
+  const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const catalog = useChatStore((s) => s.codexCatalog);
+  const ocCatalog = useChatStore((s) => s.opencodeCatalog);
   const [open, setOpen] = useState(false);
   useEscClose(open, () => setOpen(false));
-  // 档位列表优先取 catalog 里当前模型声明的 supported_reasoning_levels；
+  const isOpencode = meta?.engine === 'opencode';
+  // 档位列表优先取 catalog 里当前模型声明的档位；
   // 引擎未运行时回退到持久化的 meta.modelId。
-  const activeModel = models?.current || models?.available[0] || metaModelId;
-  const entry = catalog.find((c) => c.slug === activeModel);
+  const activeModel = models?.current || models?.available[0] || meta?.modelId;
+  const entry: Pick<CodexCatalogModel, 'efforts' | 'defaultEffort'> | undefined = isOpencode
+    ? ocCatalog?.models.find((c) => c.slug === activeModel)
+    : catalog.find((c) => c.slug === activeModel);
+  // opencode 无 reasoning variants 的模型不渲染思考深度控件。
+  if (isOpencode && !entry?.efforts?.length) return null;
   const efforts = entry?.efforts ?? EFFORTS;
-  const effort = resolveEffort(override, cfgDefault, entry);
+  const effort = isOpencode
+    ? override && efforts.includes(override)
+      ? override
+      : (entry?.defaultEffort ?? efforts[0]!)
+    : resolveEffort(override, cfgDefault, entry);
   const idx = Math.max(0, efforts.indexOf(effort));
   const label = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
 

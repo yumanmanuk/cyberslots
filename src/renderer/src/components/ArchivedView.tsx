@@ -11,6 +11,7 @@ import { Archive, ArchiveRestore, Check, Trash2, X } from 'lucide-react';
 import type { SessionMeta } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
+import { ENGINE_LABELS } from './EngineIcon';
 
 export default function ArchivedView(): JSX.Element | null {
   const t = useT();
@@ -85,7 +86,7 @@ function ArchivedRow({ meta, onOpen }: { meta: SessionMeta; onOpen: () => void }
       className="group flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 transition hover:bg-bg-hover"
     >
       <span className="shrink-0 rounded-md bg-bg-panel px-1.5 py-0.5 text-[10px] text-ink-faint">
-        {meta.engine === 'kimi' ? 'Kimi' : 'Codex'}
+        {ENGINE_LABELS[meta.engine]}
       </span>
       <span className="min-w-0 flex-1 truncate text-ui text-ink">{meta.title}</span>
       <span className="shrink-0 text-[10.5px] tabular-nums text-ink-faint">{timeAgo(meta.updatedAt)}</span>
@@ -106,9 +107,8 @@ function ArchivedRow({ meta, onOpen }: { meta: SessionMeta; onOpen: () => void }
           clearTimeout(timer.current);
           setConfirming(false);
         }}
-        className={`rounded-md p-1 transition group-hover:opacity-100 ${
-          confirming ? 'bg-err/15 text-err opacity-100' : 'text-ink-faint opacity-0 hover:bg-bg-active hover:text-err'
-        }`}
+        className={`rounded-md p-1 transition group-hover:opacity-100 ${confirming ? 'bg-err/15 text-err opacity-100' : 'text-ink-faint opacity-0 hover:bg-bg-active hover:text-err'
+          }`}
       >
         {confirming ? <Check size={14} /> : <Trash2 size={14} />}
       </button>

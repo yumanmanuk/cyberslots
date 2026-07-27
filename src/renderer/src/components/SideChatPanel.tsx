@@ -51,7 +51,9 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
     const value = text.trim();
     if (!value || busy) return;
     setText('');
-    const guard = meta?.engine === 'kimi' ? SIDECHAT_GUARD : undefined;
+    // kimi/opencode 无 read-only 硬隔离（plan agent 会写计划文件），
+    // 用只读指令前缀软约束；codex 已由 plan 模式沙箱硬隔离。
+    const guard = meta?.engine === 'kimi' || meta?.engine === 'opencode' ? SIDECHAT_GUARD : undefined;
     void useChatStore.getState().sendPromptTo(sessionId, value, undefined, guard);
   };
 
@@ -131,7 +133,7 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
           />
           <div className="flex items-center gap-1.5 px-3 pb-2.5">
             <MiniModelPicker sessionId={sessionId} />
-            {meta?.engine === 'codex' && <EffortPicker sessionId={sessionId} align="left" />}
+            {(meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} align="left" />}
             <div className="flex-1" />
             {busy ? (
               <button
