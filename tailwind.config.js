@@ -1,9 +1,9 @@
 /** Tailwind — design tokens follow the codex-desktop/Notion visual identity.
- *  Colors are CSS variables so the three themes (notion/light/dark) swap at
- *  the `data-theme` attribute level without touching component classes. */
+ *  Colors are CSS variables so themes swap at the data-palette / data-mode
+ *  attribute level without touching component classes. */
 export default {
   content: ['./src/renderer/index.html', './src/renderer/src/**/*.{ts,tsx}'],
-  darkMode: ['selector', '[data-theme="dark"]'],
+  darkMode: ['selector', '[data-mode="dark"]'],
   theme: {
     extend: {
       colors: {
@@ -22,6 +22,7 @@ export default {
         ok: 'var(--ok)',
         warn: 'var(--warn)',
         err: 'var(--err)',
+        info: 'var(--info)',
       },
       fontFamily: {
         sans: ['"Noto Sans SC"', 'Montserrat', 'system-ui', 'Segoe UI', 'sans-serif'],

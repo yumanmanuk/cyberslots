@@ -3,13 +3,13 @@
 @tailwind utilities;
 
 /* ============ Theme tokens ============
-   notion  — 默认门面：米白通透、Notion 阅读感（codex 桌面版基准）
-   light   — 纯白清爽
-   dark    — Monochrome/Flexoki 可选深色                     */
+   二维主题：配色主题（data-palette）× 明暗模式（data-mode）。
+   每套阅读向色板提供明、暗两个变体；:root 回退 = notion 浅色，防首屏闪烁。 */
 
 :root,
-[data-theme='notion'] {
-  --bg-canvas: #efece4; /* 窗口画布（标题栏+侧栏）— 比浮层深一档（且有别于 hover），让左上大圆角可辨 */
+[data-palette='notion'] {
+  --bg-canvas: #efece4;
+  /* 窗口画布（标题栏+侧栏）：比浮层深一档（又有别于 hover），让左上大圆角可辨 */
   --bg: #fffcf0;
   --bg-panel: #f7f6f3;
   --bg-hover: #f1efe9;
@@ -26,26 +26,8 @@
   --err: #c5493f;
 }
 
-[data-theme='light'] {
-  --bg-canvas: #f2f2f4;
-  --bg: #ffffff;
-  --bg-panel: #f7f7f8;
-  --bg-hover: #f0f0f1;
-  --bg-active: #e8e8ea;
-  --bg-input: #ffffff;
-  --ink: #1f1f21;
-  --ink-soft: #5f5f66;
-  --ink-faint: #9a9aa3;
-  --line: #e6e6e9;
-  --accent: #2f6feb;
-  --accent-soft: #e3ecfd;
-  --ok: #2e9e63;
-  --warn: #c07d18;
-  --err: #d64545;
-}
-
-[data-theme='dark'] {
-  /* codex 桌面版明暗关系：画布最暗 → 内容浮层稍亮 → 卡片再亮一级 */
+[data-palette='notion'][data-mode='dark'] {
+  /* notion 暗色变体（暖调单色）：画布最暗 → 内容浮层稍亮 → 卡片再亮一级 */
   --bg-canvas: #0f0e0e;
   --bg: #1a1918;
   --bg-panel: #242220;
@@ -53,14 +35,88 @@
   --bg-active: #363330;
   --bg-input: #211f1e;
   --ink: #cecdc3;
-  --ink-soft: #928f85;
-  --ink-faint: #6f6c64;
+  --ink-soft: #a8a49b;
+  --ink-faint: #84817a;
   --line: #34312e;
   --accent: #d0a215;
   --accent-soft: #33301f;
   --ok: #66a06b;
   --warn: #d0a215;
   --err: #d14d41;
+}
+
+/* Solarized — 经典低对比护眼色板（Ethan Schoonover 规范色值） */
+[data-palette='solarized'] {
+  --bg-canvas: #eee8d5;
+  --bg: #fdf6e3;
+  --bg-panel: #f6f0dd;
+  --bg-hover: #eee8d5;
+  --bg-active: #e3dcc7;
+  --bg-input: #fffdf5;
+  --ink: #586e75;
+  --ink-soft: #657b83;
+  --ink-faint: #93a1a1;
+  --line: #e5dfcc;
+  --accent: #268bd2;
+  --accent-soft: #e4e7d4;
+  --ok: #859900;
+  --warn: #b58900;
+  --err: #dc322f;
+}
+
+[data-palette='solarized'][data-mode='dark'] {
+  --bg-canvas: #00212b;
+  --bg: #002b36;
+  --bg-panel: #073642;
+  --bg-hover: #0a4050;
+  --bg-active: #0e4a5c;
+  --bg-input: #06313d;
+  --ink: #93a1a1;
+  --ink-soft: #839496;
+  --ink-faint: #586e75;
+  --line: #0c4250;
+  --accent: #268bd2;
+  --accent-soft: #0a3648;
+  --ok: #859900;
+  --warn: #b58900;
+  --err: #dc322f;
+}
+
+/* Everforest — 森系绿，专为长时间阅读/编码设计 */
+[data-palette='everforest'] {
+  --bg-canvas: #e5dfc5;
+  --bg: #f3ead3;
+  --bg-panel: #eae4ca;
+  --bg-hover: #e3ddc3;
+  --bg-active: #d8d3ba;
+  --bg-input: #faf4de;
+  --ink: #5c6a72;
+  --ink-soft: #708089;
+  --ink-faint: #939f91;
+  --line: #dfd8be;
+  --accent: #8da101;
+  --accent-soft: #e6e7c9;
+  --ok: #8da101;
+  --warn: #dfa000;
+  --err: #f85552;
+}
+
+[data-palette='everforest'][data-mode='dark'] {
+  --bg-canvas: #232a2e;
+  --bg: #2d353b;
+  --bg-panel: #343f44;
+  --bg-hover: #3d484d;
+  --bg-active: #475258;
+  --bg-input: #323c42;
+  --ink: #d3c6aa;
+  --ink-soft: #9da9a0;
+  --ink-faint: #7a8478;
+  --line: #3d484d;
+  --accent: #a7c080;
+  --accent-soft: #3a453c;
+  --ok: #a7c080;
+  --warn: #dbbc7f;
+  --err: #e67e80;
 }
 
 html,
@@ -74,6 +130,7 @@ body,
 .drag {
   -webkit-app-region: drag;
 }
+
 .drag button,
 .drag input,
 .drag select,
@@ -91,13 +148,16 @@ body {
   width: 8px;
   height: 8px;
 }
+
 *::-webkit-scrollbar-thumb {
   background: var(--line);
   border-radius: 4px;
 }
+
 *::-webkit-scrollbar-thumb:hover {
   background: var(--ink-faint);
 }
+
 *::-webkit-scrollbar-corner {
   background: transparent;
 }
@@ -107,9 +167,11 @@ body {
 .scroll-quiet::-webkit-scrollbar {
   width: 6px;
 }
+
 .scroll-quiet::-webkit-scrollbar-thumb {
   background: transparent;
 }
+
 .scroll-quiet:hover::-webkit-scrollbar-thumb {
   background: var(--line);
 }
@@ -118,38 +180,48 @@ body {
 .md-body {
   @apply text-body;
 }
+
 .md-body p {
   margin: 0.45em 0;
 }
+
 .md-body h1,
 .md-body h2,
 .md-body h3 {
   font-weight: 600;
   margin: 0.9em 0 0.4em;
 }
+
 .md-body h1 {
   font-size: 1.25em;
 }
+
 .md-body h2 {
   font-size: 1.15em;
 }
+
 .md-body h3 {
   font-size: 1.05em;
 }
+
 .md-body ul,
 .md-body ol {
   padding-left: 1.4em;
   margin: 0.4em 0;
 }
+
 .md-body ul {
   list-style: disc;
 }
+
 .md-body ol {
   list-style: decimal;
 }
+
 .md-body li {
   margin: 0.15em 0;
 }
+
 .md-body code {
   @apply font-mono;
   font-size: 0.86em;
@@ -158,6 +230,7 @@ body {
   border-radius: 4px;
   padding: 0.1em 0.35em;
 }
+
 .md-body pre {
   background: var(--bg-panel);
   border: 1px solid var(--line);
@@ -166,6 +239,7 @@ body {
   overflow-x: auto;
   margin: 0.6em 0;
 }
+
 .md-body pre code {
   background: none;
   border: none;
@@ -173,22 +247,26 @@ body {
   font-size: 12.5px;
   line-height: 1.55;
 }
+
 .md-body blockquote {
   border-left: 3px solid var(--line);
   padding-left: 0.9em;
   color: var(--ink-soft);
   margin: 0.5em 0;
 }
+
 .md-body table {
   border-collapse: collapse;
   margin: 0.6em 0;
   font-size: 0.92em;
 }
+
 .md-body th,
 .md-body td {
   border: 1px solid var(--line);
   padding: 4px 10px;
 }
+
 .md-body a {
   color: var(--accent);
   text-decoration: underline;
@@ -201,6 +279,7 @@ body {
   color: var(--accent);
   animation: caret-blink 1s steps(1) infinite;
 }
+
 @keyframes caret-blink {
   50% {
     opacity: 0;
@@ -213,23 +292,101 @@ body {
     opacity: 0;
     transform: translateY(14px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
   }
 }
 
-/* ============ highlight.js — theme-aware token colors ============
-   亮色主题取类 GitHub Light 色盘，深色主题取类 Flexoki 色盘；
-   背景交给容器，.hljs 只管 token 颜色。 */
+/* Right-panel slide-in (sidechat / plan preview) */
+.panel-in {
+  animation: panel-in 220ms ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+
+/* 新消息加入等待队列时，行从上方滑入淡入 */
+.queue-row-in {
+  animation: queue-row-in 180ms ease-out;
+}
+
+@keyframes queue-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============ effort maxed (xhigh) — 拉满档的骰子就要发光 ============
+   轨道金色流光扫过 + 滑块脉冲光环 + 档位文字渐变流光。 */
+.effort-max-fill {
+  background: linear-gradient(90deg, var(--accent) 0%, #ffd75e 25%, var(--accent) 50%, #ffd75e 75%, var(--accent) 100%);
+  background-size: 200% 100%;
+  animation: effort-shimmer 1.6s linear infinite;
+}
+
+.effort-max-thumb {
+  animation: effort-thumb-pulse 1.2s ease-in-out infinite;
+}
+
+.effort-max-label {
+  background: linear-gradient(90deg, var(--accent), #ffd75e, var(--accent));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 600;
+  animation: effort-shimmer 1.6s linear infinite;
+}
+
+@keyframes effort-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes effort-thumb-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(255 200 60 / 55%);
+  }
+
+  50% {
+    box-shadow: 0 0 0 8px rgb(255 200 60 / 0%);
+  }
+}
+
+/* ============ highlight.js — mode-aware token colors ============
+   浅色模式取类 GitHub Light 色盘，深色模式取类 Flexoki 色盘；
+   背景交给容器，hljs 只管 token 颜色。 */
 .hljs {
   color: var(--ink);
 }
+
 .hljs-comment,
 .hljs-quote {
   color: var(--ink-faint);
   font-style: italic;
 }
+
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-meta .hljs-keyword,
@@ -237,6 +394,7 @@ body {
 .hljs-section {
   color: #a626a4;
 }
+
 .hljs-string,
 .hljs-regexp,
 .hljs-addition,
@@ -244,6 +402,7 @@ body {
 .hljs-meta .hljs-string {
   color: #2e9e63;
 }
+
 .hljs-number,
 .hljs-literal,
 .hljs-type,
@@ -252,6 +411,7 @@ body {
 .hljs-link {
   color: #b76b01;
 }
+
 .hljs-title,
 .hljs-title.class_,
 .hljs-title.function_,
@@ -260,6 +420,7 @@ body {
 .hljs-selector-class {
   color: #2f6feb;
 }
+
 .hljs-attr,
 .hljs-variable,
 .hljs-template-variable,
@@ -268,42 +429,49 @@ body {
 .hljs-built_in {
   color: #c5493f;
 }
+
 .hljs-deletion {
   color: var(--err);
 }
+
 .hljs-emphasis {
   font-style: italic;
 }
+
 .hljs-strong {
   font-weight: 600;
 }
 
-[data-theme='dark'] .hljs-keyword,
-[data-theme='dark'] .hljs-selector-tag,
-[data-theme='dark'] .hljs-doctag,
-[data-theme='dark'] .hljs-section {
+[data-mode='dark'] .hljs-keyword,
+[data-mode='dark'] .hljs-selector-tag,
+[data-mode='dark'] .hljs-doctag,
+[data-mode='dark'] .hljs-section {
   color: #c586c0;
 }
-[data-theme='dark'] .hljs-string,
-[data-theme='dark'] .hljs-regexp,
-[data-theme='dark'] .hljs-addition,
-[data-theme='dark'] .hljs-attribute {
+
+[data-mode='dark'] .hljs-string,
+[data-mode='dark'] .hljs-regexp,
+[data-mode='dark'] .hljs-addition,
+[data-mode='dark'] .hljs-attribute {
   color: #87a987;
 }
-[data-theme='dark'] .hljs-number,
-[data-theme='dark'] .hljs-literal,
-[data-theme='dark'] .hljs-type,
-[data-theme='dark'] .hljs-symbol {
+
+[data-mode='dark'] .hljs-number,
+[data-mode='dark'] .hljs-literal,
+[data-mode='dark'] .hljs-type,
+[data-mode='dark'] .hljs-symbol {
   color: #d0a215;
 }
-[data-theme='dark'] .hljs-title,
-[data-theme='dark'] .hljs-title.class_,
-[data-theme='dark'] .hljs-title.function_,
-[data-theme='dark'] .hljs-name {
+
+[data-mode='dark'] .hljs-title,
+[data-mode='dark'] .hljs-title.class_,
+[data-mode='dark'] .hljs-title.function_,
+[data-mode='dark'] .hljs-name {
   color: #66b3ff;
 }
-[data-theme='dark'] .hljs-attr,
-[data-theme='dark'] .hljs-variable,
-[data-theme='dark'] .hljs-built_in {
+
+[data-mode='dark'] .hljs-attr,
+[data-mode='dark'] .hljs-variable,
+[data-mode='dark'] .hljs-built_in {
   color: #d1837a;
 }

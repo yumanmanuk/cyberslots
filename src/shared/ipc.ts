@@ -14,6 +14,7 @@ import type {
   PermissionMode,
   SessionMeta,
   UnifiedMessage,
+  WindowAppearance,
 } from './types';
 
 export const IPC = {
@@ -22,6 +23,7 @@ export const IPC = {
   sessionList: 'session:list',
   sessionPrompt: 'session:prompt',
   sessionCancel: 'session:cancel',
+  sessionWarmUp: 'session:warm-up',
   sessionSetModel: 'session:set-model',
   sessionSetMode: 'session:set-mode',
   sessionAnswerPermission: 'session:answer-permission',
@@ -110,6 +112,8 @@ export interface CyberSlotsApi {
   sessionList(): Promise<SessionMeta[]>;
   sessionPrompt(req: SessionPromptRequest): Promise<void>;
   sessionCancel(sessionId: string): Promise<void>;
+  /** 预热：选中会话时立即唤醒引擎进程（恢复态不再懒启动）。 */
+  sessionWarmUp(sessionId: string): Promise<void>;
   sessionSetModel(sessionId: string, modelId: string): Promise<void>;
   sessionSetMode(sessionId: string, mode: PermissionMode): Promise<void>;
   sessionAnswerPermission(req: AnswerPermissionRequest): Promise<void>;
@@ -137,8 +141,8 @@ export interface CyberSlotsApi {
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
   /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。 */
   engineConfigsGet(): Promise<EngineConfigsSnapshot>;
-  /** Push the active theme to main so the native title bar matches. */
-  themeSync(theme: AppSettings['theme']): Promise<void>;
+  /** Push the resolved appearance to main so the native title bar matches. */
+  themeSync(appearance: WindowAppearance): Promise<void>;
   cronList(): Promise<CronTask[]>;
   cronSave(task: CronTask): Promise<CronTask[]>;
   cronDelete(id: string): Promise<CronTask[]>;

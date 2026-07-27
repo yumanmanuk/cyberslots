@@ -12,7 +12,8 @@ import { join } from 'node:path';
 import type { AppSettings } from '@shared/types';
 
 const DEFAULTS: AppSettings = {
-  theme: 'notion',
+  themeMode: 'light',
+  themePalette: 'notion',
   language: 'zh',
   defaultPermissionMode: 'default',
   sendKey: 'enter',
@@ -24,9 +25,10 @@ const DEFAULTS: AppSettings = {
 /** Backfill fields added over time; silently drop the legacy provider
  *  store (pre-routing builds kept providers/keys in settings.json). */
 function migrate(stored: Record<string, unknown>): AppSettings {
-  const s = stored as Partial<AppSettings> & { providers?: unknown; defaultModelId?: unknown };
+  const s = stored as Partial<AppSettings> & { providers?: unknown; defaultModelId?: unknown; theme?: 'notion' | 'light' | 'dark' };
   return {
-    theme: s.theme ?? DEFAULTS.theme,
+    themeMode: s.themeMode ?? (s.theme === 'dark' ? 'dark' : DEFAULTS.themeMode),
+    themePalette: s.themePalette ?? DEFAULTS.themePalette,
     language: s.language ?? DEFAULTS.language,
     defaultPermissionMode: s.defaultPermissionMode ?? DEFAULTS.defaultPermissionMode,
     sendKey: s.sendKey ?? DEFAULTS.sendKey,

@@ -78,7 +78,17 @@ export interface ToolCallContent {
 
 /** One rendered item in the conversation stream. */
 export type UnifiedMessage =
-  | { kind: 'user'; id: string; turnId: number; text: string; attachments?: string[]; createdAt: number; steer?: boolean }
+  | {
+      kind: 'user';
+      id: string;
+      turnId: number;
+      text: string;
+      attachments?: string[];
+      createdAt: number;
+      steer?: boolean;
+      /** 该条提问是作为 Goal 发送的（气泡下方标注 Sent as goal）。 */
+      sentAsGoal?: boolean;
+    }
   | { kind: 'text'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; planDoc?: boolean }
   | { kind: 'thinking'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; durationMs?: number }
   | {
@@ -118,7 +128,17 @@ export type UnifiedMessage =
     }
   | { kind: 'error'; id: string; turnId: number; message: string; createdAt: number }
   | { kind: 'system'; id: string; turnId: number; text: string; createdAt: number }
-  | { kind: 'turn_end'; id: string; turnId: number; stopReason: string; usage?: UsageInfo; durationMs?: number; createdAt: number };
+  | {
+      kind: 'turn_end';
+      id: string;
+      turnId: number;
+      stopReason: string;
+      usage?: UsageInfo;
+      durationMs?: number;
+      /** 纯 API/模型耗时（墙钟 − 工具执行 − 审批等待），t/s 的分母；缺省退回 durationMs。 */
+      apiDurationMs?: number;
+      createdAt: number;
+    };
 
 export interface PlanEntry {
   content: string;
@@ -193,7 +213,14 @@ export type EngineEvent =
   | { type: 'usage.update'; used: number; size: number; costUsd?: number }
   /** Engine-side goal state changed (null = cleared/none). */
   | { type: 'goal.update'; goal: GoalInfo | null }
-  | { type: 'turn.ended'; turnId: number; stopReason: string; usage?: UsageInfo; durationMs?: number }
+  | {
+      type: 'turn.ended';
+      turnId: number;
+      stopReason: string;
+      usage?: UsageInfo;
+      durationMs?: number;
+      apiDurationMs?: number;
+    }
   | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider' };
 
 export interface SlashCommandInfo {
@@ -267,7 +294,22 @@ export interface CodexConfigSnapshot {
   activeProvider?: string;
   authMode: 'chatgpt' | 'apikey' | 'none';
   providers: CodexConfigProvider[];
+  /** model_catalog_json 里声明的模型目录（存在且可解析时）。 */
+  catalogModels?: CodexCatalogModel[];
   error?: string;
+}
+
+/** codex model_catalog_json 的单个模型条目（只留 UI 需要的字段；
+ *  slug 即 codex `model` 参数值）。 */
+export interface CodexCatalogModel {
+  slug: string;
+  displayName?: string;
+  contextWindow?: number;
+  /** 输入模态：text / image … */
+  inputModalities?: string[];
+  /** 支持的思考深度档位（按 catalog 声明顺序）。 */
+  efforts?: string[];
+  defaultEffort?: string;
 }
 
 export interface RouteSupport {
@@ -302,8 +344,22 @@ export interface NotificationSettings {
 
 export type AppLanguage = 'zh' | 'en';
 
+export type ThemeMode = 'light' | 'dark' | 'system';
+/** system 解析后的实际明暗值。 */
+export type ResolvedMode = 'light' | 'dark';
+export type ThemePalette = 'notion' | 'solarized' | 'everforest';
+
+/** 渲染进程推给主进程的已解析外观（原生标题栏/窗口底色联动）。 */
+export interface WindowAppearance {
+  palette: ThemePalette;
+  mode: ResolvedMode;
+}
+
 export interface AppSettings {
-  theme: 'notion' | 'light' | 'dark';
+  /** 明暗模式：浅色 / 深色 / 跟随系统。 */
+  themeMode: ThemeMode;
+  /** 配色主题（阅读向色板，每套含明、暗两个变体）。 */
+  themePalette: ThemePalette;
   language: AppLanguage;
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';

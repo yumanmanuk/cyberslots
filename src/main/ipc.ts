@@ -7,7 +7,7 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode, UnifiedMessage } from '@shared/types';
+import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode, UnifiedMessage, WindowAppearance } from '@shared/types';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
@@ -22,6 +22,7 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
     sessions.prompt(req.sessionId, req.text, req.attachments, req.effort),
   );
   ipcMain.handle(IPC.sessionCancel, (_e, sessionId: string) => sessions.cancel(sessionId));
+  ipcMain.handle(IPC.sessionWarmUp, (_e, sessionId: string) => sessions.warmUp(sessionId));
   ipcMain.handle(IPC.sessionSetModel, (_e, sessionId: string, modelId: string) =>
     sessions.setModel(sessionId, modelId),
   );
@@ -68,9 +69,9 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
   // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
   ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
 
-  ipcMain.handle(IPC.themeSync, (e, theme: AppSettings['theme']) => {
+  ipcMain.handle(IPC.themeSync, (e, appearance: WindowAppearance) => {
     const win = BrowserWindow.fromWebContents(e.sender);
-    if (win) applyWindowTheme(win, theme);
+    if (win) applyWindowTheme(win, appearance);
   });
 
   ipcMain.handle(IPC.cronList, () => cron.list());
