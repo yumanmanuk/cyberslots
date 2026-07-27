@@ -8,9 +8,10 @@
 import { parse as tomlParse, stringify as tomlStringify } from 'smol-toml';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import type {
+  CodexCatalogModel,
   CodexConfigProvider,
   CodexConfigSnapshot,
   EngineConfigsSnapshot,
@@ -100,6 +101,8 @@ export function readCodexConfig(): CodexConfigSnapshot {
     snap.model = str(doc.model);
     snap.reasoningEffort = str(doc.model_reasoning_effort);
     snap.activeProvider = str(doc.model_provider);
+    const catalogRef = str(doc.model_catalog_json);
+    if (catalogRef) snap.catalogModels = readCodexCatalog(home, catalogRef);
     const providers = (doc.model_providers ?? {}) as Record<string, Json>;
     for (const [id, p] of Object.entries(providers)) {
       const envKey = str(p.env_key);
@@ -117,6 +120,39 @@ export function readCodexConfig(): CodexConfigSnapshot {
     snap.error = `配置解析失败: ${err instanceof Error ? err.message : String(err)}`;
   }
   return snap;
+}
+
+/** 解析 codex model_catalog_json（cc-switch 等工具生成）：目录里的 slug
+ *  就是 codex `model` 参数值，附带上下文窗口/输入模态/思考深度档位。
+ *  相对路径相对 CODEX_HOME 解析；解析失败返回 undefined（不阻断快照）。 */
+function readCodexCatalog(home: string, ref: string): CodexCatalogModel[] | undefined {
+  try {
+    const path = isAbsolute(ref) ? ref : join(home, ref);
+    if (!existsSync(path)) return undefined;
+    const doc = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as Json;
+    const models = Array.isArray(doc.models) ? (doc.models as Json[]) : [];
+    const out: CodexCatalogModel[] = [];
+    for (const m of models) {
+      const slug = str(m.slug);
+      if (!slug || str(m.visibility) === 'hidden') continue;
+      const levels = Array.isArray(m.supported_reasoning_levels)
+        ? (m.supported_reasoning_levels as Json[]).map((l) => str(l.effort)).filter((e): e is string => !!e)
+        : [];
+      out.push({
+        slug,
+        displayName: str(m.display_name),
+        contextWindow: num(m.context_window),
+        inputModalities: Array.isArray(m.input_modalities)
+          ? (m.input_modalities as unknown[]).map(String)
+          : undefined,
+        efforts: levels.length ? levels : undefined,
+        defaultEffort: str(m.default_reasoning_level),
+      });
+    }
+    return out.length ? out : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function readEngineConfigs(): EngineConfigsSnapshot {

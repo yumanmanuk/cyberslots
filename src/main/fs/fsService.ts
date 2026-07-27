@@ -94,11 +94,10 @@ export async function openIn(target: OpenTarget, path: string): Promise<void> {
       return;
     case 'terminal': {
       // 快捷“打开终端”：Windows Terminal 优先，缺失时退回 PowerShell 窗口。
-      try {
-        await spawnDetached(['wt', '-d', quoted]);
-      } catch {
-        await spawnDetached(['start', 'powershell', '-NoExit'], quoted);
-      }
+      // 注意：spawnDetached 带 shell:true，命令缺失不会抛错（cmd 静默退出），
+      // 不能靠 try/catch 兑底 — 必须先探测 wt 是否存在（e2e 实测点击无反应）。
+      if (await hasCommand('wt')) await spawnDetached(['wt', '-d', `"${path}"`]);
+      else await spawnDetached(['start', 'powershell', '-NoExit'], path);
       return;
     }
     case 'gitbash': {
@@ -121,6 +120,16 @@ async function spawnDetached(argv: string[], cwd?: string): Promise<void> {
   const { spawn } = await import('node:child_process');
   const child = spawn(cmd!, args, { cwd, detached: true, stdio: 'ignore', shell: true, windowsHide: false });
   child.unref();
+}
+
+/** 命令是否在 PATH 上（where/which）— shell:true 的 spawn 对缺失命令不报错，只能事前探。 */
+async function hasCommand(cmd: string): Promise<boolean> {
+  try {
+    await execFileAsync(process.platform === 'win32' ? 'where' : 'which', [cmd], { windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Throw if `target` escapes `root` (path-traversal / symlink guard). */

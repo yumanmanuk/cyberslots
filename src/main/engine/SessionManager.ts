@@ -31,6 +31,8 @@ import type { AiServerHost } from '../proxy/AiServerHost';
 interface LiveSession {
   meta: SessionMeta;
   adapter: EngineAdapter | undefined;
+  /** 后台启动中的 promise — prompt 等路径据此汇合，避免重复 spawn。 */
+  starting?: Promise<void>;
 }
 
 export class SessionManager {
@@ -84,24 +86,10 @@ export class SessionManager {
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
 
-    const adapter = await this.buildAdapter(meta);
-    this.sessions.get(id)!.adapter = adapter;
-    try {
-      const { engineSessionId } = await adapter.start();
-      meta.engineSessionId = engineSessionId;
-      meta.status = 'idle';
-      this.touch(meta);
-    } catch (err) {
-      meta.status = 'error';
-      this.touch(meta);
-      this.forward(id, {
-        type: 'error',
-        source: 'client',
-        message: `会话启动失败: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      await adapter.dispose().catch(() => undefined);
-      throw err;
-    }
+    // 不等引擎起完 — 立刻返回 meta 让 UI 秒跳新会话，进程后台启动，
+    // 状态由 session.status 事件推进（starting → idle / error）。
+    const live = this.sessions.get(id)!;
+    live.starting = this.startRuntime(live).catch(() => undefined);
     return meta;
   }
 
@@ -122,26 +110,53 @@ export class SessionManager {
 
   /** Lazily revive the engine process for sessions closed by app restart. */
   private async ensureRuntime(s: LiveSession): Promise<void> {
+    if (s.starting) await s.starting; // 后台启动进行中 — 汇合而非重复 spawn
     if (s.adapter) return;
+    await this.startRuntime(s);
+  }
+
+  /** Spawn + 握手；create（后台）与 ensureRuntime（懒唤醒）共用。
+   *  失败时广播 error 事件并抛出，adapter 清空以便下次重试。 */
+  private async startRuntime(s: LiveSession): Promise<void> {
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
     s.meta.status = 'starting';
     this.touch(s.meta);
+    this.forward(s.meta.id, { type: 'session.status', status: 'starting' });
     try {
       const { engineSessionId } = await adapter.start();
       s.meta.engineSessionId = engineSessionId;
       s.meta.status = 'idle';
       this.touch(s.meta);
+      this.forward(s.meta.id, { type: 'session.status', status: 'idle' });
     } catch (err) {
       s.adapter = undefined;
       s.meta.status = 'error';
       this.touch(s.meta);
+      this.forward(s.meta.id, { type: 'session.status', status: 'error' });
+      this.forward(s.meta.id, {
+        type: 'error',
+        source: 'client',
+        message: `会话启动失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      await adapter.dispose().catch(() => undefined);
       throw err;
+    } finally {
+      s.starting = undefined;
     }
   }
 
   async cancel(sessionId: string): Promise<void> {
     await this.require(sessionId).adapter?.cancel();
+  }
+
+  /** 预热：选中会话时提前唤醒引擎（已在跑则无操作），
+   *  使模型/思考深度/命令等 models.update 事件即时就绪。
+   *  启动失败不抛（仅预热，错误已通过 session.status 事件传给 UI）。 */
+  async warmUp(sessionId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.adapter) return;
+    await this.ensureRuntime(s).catch(() => undefined);
   }
 
   /**
@@ -235,6 +250,7 @@ export class SessionManager {
 
   async setModel(sessionId: string, modelId: string): Promise<void> {
     const s = this.require(sessionId);
+    if (s.starting) await s.starting; // 后台启动中 — 等握手完再下发
     await s.adapter?.setModel(modelId);
     s.meta.modelId = modelId;
     this.touch(s.meta);
@@ -242,6 +258,7 @@ export class SessionManager {
 
   async setMode(sessionId: string, mode: PermissionMode): Promise<void> {
     const s = this.require(sessionId);
+    if (s.starting) await s.starting;
     await s.adapter?.setMode(mode);
     s.meta.permissionMode = mode;
     this.touch(s.meta);
@@ -329,7 +346,7 @@ export class SessionManager {
     try {
       const f = this.messagesFile(sessionId);
       if (!existsSync(f)) return [];
-      return JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
+      return reconcilePersistedMessages(JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[]);
     } catch {
       return [];
     }
@@ -357,6 +374,9 @@ export class SessionManager {
 
   private async buildAdapter(meta: SessionMeta, resumeSessionId?: string): Promise<EngineAdapter> {
     const settings = this.settings.get();
+    // 空会话（无客户端历史）恢复失败时静默降级 — 没发过消息的线程
+    // 引擎侧常未落盘（no rollout），报错纯噪音。
+    const quietResumeFallback = resumeSessionId ? this.getMessages(meta.id).length === 0 : undefined;
     if (meta.engine === 'kimi') {
       // 路由开：镜像 home（base_url 指向本地 chat 前端）；关：不设
       // KIMI_CODE_HOME → kimi 直接用用户自己的 ~/.kimi-code 配置。
@@ -374,6 +394,7 @@ export class SessionManager {
           modelId: meta.modelId,
           permissionMode: meta.permissionMode,
           resumeSessionId,
+          quietResumeFallback,
         },
         (event) => this.onEngineEvent(meta.id, event),
       );
@@ -393,15 +414,23 @@ export class SessionManager {
         // 路由模式下模型名驱动路由：候选 = kimi 配置的模型别名。
         availableModels = kimiCfg.providers.flatMap((p) => p.models.map((m) => m.alias));
       } else {
-        // 直连：尊重用户配置默认模型，不强制下发 model 参数。
-        if (codexCfg.model) availableModels = [codexCfg.model];
+        // 直连：候选 = model_catalog_json 目录（slug 即 model 参数），无目录
+        // 时退回配置默认模型；配置默认模型不在目录里时也补进候选。
+        const catalog = codexCfg.catalogModels ?? [];
+        if (catalog.length) availableModels = catalog.map((m) => m.slug);
+        else if (codexCfg.model) availableModels = [codexCfg.model];
+        if (codexCfg.model && !availableModels.includes(codexCfg.model)) availableModels.unshift(codexCfg.model);
       }
+      // 直连未显式选模型时加载 ~/.codex/config.toml 的默认 model —
+      // UI 与实际生效模型一致，且下发值等于 codex 自身默认，不改变行为。
+      const directModelId = meta.modelId || codexCfg.model || '';
       return new CodexAdapter(
         {
           cwd: meta.cwd,
-          modelId: settings.routing.codex ? meta.modelId : '',
+          modelId: settings.routing.codex ? meta.modelId : directModelId,
           permissionMode: meta.permissionMode,
           resumeThreadId: resumeSessionId,
+          quietResumeFallback,
           configOverrideArgs: overrideArgs,
           modelProvider: settings.routing.codex ? 'cyberslots' : undefined,
           availableModels,
@@ -500,6 +529,38 @@ export class SessionManager {
       console.error('[sessions] load failed:', err);
     }
   }
+}
+
+/**
+ * 收敛上次运行遗留的“进行中”状态：app 退出/崩溃时，引擎进程被杀，
+ * 持久化历史里的 tool_call 转圈、待处理授权、进行中计划项永远不会再有
+ * 后续事件，重启后必须按终态渲染，否则界面永远停在加载中。
+ */
+function reconcilePersistedMessages(messages: UnifiedMessage[]): UnifiedMessage[] {
+  let changed = false;
+  const out = messages.map((m) => {
+    if (m.kind === 'tool_call' && (m.status === 'pending' || m.status === 'in_progress')) {
+      changed = true;
+      return { ...m, status: 'failed' as const };
+    }
+    if ((m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined) {
+      changed = true;
+      return { ...m, answeredOptionId: '__cancelled__' };
+    }
+    if (m.kind === 'plan' && m.entries.some((e) => e.status === 'in_progress')) {
+      changed = true;
+      return {
+        ...m,
+        entries: m.entries.map((e) => (e.status === 'in_progress' ? { ...e, status: 'pending' as const } : e)),
+      };
+    }
+    if ((m.kind === 'text' || m.kind === 'thinking') && m.streaming) {
+      changed = true;
+      return { ...m, streaming: false };
+    }
+    return m;
+  });
+  return changed ? out : messages;
 }
 
 const SEED_MAX_CHARS = 12_000;
