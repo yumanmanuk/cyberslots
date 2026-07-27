@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Folder, FolderPlus, X } from 'lucide-react';
 
 import type { WorkspaceInfo } from '@shared/types';
@@ -59,7 +60,8 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
     onClose();
   };
 
-  return (
+  // Portal 到 body — 侧栏外层带 transform（折叠动画），会把 fixed 定位困在侧栏内
+  return createPortal(
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
@@ -137,6 +139,7 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

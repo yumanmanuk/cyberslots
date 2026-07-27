@@ -41,12 +41,12 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
     <>
       {/* 文件预览 — 独立小面板，开在文件树左侧，树保持可见（item 9） */}
       {openFile && (
-        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col bg-bg-panel/30">
+        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg-panel/30">
           <FilePreview path={openFile} root={root} onClose={() => setOpenFile(null)} />
         </aside>
       )}
 
-      <aside className="flex w-[300px] shrink-0 flex-col bg-bg-panel/60">
+      <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-bg-panel/60">
         <div className="flex shrink-0 items-center gap-1 px-2 py-2">
           <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
           <TabButton
@@ -81,9 +81,8 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-ui ${
-        active ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
-      }`}
+      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-ui ${active ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+        }`}
     >
       {icon}
       {label}
@@ -236,13 +235,12 @@ function AgentsList({ agents }: { agents: AgentEntry[] }): JSX.Element {
             )}
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{a.title}</span>
             <span
-              className={`rounded-md px-1.5 py-0.5 text-[10px] ${
-                a.status === 'failed'
+              className={`rounded-md px-1.5 py-0.5 text-[10px] ${a.status === 'failed'
                   ? 'bg-err/10 text-err'
                   : a.status === 'completed'
                     ? 'bg-ok/10 text-ok'
                     : 'bg-accent-soft text-accent'
-              }`}
+                }`}
             >
               {a.status}
             </span>

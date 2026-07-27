@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
-import { Code2, Eye, ExternalLink, Pencil, Save, X } from 'lucide-react';
+import { Code2, Eye, ExternalLink, FolderGit2, FolderOpen, Monitor, Pencil, Save, Terminal, X } from 'lucide-react';
 
 import type { OpenTarget } from '@shared/ipc';
 
@@ -172,12 +172,13 @@ function NumberedSource({ text, ext }: { text: string; ext: string }): JSX.Eleme
   );
 }
 
-const OPEN_TARGETS: Array<{ id: OpenTarget; label: string }> = [
-  { id: 'vscode', label: 'VS Code' },
-  { id: 'explorer', label: '文件管理器' },
-  { id: 'gitbash', label: 'Git Bash' },
-  { id: 'wt', label: 'Windows Terminal' },
-];
+const OPEN_TARGETS = [
+  { id: 'vscode' as const, label: 'VS Code', icon: Code2 },
+  { id: 'explorer' as const, label: '文件管理器', icon: FolderOpen },
+  { id: 'gitbash' as const, label: 'Git Bash', icon: FolderGit2 },
+  { id: 'wt' as const, label: 'Terminal', icon: Monitor },
+  { id: 'terminal' as const, label: 'Powershell', icon: Terminal },
+] satisfies Array<{ id: OpenTarget; label: string; icon: typeof Code2 }>;
 
 function OpenInMenu({ path }: { path: string }): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -197,8 +198,9 @@ function OpenInMenu({ path }: { path: string }): JSX.Element {
                   setOpen(false);
                   void window.cyberslots.openIn(t.id, path);
                 }}
-                className="block w-full px-3 py-1.5 text-left text-ui text-ink hover:bg-bg-hover"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink hover:bg-bg-hover"
               >
+                <t.icon size={16} className="text-ink-softer" />
                 {t.label}
               </button>
             ))}
