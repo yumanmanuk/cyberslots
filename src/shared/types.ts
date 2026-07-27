@@ -10,7 +10,7 @@
 
 // ---------------------------------------------------------------- engines
 
-export type EngineId = 'kimi' | 'codex';
+export type EngineId = 'kimi' | 'codex' | 'opencode';
 
 /** Session permission mode — union of both engines' surfaces (kimi: default/plan/auto/yolo). */
 export type PermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
@@ -312,6 +312,49 @@ export interface CodexCatalogModel {
   defaultEffort?: string;
 }
 
+/** opencode `GET /config/providers` 归一化后的单个模型条目。
+ *  slug = `providerID/modelID`（选择器/会话 modelId 的统一格式）；
+ *  efforts 来自 reasoning variants 键名（如 none/high）。 */
+export interface OpencodeModelEntry {
+  slug: string;
+  providerID: string;
+  /** provider 展示名（选择器分组标题）。 */
+  providerName: string;
+  modelID: string;
+  displayName?: string;
+  contextWindow?: number;
+  inputModalities?: string[];
+  outputModalities?: string[];
+  efforts?: string[];
+  defaultEffort?: string;
+  /** 能力标记（选择器详情面板）。 */
+  toolCall?: boolean;
+  reasoning?: boolean;
+  attachment?: boolean;
+  /** 单价 $/1M tokens（0/0 = 免费模型）。 */
+  costInput?: number;
+  costOutput?: number;
+}
+
+/** opencode catalog 拉取结果（opencodeCatalogGet IPC 返回体）。 */
+export interface OpencodeCatalog {
+  models: OpencodeModelEntry[];
+  /** providerID → 默认 modelID（server 侧声明）。 */
+  defaults: Record<string, string>;
+  error?: string;
+}
+
+/** opencode CLI 只读快照（静态探测，不启动 server）。 */
+export interface OpencodeConfigSnapshot {
+  installed: boolean;
+  version?: string;
+  cliPath?: string;
+  /** 全局 opencode.json（~/.config/opencode）存在性 — 仅展示，永不写入。 */
+  configPath?: string;
+  configExists?: boolean;
+  error?: string;
+}
+
 export interface RouteSupport {
   ok: boolean;
   /** 不可路由时的人话原因（已 i18n 化的中文，renderer 直接展示）。 */
@@ -321,6 +364,7 @@ export interface RouteSupport {
 export interface EngineConfigsSnapshot {
   kimi: KimiConfigSnapshot;
   codex: CodexConfigSnapshot;
+  opencode: OpencodeConfigSnapshot;
   routeSupport: { kimi: RouteSupport; codex: RouteSupport };
 }
 

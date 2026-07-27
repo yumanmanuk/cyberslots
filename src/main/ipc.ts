@@ -11,11 +11,17 @@ import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
+import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
 import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
 
-export function registerIpc(sessions: SessionManager, settings: SettingsStore, cron: CronService): void {
+export function registerIpc(
+  sessions: SessionManager,
+  settings: SettingsStore,
+  cron: CronService,
+  opencodeHost: OpencodeServerHost,
+): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
   ipcMain.handle(IPC.sessionPrompt, (_e, req: SessionPromptRequest) =>
@@ -68,6 +74,9 @@ export function registerIpc(sessions: SessionManager, settings: SettingsStore, c
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => settings.set(patch));
   // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
   ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
+  // opencode 模型目录 — 主进程代理 /config/providers（renderer 不直连
+  // serve 端口，server 密码不出主进程）；按需启动 server。
+  ipcMain.handle(IPC.opencodeCatalogGet, (_e, force?: boolean) => opencodeHost.getCatalog(force));
 
   ipcMain.handle(IPC.themeSync, (e, appearance: WindowAppearance) => {
     const win = BrowserWindow.fromWebContents(e.sender);

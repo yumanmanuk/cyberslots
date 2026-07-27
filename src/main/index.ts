@@ -11,6 +11,8 @@ import { SettingsStore } from './config/settings';
 import { SessionManager } from './engine/SessionManager';
 import { CronService } from './cron/CronService';
 import { AiServerHost } from './proxy/AiServerHost';
+import { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
+import { OpencodeEventHub } from './engine/opencode/OpencodeEventHub';
 import { registerIpc } from './ipc';
 import { sweepOrphanEngines } from './orphanSweep';
 import { TITLEBAR_HEIGHT, applyWindowTheme, chromeFor, resolveMode } from './windowTheme';
@@ -42,6 +44,7 @@ let mainWindow: BrowserWindow | undefined;
 let sessions: SessionManager | undefined;
 let cron: CronService | undefined;
 let proxy: AiServerHost | undefined;
+let opencodeHost: OpencodeServerHost | undefined;
 
 function createWindow(appSettings: AppSettings): void {
   const appearance: WindowAppearance = { palette: appSettings.themePalette, mode: resolveMode(appSettings.themeMode) };
@@ -154,9 +157,11 @@ function startApp(): void {
   void app.whenReady().then(() => {
     const settings = new SettingsStore();
     proxy = new AiServerHost();
-    sessions = new SessionManager(settings, proxy);
+    opencodeHost = new OpencodeServerHost();
+    const opencodeHub = new OpencodeEventHub(opencodeHost);
+    sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub);
     cron = new CronService(sessions, settings);
-    registerIpc(sessions, settings, cron);
+    registerIpc(sessions, settings, cron, opencodeHost);
     cron.start();
     createWindow(settings.get());
 
@@ -177,6 +182,7 @@ function startApp(): void {
   app.on('before-quit', (event) => {
     cron?.stop();
     proxy?.stop();
+    opencodeHost?.stop();
     if (cleanedUp || !sessions) return;
     cleanedUp = true;
     if (isDev) {

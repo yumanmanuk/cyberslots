@@ -17,6 +17,9 @@ import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
 import { CodexAdapter } from './codex/CodexAdapter';
+import { OpencodeAdapter } from './opencode/OpencodeAdapter';
+import type { OpencodeServerHost } from './opencode/OpencodeServerHost';
+import type { OpencodeEventHub } from './opencode/OpencodeEventHub';
 import {
   buildKimiRouteMirror,
   codexRouteOverrideArgs,
@@ -42,6 +45,8 @@ export class SessionManager {
   constructor(
     private readonly settings: SettingsStore,
     private readonly proxy: AiServerHost,
+    private readonly opencodeHost: OpencodeServerHost,
+    private readonly opencodeHub: OpencodeEventHub,
   ) {
     this.loadPersistedMetas();
   }
@@ -439,6 +444,22 @@ export class SessionManager {
           modelProvider: settings.routing.codex ? 'cyberslots' : undefined,
           availableModels,
         },
+        (event) => this.onEngineEvent(meta.id, event),
+      );
+    }
+    if (meta.engine === 'opencode') {
+      // 共享单例 serve（按 x-opencode-directory 头路由多目录）；
+      // 模型/凭据完全委托 opencode 自身配置，无协议路由。
+      return new OpencodeAdapter(
+        {
+          cwd: meta.cwd,
+          modelId: meta.modelId,
+          permissionMode: meta.permissionMode,
+          resumeSessionId,
+          quietResumeFallback,
+        },
+        this.opencodeHost,
+        this.opencodeHub,
         (event) => this.onEngineEvent(meta.id, event),
       );
     }

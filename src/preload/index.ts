@@ -37,6 +37,7 @@ const api: CyberSlotsApi = {
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
   engineConfigsGet: () => ipcRenderer.invoke(IPC.engineConfigsGet),
+  opencodeCatalogGet: (force) => ipcRenderer.invoke(IPC.opencodeCatalogGet, force),
   themeSync: (appearance) => ipcRenderer.invoke(IPC.themeSync, appearance),
   cronList: () => ipcRenderer.invoke(IPC.cronList),
   cronSave: (task) => ipcRenderer.invoke(IPC.cronSave, task),

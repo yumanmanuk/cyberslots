@@ -11,6 +11,7 @@ import type {
   EngineEventEnvelope,
   EngineId,
   GoalControlAction,
+  OpencodeCatalog,
   PermissionMode,
   SessionMeta,
   UnifiedMessage,
@@ -45,6 +46,7 @@ export const IPC = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   engineConfigsGet: 'engine-configs:get',
+  opencodeCatalogGet: 'opencode:catalog-get',
   themeSync: 'window:theme-sync',
   cronList: 'cron:list',
   cronSave: 'cron:save',
@@ -141,6 +143,8 @@ export interface CyberSlotsApi {
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
   /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。 */
   engineConfigsGet(): Promise<EngineConfigsSnapshot>;
+  /** opencode 模型目录（主进程代理 /config/providers，按需启动 server）。 */
+  opencodeCatalogGet(force?: boolean): Promise<OpencodeCatalog>;
   /** Push the resolved appearance to main so the native title bar matches. */
   themeSync(appearance: WindowAppearance): Promise<void>;
   cronList(): Promise<CronTask[]>;
