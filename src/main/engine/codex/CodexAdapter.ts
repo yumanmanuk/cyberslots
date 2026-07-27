@@ -374,6 +374,13 @@ export class CodexAdapter implements EngineAdapter {
   private onNotification(method: string, params: Json): void {
     const turnId = this.turnId;
     switch (method) {
+      case 'turn/started': {
+        // 捕获真实回合 id：turn/start 的响应可能迟于流式事件到达，
+        // 只靠响应会让 activeCodexTurnId 短暂为空 → cancel/steer 变哑弹。
+        const startedTurn = params.turn as Json | undefined;
+        if (startedTurn?.id) this.activeCodexTurnId = String(startedTurn.id);
+        return;
+      }
       case 'item/agentMessage/delta':
         this.emit({ type: 'text.delta', turnId, text: String(params.delta ?? '') });
         return;
