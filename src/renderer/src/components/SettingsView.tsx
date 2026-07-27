@@ -111,15 +111,26 @@ function GeneralPane({ draft, setDraft }: PaneProps): JSX.Element {
           onChange={(language) => setDraft({ ...draft, language: language as AppSettings['language'] })}
         />
       </Section>
-      <Section title={t('appearance')}>
+      <Section title={t('themeMode')}>
         <Segmented
-          value={draft.theme}
+          value={draft.themeMode}
           options={[
-            { id: 'notion', label: t('themeNotion') },
-            { id: 'light', label: t('themeLight') },
-            { id: 'dark', label: t('themeDark') },
+            { id: 'light', label: t('modeLight') },
+            { id: 'dark', label: t('modeDark') },
+            { id: 'system', label: t('modeSystem') },
           ]}
-          onChange={(theme) => setDraft({ ...draft, theme: theme as AppSettings['theme'] })}
+          onChange={(themeMode) => setDraft({ ...draft, themeMode: themeMode as AppSettings['themeMode'] })}
+        />
+      </Section>
+      <Section title={t('themePalette')}>
+        <Segmented
+          value={draft.themePalette}
+          options={[
+            { id: 'notion', label: t('paletteNotion') },
+            { id: 'solarized', label: t('paletteSolarized') },
+            { id: 'everforest', label: t('paletteEverforest') },
+          ]}
+          onChange={(themePalette) => setDraft({ ...draft, themePalette: themePalette as AppSettings['themePalette'] })}
         />
       </Section>
       <Section title={t('sendKey')}>

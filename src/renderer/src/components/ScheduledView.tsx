@@ -16,7 +16,7 @@ const EMPTY: CronTask = {
   name: '',
   cron: '0 9 * * 1-5',
   prompt: '',
-  engine: 'kimi',
+  engine: 'codex',
   cwd: '',
   enabled: true,
   createdAt: 0,

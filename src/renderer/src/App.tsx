@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { PanelLeftOpen } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 import { useChatStore } from './store/chatStore';
+import type { ResolvedMode, ThemeMode } from '@shared/types';
 import { useT } from './i18n';
 import Sidebar from './components/Sidebar';
 import ChatView from './components/ChatView';
@@ -11,11 +12,25 @@ import SettingsView from './components/SettingsView';
 import ScheduledView from './components/ScheduledView';
 import ArchivedView from './components/ArchivedView';
 
+/** system 模式按 OS 明暗实时解析（监听 prefers-color-scheme 变化）。 */
+function useResolvedMode(mode: ThemeMode): ResolvedMode {
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e: MediaQueryListEvent): void => setSystemDark(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  return mode === 'system' ? (systemDark ? 'dark' : 'light') : mode;
+}
+
 export default function App(): JSX.Element {
   const t = useT();
   const init = useChatStore((s) => s.init);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const theme = useChatStore((s) => s.settings?.theme ?? 'notion');
+  const themeMode = useChatStore((s) => s.settings?.themeMode);
+  const themePalette = useChatStore((s) => s.settings?.themePalette);
+  const mode = useResolvedMode(themeMode ?? 'light');
   const sidebarCollapsed = useChatStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useChatStore((s) => s.toggleSidebar);
   const [peek, setPeek] = useState(false);
@@ -25,7 +40,22 @@ export default function App(): JSX.Element {
     void init();
   }, [init]);
 
-  // 折叠态：悬停展开图标 → 浮出侧栏；移开延迟收起；点击图标 → 常驻展开。
+  // 主题属性挂 <html>（而非根 div）：portal 到 body 的弹层（WorkspaceDialog 等）
+  // 也能继承主题 CSS 变量；未加载完成前走 CSS :root 回退（notion 浅色），不闪烁。
+  useEffect(() => {
+    const el = document.documentElement;
+    el.dataset.palette = themePalette ?? 'notion';
+    el.dataset.mode = mode;
+  }, [themePalette, mode]);
+
+  // 已解析外观推送主进程 → 原生标题栏/窗口底色同步（含 OS 明暗切换）；
+  // 设置未加载完成前不推，避免默认值盖掉建窗时从配置文件读到的正确配色。
+  useEffect(() => {
+    if (!themeMode || !themePalette) return;
+    void window.cyberslots.themeSync({ palette: themePalette, mode });
+  }, [themeMode, themePalette, mode]);
+
+  // 折叠态：悬停左缘热区 → 浮出侧栏；移开延迟收起；常驻展开走标题栏固定按钮。
   const peekEnter = (): void => {
     clearTimeout(peekTimer.current);
     setPeek(true);
@@ -36,36 +66,53 @@ export default function App(): JSX.Element {
   };
 
   return (
-    <div data-theme={theme} className="flex h-full flex-col bg-bg-canvas text-ink">
+    <div className="flex h-full flex-col bg-bg-canvas text-ink">
       {/* 40px 拖拽标题条 — 与侧栏同色融合（codex 桌面版风），无分隔线 */}
-      <header className="drag flex h-10 shrink-0 items-center px-4">
+      <header className="drag flex h-10 shrink-0 items-center gap-2 px-3">
+        {/* 展开/折叠按钮固定在标题栏最左 — 两种状态下位置不变，图标交叉旋转淡入淡出 */}
+        <button
+          title={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
+          onClick={toggleSidebar}
+          className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-faint transition-colors hover:bg-bg-hover hover:text-ink"
+        >
+          <PanelLeftClose
+            size={15}
+            className={`absolute transition-all duration-200 ${
+              sidebarCollapsed ? 'rotate-90 scale-50 opacity-0' : 'rotate-0 scale-100 opacity-100'
+            }`}
+          />
+          <PanelLeftOpen
+            size={15}
+            className={`absolute transition-all duration-200 ${
+              sidebarCollapsed ? 'rotate-0 scale-100 opacity-100' : '-rotate-90 scale-50 opacity-0'
+            }`}
+          />
+        </button>
         <span className="text-[12px] font-semibold tracking-wide text-ink-soft">{t('appName')}</span>
       </header>
 
       <div className="relative flex min-h-0 flex-1">
-        {!sidebarCollapsed && <Sidebar />}
+        {/* 侧栏滑入滑出：margin-left 0 ↔ -256px，主内容区平滑跟随。
+            不用 overflow/transform 容器 — 它们会裁剪越界弹层（齿轮菜单子菜单）、
+            劫持 fixed 定位（菜单点击关闭背景、工作区对话框）。 */}
+        <div
+          className={`flex h-full shrink-0 transition-[margin-left] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+            sidebarCollapsed ? '-ml-64' : 'ml-0'
+          }`}
+        >
+          <Sidebar />
+        </div>
 
         {sidebarCollapsed && (
           <>
-            {/* 折叠态：左缘悬浮把手（悬停浮出侧栏，点击常驻展开） */}
-            <div className="absolute left-0 top-3 z-40" onMouseEnter={peekEnter} onMouseLeave={peekLeave}>
-              <button
-                title={t('expandSidebar')}
-                onClick={() => {
-                  setPeek(false);
-                  toggleSidebar();
-                }}
-                className="flex h-8 w-6 items-center justify-center rounded-r-lg bg-bg-canvas text-ink-faint shadow-sm transition hover:text-ink"
-              >
-                <PanelLeftOpen size={14} />
-              </button>
-            </div>
+            {/* 折叠态：左缘隐形热区（悬停浮出侧栏预览；常驻展开用标题栏按钮） */}
+            <div className="absolute bottom-0 left-0 top-0 z-20 w-2" onMouseEnter={peekEnter} onMouseLeave={peekLeave} />
             {/* 悬浮浮出的侧栏（overlay，不挤压内容区） */}
             <div
               onMouseEnter={peekEnter}
               onMouseLeave={peekLeave}
-              className={`absolute bottom-0 left-0 top-0 z-30 shadow-2xl transition-transform duration-200 ease-out ${
-                peek ? 'translate-x-0' : '-translate-x-full'
+              className={`absolute bottom-0 left-0 top-0 z-30 shadow-2xl transition-[margin-left,opacity] duration-300 ease-out ${
+                peek ? 'ml-0 opacity-100' : '-ml-64 opacity-0'
               }`}
             >
               <Sidebar overlay />
