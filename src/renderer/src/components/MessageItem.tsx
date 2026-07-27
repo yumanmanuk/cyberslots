@@ -5,7 +5,7 @@
  * and a per-answer stats footer (上行/缓存/下行/tts/用时).
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -14,15 +14,16 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  ClipboardCopy,
   Copy,
   Download,
   FileText,
+  Lightbulb,
   Loader2,
-  NotebookText,
+  Maximize2,
+  Minimize2,
   Pencil,
-  Play,
   Search,
+  Target,
   TerminalSquare,
   X,
 } from 'lucide-react';
@@ -33,14 +34,23 @@ import { downloadMarkdown, extractPlanTitle } from '../planDoc';
 import { useT } from '../i18n';
 
 export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; sessionId: string }): JSX.Element | null {
+  const t = useT();
   switch (msg.kind) {
     case 'user':
       return (
         <div className="flex justify-end">
-          <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-bg-active px-4 py-2.5 text-body">
-            {msg.text}
-            {msg.attachments && msg.attachments.length > 0 && (
-              <div className="mt-1 text-[12px] text-ink-soft">📎 {msg.attachments.join(', ')}</div>
+          <div className="max-w-[80%]">
+            <div className="whitespace-pre-wrap rounded-2xl bg-bg-active px-4 py-2.5 text-body">
+              {msg.text}
+              {msg.attachments && msg.attachments.length > 0 && (
+                <div className="mt-1 text-[12px] text-ink-soft">📎 {msg.attachments.join(', ')}</div>
+              )}
+            </div>
+            {msg.sentAsGoal && (
+              <div className="mt-1 flex items-center justify-end gap-1 pr-1 text-[11px] text-ink-faint">
+                <Target size={10} />
+                {t('sentAsGoal')}
+              </div>
             )}
           </div>
         </div>
@@ -55,7 +65,7 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
       );
 
     case 'thinking':
-      return <ThinkingBlock text={msg.text} streaming={msg.streaming} />;
+      return <ThinkingBlock text={msg.text} streaming={msg.streaming} createdAt={msg.createdAt} durationMs={msg.durationMs} />;
 
     case 'tool_call':
       return <ToolCallRow msg={msg} />;
@@ -91,13 +101,12 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
 // ------------------------------------------------------------- sub-blocks
 
 /** 回合结束统计行（取代分隔线）：↑上行（缓存比例） · ↓下行 · tts · 用时。
- *  悬停时下方浮出一行复制按钮（复制本回合的回答正文）。 */
+ *  复制按钮是纯图标，在统计行行首常驻显示。 */
 function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'turn_end' }>; sessionId: string }): JSX.Element | null {
   const t = useT();
   const [copied, setCopied] = useState(false);
   const u = msg.usage;
   const parts: string[] = [];
-  const tilde = u?.approx ? '~' : '';
 
   if (u?.inputTokens != null && u.inputTokens > 0) {
     const cachePct =
@@ -108,9 +117,14 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   } else if (u?.contextUsed != null && u.contextUsed > 0) {
     parts.push(`↑ ${fmtK(u.contextUsed)}`);
   }
-  if (u?.outputTokens != null && u.outputTokens > 0) parts.push(`↓ ${tilde}${fmtK(u.outputTokens)}`);
-  if (u?.outputTokens && msg.durationMs && msg.durationMs > 500) {
-    parts.push(`${tilde}${(u.outputTokens / (msg.durationMs / 1000)).toFixed(1)} t/s`);
+  // 估算值（approx，kimi ACP 不推真实 usage）不展示 token 数——只留用时。
+  if (!u?.approx) {
+    if (u?.outputTokens != null && u.outputTokens > 0) parts.push(`↓ ${fmtK(u.outputTokens)}`);
+    // t/s 按纯 API/模型时间算（不含工具执行与审批等待），拿不到才退回回合墙钟。
+    const rateMs = msg.apiDurationMs ?? msg.durationMs;
+    if (u?.outputTokens && rateMs && rateMs > 500) {
+      parts.push(`${(u.outputTokens / (rateMs / 1000)).toFixed(1)} t/s`);
+    }
   }
   if (msg.durationMs) parts.push(fmtDuration(msg.durationMs));
   if (msg.stopReason === 'cancelled') parts.unshift('已停止');
@@ -130,38 +144,36 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   };
 
   return (
-    <div className="group/stats -my-1">
-      <div className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums text-ink-faint">
-        {parts.map((p, i) => (
-          <span key={i} className="flex items-center gap-1.5">
-            {i > 0 && <span className="text-ink-faint/40">·</span>}
-            {p}
-          </span>
-        ))}
-      </div>
-      {/* 悬停浮出的操作行 */}
-      <div className="h-0 overflow-hidden opacity-0 transition-all duration-150 group-hover/stats:h-7 group-hover/stats:opacity-100">
-        <button
-          onClick={copyAnswer}
-          className="mt-1 flex items-center gap-1.5 rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
-        >
-          {copied ? <Check size={11} className="text-ok" /> : <ClipboardCopy size={11} />}
-          {copied ? t('copied') : t('copyAnswer')}
-        </button>
-      </div>
+    <div className="group/stats -my-1 flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-ink-faint">
+      {/* 复制本回合回答 — 行首常驻图标，与统计文字同一中线 */}
+      <button
+        onClick={copyAnswer}
+        title={copied ? t('copied') : t('copyAnswer')}
+        className="flex items-center rounded p-0.5 transition hover:bg-bg-hover hover:text-ink"
+      >
+        {copied ? <Check size={10} className="text-ok" /> : <Copy size={10} />}
+      </button>
+      {parts.map((p, i) => (
+        <span key={i} className="flex items-center gap-1.5">
+          {i > 0 && <span className="text-ink-faint/40">·</span>}
+          {p}
+        </span>
+      ))}
     </div>
   );
 }
 
-/** Plan 模式产出的计划文档 — 主流只渲染缩略卡片，完整内容在右侧 md 预览。 */
+/** Plan 模式产出的计划文档 — codex 桌面版同款交互：卡片内直接渲染 md
+ *  预览（限高+底部渐隐），点击卡片在右侧打开完整预览；预览中卡片收起
+ *  成单行小条，点收缩图标关闭预览恢复卡片。 */
 function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'text' }>; sessionId: string }): JSX.Element {
   const t = useT();
   const setPlanPreview = useChatStore((s) => s.setPlanPreview);
+  const previewing = useChatStore((s) => s.planPreview[sessionId] === msg.id);
   const setMode = useChatStore((s) => s.setMode);
   const [copied, setCopied] = useState(false);
 
   const title = extractPlanTitle(msg.text) ?? t('planCardTitle');
-  const excerpt = msg.text.replace(/^#+\s.*$/m, '').trim().split('\n').filter(Boolean).slice(0, 3).join('\n');
 
   const copy = (): void => {
     void navigator.clipboard.writeText(msg.text).then(() => {
@@ -170,54 +182,95 @@ function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 
     });
   };
 
-  const download = (): void => downloadMarkdown(title, msg.text);
-
   const implement = (): void => {
     void setMode('default');
     setTimeout(() => void useChatStore.getState().sendPromptTo(sessionId, t('planImplementPrompt')), 300);
   };
 
+  const implementRow = !msg.streaming && (
+    <div className="mt-2 flex justify-end">
+      <button
+        onClick={implement}
+        className="rounded-lg bg-bg-active px-3.5 py-1.5 text-ui font-medium text-ink transition hover:bg-bg-hover"
+      >
+        {t('planImplement')}
+      </button>
+    </div>
+  );
+
+  // 预览中 → 收起成单行小条（图二），右侧收缩图标关闭预览。
+  if (previewing && !msg.streaming) {
+    return (
+      <div>
+        <div className="flex items-center gap-2.5 rounded-xl border border-line bg-bg-panel/60 px-3.5 py-2 shadow-sm">
+          <Lightbulb size={14} className="shrink-0 text-ink-faint" />
+          <span className="min-w-0 flex-1 truncate text-ui text-ink-soft">Plan</span>
+          <button
+            title={t('planCollapse')}
+            onClick={() => setPlanPreview(sessionId, undefined)}
+            className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+          >
+            <Minimize2 size={13} />
+          </button>
+        </div>
+        {implementRow}
+      </div>
+    );
+  }
+
   return (
-    <div className="overflow-hidden rounded-xl border border-line bg-bg-panel/60 shadow-sm transition hover:shadow-md">
-      <button onClick={() => setPlanPreview(sessionId, msg.id)} className="block w-full text-left">
-        <div className="flex items-center gap-2 px-3.5 pb-1 pt-2.5">
+    <div>
+      <div
+        onClick={() => !msg.streaming && setPlanPreview(sessionId, msg.id)}
+        className={`overflow-hidden rounded-2xl border border-line bg-bg-panel/60 shadow-sm transition ${msg.streaming ? '' : 'cursor-pointer hover:shadow-md'
+          }`}
+      >
+        {/* 头部：💡 Plan + 右上角操作图标 */}
+        <div className="flex items-center gap-2 px-4 pt-3">
           {msg.streaming ? (
             <Loader2 size={14} className="shrink-0 animate-spin text-accent" />
           ) : (
-            <NotebookText size={14} className="shrink-0 text-accent" />
+            <Lightbulb size={14} className="shrink-0 text-ink-faint" />
           )}
-          <span className="min-w-0 flex-1 truncate text-ui font-medium">
-            {msg.streaming ? t('planCardStreaming') : title}
+          <span className="min-w-0 flex-1 truncate text-ui text-ink-faint">
+            {msg.streaming ? t('planCardStreaming') : 'Plan'}
           </span>
+          {!msg.streaming && (
+            <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+              <button
+                title={t('planDownload')}
+                onClick={() => downloadMarkdown(title, msg.text)}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                <Download size={13} />
+              </button>
+              <button
+                title={copied ? t('copied') : t('planCopy')}
+                onClick={copy}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+              </button>
+              <button
+                title={t('planOpen')}
+                onClick={() => setPlanPreview(sessionId, msg.id)}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                <Maximize2 size={13} />
+              </button>
+            </div>
+          )}
         </div>
-        <div className="line-clamp-3 whitespace-pre-wrap px-3.5 pb-2 text-[11.5px] leading-5 text-ink-faint">{excerpt}</div>
-      </button>
-      {!msg.streaming && (
-        <div className="flex items-center gap-1 border-t border-line px-2 py-1.5">
-          <CardBtn onClick={() => setPlanPreview(sessionId, msg.id)} icon={<FileText size={12} />} label={t('planOpen')} />
-          <CardBtn onClick={copy} icon={copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />} label={copied ? t('copied') : t('planCopy')} />
-          <CardBtn onClick={download} icon={<Download size={12} />} label={t('planDownload')} />
-          <div className="flex-1" />
-          <button
-            onClick={implement}
-            className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1 text-[11.5px] font-medium text-white transition hover:opacity-90"
-          >
-            <Play size={11} /> {t('planImplement')}
-          </button>
+        {/* md 内容预览 — 限高截断 + 底部渐隐 */}
+        <div className="relative max-h-64 overflow-hidden px-4 pb-3 pt-1">
+          <div className={`md-body max-w-none ${msg.streaming ? 'caret' : ''}`}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+          </div>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-bg-panel to-transparent" />
         </div>
-      )}
+      </div>
+      {implementRow}
     </div>
-  );
-}
-
-function CardBtn({ onClick, icon, label }: { onClick: () => void; icon: React.ReactNode; label: string }): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
-    >
-      {icon} {label}
-    </button>
   );
 }
 
@@ -233,8 +286,26 @@ function fmtDuration(ms: number): string {
   return `${m}m ${Math.round(s % 60)}s`;
 }
 
-function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {
+function ThinkingBlock({
+  text,
+  streaming,
+  createdAt,
+  durationMs,
+}: {
+  text: string;
+  streaming: boolean;
+  createdAt: number;
+  durationMs?: number;
+}): JSX.Element {
   const [open, setOpen] = useState(false);
+  // 流式中每秒走表；结束后用 store 定格的 durationMs（历史消息可能没有）。
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!streaming) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [streaming]);
+  const elapsed = streaming ? nowTick - createdAt : durationMs;
   return (
     <div className="rounded-lg border border-line bg-bg-panel/60">
       <button
@@ -243,6 +314,9 @@ function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }
       >
         {streaming ? <Loader2 size={13} className="animate-spin text-accent" /> : <Brain size={13} />}
         <span className="font-medium">{streaming ? '思考中…' : '思考过程'}</span>
+        {elapsed != null && elapsed >= 1000 && (
+          <span className="font-mono text-[11px] tabular-nums text-ink-faint">{fmtDuration(elapsed)}</span>
+        )}
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
       </button>
       {open && (
@@ -303,15 +377,15 @@ function ToolCallRow({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call'
         onClick={() => hasDetail && setOpen(!open)}
         className={`flex w-full items-center gap-2 px-3 py-1.5 text-ui text-ink-soft ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'}`}
       >
+        {msg.status === 'in_progress' || msg.status === 'pending' ? (
+          <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+        ) : msg.status === 'failed' ? (
+          <X size={12} className="shrink-0 text-err" />
+        ) : (
+          <Check size={12} className="shrink-0 text-ok" />
+        )}
         <Icon size={13} className="shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left font-mono text-[12px]">{msg.title}</span>
-        {msg.status === 'in_progress' || msg.status === 'pending' ? (
-          <Loader2 size={12} className="animate-spin text-accent" />
-        ) : msg.status === 'failed' ? (
-          <X size={12} className="text-err" />
-        ) : (
-          <Check size={12} className="text-ok" />
-        )}
         {hasDetail && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
       </button>
       {open && hasDetail && (
