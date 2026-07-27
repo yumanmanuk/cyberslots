@@ -115,10 +115,15 @@ export class OpencodeAdapter implements EngineAdapter {
     this.sessionID = sid;
     this.subscribe();
 
-    // 未显式选模型：首选 zen 免费模型（免登录开箱即用），退而 catalog 首项。
-    if (!this.modelId || (this.catalog.models.length && !this.entryOf(this.modelId))) {
+    // 模型合法性兑底：合法 slug 必含 '/'（providerID/modelID）——跨引擎
+    // fork 继承的旧引擎别名（如 'minimax-m3'）无 '/' 直接视为无效，
+    // 否则 prompt 不带 model，server 会静默用自己的默认模型；
+    // catalog 可用时未命中条目也重置。重置首选 zen 免费模型（免登录）。
+    const modelValid =
+      this.modelId.includes('/') && (!this.catalog.models.length || !!this.entryOf(this.modelId));
+    if (!modelValid) {
       const free = this.catalog.models.find((m) => m.providerID === 'opencode' && (m.costInput ?? 1) === 0);
-      this.modelId = (free ?? this.catalog.models[0])?.slug ?? this.modelId;
+      this.modelId = (free ?? this.catalog.models[0])?.slug ?? '';
     }
     this.emitModels();
     this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
