@@ -34,10 +34,10 @@ import type {
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { ThinkSplitter } from '../thinkSplitter';
+import { killEngineTree } from '../killTree';
 import { kimiSpawnEnv, resolveKimiCli } from './resolveKimi';
 
 const INIT_TIMEOUT_MS = 30_000;
-const KILL_GRACE_MS = 3_000;
 
 /** AskUserQuestion bridge namespace (acp-adapter/src/question.ts). */
 const QUESTION_OPTION_RE = /^q\d+_(opt_\d+|skip)$/;
@@ -51,6 +51,8 @@ export interface KimiAdapterOptions {
   permissionMode?: PermissionMode;
   /** Resume an existing engine session instead of creating a new one. */
   resumeSessionId?: string;
+  /** 会话没有客户端历史时恢复失败静默降级（空会话无上下文可丢）。 */
+  quietResumeFallback?: boolean;
   /** Optional explicit path to kimi dist/main.mjs (settings override). */
   cliEntry?: string;
 }
@@ -90,6 +92,7 @@ export class KimiAdapter implements EngineAdapter {
       shell: spec.shell ?? false,
       env: kimiSpawnEnv(this.opts.kimiHome),
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true, // 防止 Windows 下闪出 cmd 控制台窗口
     });
     this.child = child;
 
@@ -157,11 +160,14 @@ export class KimiAdapter implements EngineAdapter {
         );
         return { sessionId: this.opts.resumeSessionId, configOptions: (res as { configOptions?: unknown }).configOptions };
       } catch (err) {
-        this.emit({
-          type: 'error',
-          source: 'engine',
-          message: `会话恢复失败，已新建会话继续（历史上下文不在引擎侧）: ${errorMessage(err)}`,
-        });
+        // 空会话不弹红色报错 — 无上下文可丢，降级对用户无感。
+        if (!this.opts.quietResumeFallback) {
+          this.emit({
+            type: 'error',
+            source: 'engine',
+            message: `会话恢复失败，已新建会话继续（历史上下文不在引擎侧）: ${errorMessage(err)}`,
+          });
+        }
       }
     }
     const sess = await withTimeout(
@@ -178,14 +184,8 @@ export class KimiAdapter implements EngineAdapter {
       pending.resolve({ outcome: { outcome: 'cancelled' } });
       this.pendingPermissions.delete(id);
     }
-    const child = this.child;
-    if (child && child.exitCode === null && !child.killed) {
-      child.kill();
-      const killer = setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGKILL');
-      }, KILL_GRACE_MS);
-      killer.unref();
-    }
+    // 树杀：孙进程继承了 SingletonLock 句柄，残留会堵死下次启动。
+    if (this.child) killEngineTree(this.child);
     this.child = undefined;
     this.client = undefined;
   }
@@ -425,6 +425,16 @@ export class KimiAdapter implements EngineAdapter {
         : [];
       if (id === 'model') {
         this.emit({ type: 'models.update', current, available: values });
+        // 登录失效/会员权益不可用时 CLI 返回空模型列表，且 prompt 会静默
+        // end_turn（实测 0.29.1，scripts/probe-debug.mjs）— 提前把可诊断错误抛给 UI。
+        if (!current && values.length === 0) {
+          this.emit({
+            type: 'error',
+            source: 'provider',
+            message:
+              'Kimi CLI 没有可用模型（config.toml 无 provider/模型）。请在终端运行 `kimi login` 重新登录（需会员权益有效），或在 ~/.kimi-code/config.toml 手动配置 provider 与 default_model，然后重开会话。',
+          });
+        }
       } else if (id === 'mode') {
         this.emit({
           type: 'modes.update',

@@ -22,11 +22,11 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { killEngineTree } from '../killTree';
 import { NdjsonRpc } from './rpc';
 import { codexSpawnEnv, resolveCodexCli } from './resolveCodex';
 
 const INIT_TIMEOUT_MS = 30_000;
-const KILL_GRACE_MS = 3_000;
 
 type Json = Record<string, unknown>;
 
@@ -36,6 +36,8 @@ export interface CodexAdapterOptions {
   permissionMode?: PermissionMode;
   /** Resume an existing thread instead of starting a new one. */
   resumeThreadId?: string;
+  /** 会话没有客户端历史时恢复失败静默降级（空会话的 rollout 常不存在，报错纯噪音）。 */
+  quietResumeFallback?: boolean;
   /** Optional explicit path to codex bin/codex.js (settings override). */
   cliEntry?: string;
   /** 路由开启时的 `-c key=value` 命令行覆盖（零文件写入）。 */
@@ -70,10 +72,18 @@ export class CodexAdapter implements EngineAdapter {
   private turnDone: (() => void) | undefined;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly stderrTail: string[] = [];
-  /** Latest per-turn token breakdown (thread/tokenUsage `last`) — attached
-   *  to turn.ended so the UI can render 上行/缓存/下行 stats per answer. */
+  /** 最近一次补全的 token 明细（thread/tokenUsage `last`）— 仅用于
+   *  contextUsed/contextMax；回合统计按 `total` 差值累计（见下）。 */
   private lastTurnUsage: UsageInfo | undefined;
+  /** thread 级累计 token（`total` 最新快照，跨回合单调递增）。 */
+  private latestTotalUsage: UsageBreakdown | undefined;
+  /** 本回合开始时的 `total` 基线 — 与结束时的差值 = 整回合全部 API 调用之和。 */
+  private turnUsageBaseline: UsageBreakdown | undefined;
   private turnStartedAt = 0;
+  /** 回合内"非 API"区间（工具执行 / 等待审批）的并集累计 ms — t/s 只按 API 时间算。 */
+  private turnBusyMs = 0;
+  private busySince = 0;
+  private readonly busyKeys = new Set<string>();
   /** Last goal snapshot — lets us synthesize the completion announcement
    *  if the engine clears the goal without pushing a `complete` update. */
   private lastGoal: GoalInfo | null = null;
@@ -97,8 +107,9 @@ export class CodexAdapter implements EngineAdapter {
     const child = spawn(spec.command, spec.args, {
       cwd: this.opts.cwd,
       shell: spec.shell ?? false,
-      env: codexSpawnEnv(),
+      env: codexSpawnEnv(spec.managedRoot),
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true, // 防止 Windows 下闪出 cmd 控制台窗口
     });
     this.child = child;
 
@@ -171,11 +182,14 @@ export class CodexAdapter implements EngineAdapter {
       return id;
     } catch (err) {
       if (method === 'thread/resume') {
-        this.emit({
-          type: 'error',
-          source: 'engine',
-          message: `线程恢复失败，已新建线程继续: ${errorMessage(err)}`,
-        });
+        // 空会话不弹红色报错 — 无上下文可丢，降级对用户无感。
+        if (!this.opts.quietResumeFallback) {
+          this.emit({
+            type: 'error',
+            source: 'engine',
+            message: `线程恢复失败，已新建线程继续: ${errorMessage(err)}`,
+          });
+        }
         const { threadId: _drop, ...rest } = params;
         return this.openThread('thread/start', rest);
       }
@@ -190,14 +204,8 @@ export class CodexAdapter implements EngineAdapter {
       this.pendingApprovals.delete(id);
     }
     this.rpc?.close('disposed');
-    const child = this.child;
-    if (child && child.exitCode === null && !child.killed) {
-      child.kill();
-      const killer = setTimeout(() => {
-        if (child.exitCode === null) child.kill('SIGKILL');
-      }, KILL_GRACE_MS);
-      killer.unref();
-    }
+    // 树杀：孙进程继承了 SingletonLock 句柄，残留会堵死下次启动。
+    if (this.child) killEngineTree(this.child);
     this.child = undefined;
     this.rpc = undefined;
   }
@@ -208,6 +216,9 @@ export class CodexAdapter implements EngineAdapter {
     const rpc = this.requireRpc();
     const turnId = ++this.turnId;
     this.lastTurnUsage = undefined;
+    this.turnUsageBaseline = this.latestTotalUsage;
+    this.turnBusyMs = 0;
+    this.busyKeys.clear();
     this.turnStartedAt = Date.now();
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
@@ -371,9 +382,12 @@ export class CodexAdapter implements EngineAdapter {
         this.emit({ type: 'thinking.delta', turnId, text: String(params.delta ?? '') });
         return;
       case 'item/started':
-      case 'item/completed':
-        this.onItem(params.item as Json | undefined, turnId);
+      case 'item/completed': {
+        const item = params.item as Json | undefined;
+        this.trackBusy(item, method === 'item/started');
+        this.onItem(item, turnId);
         return;
+      }
       case 'turn/plan/updated': {
         const raw = Array.isArray(params.plan) ? (params.plan as Json[]) : [];
         const entries: PlanEntry[] = raw.map((p) => ({
@@ -401,6 +415,16 @@ export class CodexAdapter implements EngineAdapter {
             contextMax: size || undefined,
           };
         }
+        const totalNow = toBreakdown(total);
+        if (totalNow) {
+          // 恢复线程后的首个回合没有基线：`total` 含历史累计，
+          // 用 total − last 反推本回合开始前的累计值作基线。
+          if (this.turnDone && this.turnUsageBaseline === undefined) {
+            const lastBd = toBreakdown(last);
+            this.turnUsageBaseline = lastBd ? diffBreakdown(totalNow, lastBd) : totalNow;
+          }
+          this.latestTotalUsage = totalNow;
+        }
         this.emit({ type: 'usage.update', used, size });
         return;
       }
@@ -426,29 +450,37 @@ export class CodexAdapter implements EngineAdapter {
         return;
       }
       case 'turn/completed': {
+        // 引擎自发回合（compact/review 等，非 prompt 发起）不产出统计行，
+        // 否则压缩等开销会被算进上一回合，还会误触未读/「任务完成」通知。
+        if (!this.turnDone) return;
         const turn = params.turn as Json | undefined;
         const status = String(turn?.status ?? 'completed');
         const err = turn?.error as Json | undefined;
         if (status === 'failed' && err) {
           this.emit({ type: 'error', turnId, source: 'provider', message: String(err.message ?? 'turn failed') });
         }
-        // Prefer the turn's own usage payload; fall back to the streamed
-        // per-turn tokenUsage snapshot captured above.
-        const turnUsage = turn?.usage as Json | undefined;
-        const usage: UsageInfo | undefined = turnUsage
-          ? {
-              ...this.lastTurnUsage,
-              inputTokens: Number(turnUsage.inputTokens ?? 0),
-              cachedInputTokens: Number(turnUsage.cachedInputTokens ?? 0),
-              outputTokens: Number(turnUsage.outputTokens ?? 0),
-            }
+        // 协议的 Turn 不携带 usage（0.145.0）——一轮问答通常有多次 API
+        // 调用（工具循环），按 thread 级 `total` 在回合前后的差值累计；
+        // `last` 只是最后一次调用，仅保留其 contextUsed/contextMax。
+        const summed =
+          this.latestTotalUsage && this.turnUsageBaseline
+            ? diffBreakdown(this.latestTotalUsage, this.turnUsageBaseline)
+            : undefined;
+        const usage: UsageInfo | undefined = summed
+          ? { ...this.lastTurnUsage, ...summed }
           : this.lastTurnUsage;
+        // 纯 API/模型耗时 = 本地墙钟 − 非 API 区间并集（须同钟相减，
+        // 故不用引擎的 turn.durationMs）。
+        this.busyFlush();
+        const wallMs = this.turnStartedAt ? Date.now() - this.turnStartedAt : 0;
+        const apiDurationMs = wallMs > 0 ? Math.max(0, wallMs - this.turnBusyMs) : undefined;
         this.emit({
           type: 'turn.ended',
           turnId,
           stopReason: status === 'completed' ? 'end_turn' : status,
           usage,
-          durationMs: this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined,
+          durationMs: this.turnDurationMs(turn),
+          apiDurationMs,
         });
         this.turnDone?.();
         return;
@@ -545,9 +577,14 @@ export class CodexAdapter implements EngineAdapter {
         { optionId: 'acceptForSession', name: '本会话总是允许', kind: 'allow_always' },
         { optionId: 'decline', name: '拒绝', kind: 'reject_once' },
       ];
+      const busyKey = `approval:${requestId}`;
+      this.busyAdd(busyKey);
       return new Promise((resolve) => {
         this.pendingApprovals.set(requestId, {
-          resolve: (decision) => resolve({ decision }),
+          resolve: (decision) => {
+            this.busyRemove(busyKey);
+            resolve({ decision });
+          },
         });
         this.emit({
           type: 'permission.request',
@@ -566,6 +603,51 @@ export class CodexAdapter implements EngineAdapter {
 
   // -------------------------------------------------------------- helpers
 
+  /** 工具执行区间计入"非 API"时间。重叠（并行工具 / 审批先于执行）
+   *  由 busyAdd/busyRemove 的计数并集天然去重。 */
+  private trackBusy(item: Json | undefined, started: boolean): void {
+    if (!item) return;
+    switch (item.type) {
+      case 'commandExecution':
+      case 'fileChange':
+      case 'mcpToolCall':
+      case 'collabToolCall':
+      case 'collabAgentToolCall': {
+        const key = `tool:${String(item.id ?? '')}`;
+        if (started) this.busyAdd(key);
+        else this.busyRemove(key);
+        return;
+      }
+      default:
+        return; // webSearch 在 API 调用内发生；reasoning/agentMessage 是模型时间
+    }
+  }
+
+  private busyAdd(key: string): void {
+    if (!this.turnDone) return; // 只统计 prompt 回合
+    if (this.busyKeys.size === 0) this.busySince = Date.now();
+    this.busyKeys.add(key);
+  }
+
+  private busyRemove(key: string): void {
+    if (!this.busyKeys.delete(key)) return;
+    if (this.busyKeys.size === 0) this.turnBusyMs += Date.now() - this.busySince;
+  }
+
+  /** 回合结束（含取消）时收尾未闭合的区间。 */
+  private busyFlush(): void {
+    if (this.busyKeys.size === 0) return;
+    this.turnBusyMs += Date.now() - this.busySince;
+    this.busyKeys.clear();
+  }
+
+  /** 优先用引擎实测的 turn.durationMs（不含 IPC 间隙），缺失时退回本地计时。 */
+  private turnDurationMs(turn: Json | undefined): number | undefined {
+    const engineMs = Number(turn?.durationMs ?? 0);
+    if (engineMs > 0) return engineMs;
+    return this.turnStartedAt ? Date.now() - this.turnStartedAt : undefined;
+  }
+
   private emitModels(): void {
     this.emit({
       type: 'models.update',
@@ -581,6 +663,30 @@ export class CodexAdapter implements EngineAdapter {
 }
 
 // ------------------------------------------------------------------ utils
+
+interface UsageBreakdown {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+}
+
+function toBreakdown(raw: Json | undefined): UsageBreakdown | undefined {
+  if (!raw) return undefined;
+  return {
+    inputTokens: Number(raw.inputTokens ?? 0),
+    cachedInputTokens: Number(raw.cachedInputTokens ?? 0),
+    outputTokens: Number(raw.outputTokens ?? 0),
+  };
+}
+
+/** a − b（逐字段，下限 0）—— 容错乱序/重放导致的短暂回退。 */
+function diffBreakdown(a: UsageBreakdown, b: UsageBreakdown): UsageBreakdown {
+  return {
+    inputTokens: Math.max(0, a.inputTokens - b.inputTokens),
+    cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
+    outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
+  };
+}
 
 function mapItemStatus(s: string): ToolCallStatus {
   switch (s) {
