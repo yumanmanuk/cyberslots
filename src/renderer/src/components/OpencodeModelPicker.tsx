@@ -161,7 +161,28 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute bottom-9 right-0 z-20 flex w-80 flex-col overflow-hidden rounded-xl border border-line bg-bg-input shadow-lg">
+          {/* 定位容器无 overflow — 详情卡从弹层右侧浮出（openchamber 同款），
+              列表主体保持 right-0 锚定不因详情出现/消失而跳动。 */}
+          <div className="absolute bottom-9 right-0 z-20">
+            {detail && (
+              <div className="absolute bottom-0 left-full ml-2 w-60 rounded-xl border border-line bg-bg-input p-3 shadow-lg">
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate text-ui font-semibold text-ink">{detail.displayName ?? detail.modelID}</span>
+                  {(detail.costInput ?? 1) === 0 && (detail.costOutput ?? 1) === 0 && (
+                    <span className="shrink-0 rounded bg-ok/15 px-1 py-px text-[9px] font-medium text-ok">免费</span>
+                  )}
+                </div>
+                <div className="mb-2 truncate font-mono text-[10px] text-ink-faint">{detail.slug}</div>
+                <div className="space-y-1 text-[10.5px] leading-4 text-ink-soft">
+                  <DetailRow k="能力" v={[detail.toolCall && 'Tool calling', detail.reasoning && 'Reasoning', detail.attachment && '附件'].filter(Boolean).join(' · ') || '—'} />
+                  <DetailRow k="输入/输出" v={`${(detail.inputModalities ?? ['text']).join(',')} → ${(detail.outputModalities ?? ['text']).join(',')}`} />
+                  <DetailRow k="价格 $/1M" v={detail.costInput === 0 && detail.costOutput === 0 ? '免费' : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
+                  {detail.contextWindow ? <DetailRow k="上下文" v={fmtCtx(detail.contextWindow)} /> : null}
+                  {detail.efforts?.length ? <DetailRow k="思考档位" v={detail.efforts.join(' / ')} /> : null}
+                </div>
+              </div>
+            )}
+            <div className="flex w-80 flex-col overflow-hidden rounded-xl border border-line bg-bg-input shadow-lg">
             {/* 搜索框 */}
             <div className="flex items-center gap-2 border-b border-line px-3 py-2">
               <Search size={12} className="shrink-0 text-ink-faint" />
@@ -210,18 +231,10 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                 <div className="px-3 py-2 text-[11px] text-ink-faint">无匹配模型</div>
               )}
             </div>
-            {/* 详情条（hover/当前模型的能力、模态、价格、上下文） */}
-            {detail && (
-              <div className="space-y-0.5 border-t border-line bg-bg-panel/60 px-3 py-2 text-[10.5px] leading-4 text-ink-soft">
-                <DetailRow k="能力" v={[detail.toolCall && 'Tool calling', detail.reasoning && 'Reasoning', detail.attachment && '附件'].filter(Boolean).join(' · ') || '—'} />
-                <DetailRow k="输入/输出" v={`${(detail.inputModalities ?? ['text']).join(',')} → ${(detail.outputModalities ?? ['text']).join(',')}`} />
-                <DetailRow k="价格 $/1M" v={detail.costInput === 0 && detail.costOutput === 0 ? '免费' : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
-                {detail.contextWindow ? <DetailRow k="上下文" v={fmtCtx(detail.contextWindow)} /> : null}
-              </div>
-            )}
             {/* provider 引导（不做连接管理 — 委托 opencode 自身） */}
             <div className="border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
               连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
+            </div>
             </div>
           </div>
         </>
