@@ -56,6 +56,8 @@ interface Attachment {
   path: string;
   name: string;
   isImage: boolean;
+  /** 图片预览 object URL（拖拽/粘贴时由 File 生成；发送/移除时 revoke）。 */
+  preview?: string;
 }
 
 /** Escape 关闭裸弹层（非 Dropdown 封装的 popover 用）。 */
@@ -77,6 +79,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const [expanded, setExpanded] = useState(false);
   const [ctxFullOpen, setCtxFullOpen] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
+  // 点击缩略图放大预览的灯箱（图片 object URL；null = 关闭）。
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // 控件条响应式收缩（codex 风）：右侧面板挤压到窄宽时，按优先级依次退避
   // —— level 越大越窄。引擎图标 / 放大输入框 / 发送按钮永不退避。
@@ -127,6 +131,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     }
     const paths = attachments.length ? attachments.map((a) => a.path) : undefined;
     setText('');
+    for (const a of attachments) if (a.preview) URL.revokeObjectURL(a.preview);
     setAttachments([]);
     if (busy) {
       // 忙碌时入队，回合结束后自动依次发送
@@ -194,13 +199,14 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     for (const file of Array.from(e.dataTransfer.files)) {
       const path = window.cyberslots.getPathForFile(file);
       if (!path || attachments.some((a) => a.path === path)) continue;
-      next.push({ path, name: file.name, isImage: IMAGE_RE.test(path) });
+      const isImage = IMAGE_RE.test(path);
+      next.push({ path, name: file.name, isImage, preview: isImage ? URL.createObjectURL(file) : undefined });
     }
     if (next.length) setAttachments((prev) => [...prev, ...next]);
   };
 
   // 粘贴图片（Ctrl+V）：剪贴板里是原始图像数据（无文件路径），写临时
-  // 文件拿到路径再当附件加入；纯文本粘贴不拦截，走 textarea 默认行为。
+  // 文件拿到路径再当附件加入；预览直接用 File 生成 object URL（无需读盘）。
   const onPaste = (e: React.ClipboardEvent): void => {
     const imageItems = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith('image/'));
     if (imageItems.length === 0) return;
@@ -208,34 +214,31 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     for (const item of imageItems) {
       const file = item.getAsFile();
       if (!file) continue;
+      const preview = URL.createObjectURL(file);
       void file.arrayBuffer().then(async (buf) => {
         const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
         const path = await window.cyberslots.attachmentSaveTemp(new Uint8Array(buf), ext);
         setAttachments((prev) =>
           prev.some((a) => a.path === path)
             ? prev
-            : [...prev, { path, name: `粘贴图片.${ext}`, isImage: true }],
+            : [...prev, { path, name: `粘贴图片.${ext}`, isImage: true, preview }],
         );
       });
     }
   };
 
-  const removeAttachment = (path: string): void => setAttachments((prev) => prev.filter((a) => a.path !== path));
+  const removeAttachment = (path: string): void =>
+    setAttachments((prev) => {
+      const hit = prev.find((a) => a.path === path);
+      if (hit?.preview) URL.revokeObjectURL(hit.preview);
+      return prev.filter((a) => a.path !== path);
+    });
 
   const images = attachments.filter((a) => a.isImage);
   const files = attachments.filter((a) => !a.isImage);
 
   return (
     <div className="shrink-0 px-6 pb-5 pt-1">
-      {/* 图片附件 — 输入框顶部 */}
-      {images.length > 0 && (
-        <div className="mx-auto mb-1.5 flex max-w-3xl flex-wrap gap-1.5">
-          {images.map((a) => (
-            <AttachmentChip key={a.path} att={a} onRemove={() => removeAttachment(a.path)} />
-          ))}
-        </div>
-      )}
-
       <div ref={cardRef} className="mx-auto max-w-3xl">
         <TopRails
           sessionId={sessionId}
@@ -256,6 +259,19 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           onDragOver={(e) => e.preventDefault()}
           className="rounded-2xl border border-line bg-bg-input shadow-sm transition focus-within:border-ink-faint"
         >
+          {/* 图片附件 — 输入框内顶部缩略图（点击放大，悬停右上角 × 移除） */}
+          {images.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-3 pb-1 pt-3">
+              {images.map((a) => (
+                <ImageThumb
+                  key={a.path}
+                  att={a}
+                  onOpen={() => a.preview && setLightbox(a.preview)}
+                  onRemove={() => removeAttachment(a.path)}
+                />
+              ))}
+            </div>
+          )}
 
           <textarea
             ref={textareaRef}
@@ -268,7 +284,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             className="no-scrollbar w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
           />
 
-          {/* 文件附件 — 输入框内高亮小块 */}
+          {/* 非图片文件附件 — 中性色小块 */}
           {files.length > 0 && (
             <div className="flex flex-wrap gap-1.5 px-3 pb-1.5">
               {files.map((a) => (
@@ -369,6 +385,56 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           onClose={() => setCtxFullOpen(false)}
         />
       )}
+
+      {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
+    </div>
+  );
+}
+
+// --------------------------------------------------------- attachment thumb
+
+/** 输入框内图片缩略图：点击放大预览，悬停右上角 × 移除。 */
+function ImageThumb({ att, onOpen, onRemove }: { att: Attachment; onOpen: () => void; onRemove: () => void }): JSX.Element {
+  return (
+    <div className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-line bg-bg-panel">
+      <button onClick={onOpen} title={att.name} className="h-full w-full">
+        {att.preview ? (
+          <img src={att.preview} alt={att.name} className="h-full w-full object-cover" />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-ink-faint">
+            <ImageIcon size={18} />
+          </span>
+        )}
+      </button>
+      <button
+        title="移除"
+        onClick={onRemove}
+        className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/60 text-white opacity-0 transition hover:bg-black/80 group-hover:opacity-100"
+      >
+        <X size={10} />
+      </button>
+    </div>
+  );
+}
+
+/** 图片放大预览灯箱：遮罩点击 / Esc / 右上角 × 关闭。 */
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }): JSX.Element {
+  useEscClose(true, onClose);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-8" onClick={onClose}>
+      <button
+        title="关闭"
+        onClick={onClose}
+        className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+      >
+        <X size={18} />
+      </button>
+      <img
+        src={src}
+        alt="预览"
+        onClick={(e) => e.stopPropagation()}
+        className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+      />
     </div>
   );
 }
@@ -531,11 +597,11 @@ function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove: () => vo
   return (
     <span
       title={att.path}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent-soft px-2 py-1 text-[11.5px] font-medium text-accent"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-bg-panel px-2 py-1 text-[11.5px] text-ink-soft"
     >
-      {att.isImage ? <ImageIcon size={12} /> : <FileText size={12} />}
+      <FileText size={12} className="text-ink-faint" />
       <span className="max-w-44 truncate">{att.name}</span>
-      <button onClick={onRemove} className="rounded-md transition hover:opacity-70">
+      <button onClick={onRemove} className="rounded-md text-ink-faint transition hover:text-ink">
         <X size={11} />
       </button>
     </span>
