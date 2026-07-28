@@ -201,6 +201,7 @@ body {
   user-select: none;
   cursor: default;
 }
+
 .oc-file-chip::before {
   content: '</>';
   font-family: Iosevka, 'Cascadia Code', Consolas, monospace;
