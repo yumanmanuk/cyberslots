@@ -1,0 +1,1482 @@
+<!doctype html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>赛马视图 · 概念原型</title>
+  <style>
+    /* ---- 设计变量（对齐 cyberslots 深色霓虹气质，独立自定义） ---- */
+    :root {
+      --bg: #0d0d0f;
+      --bg-panel: #141417;
+      --bg-input: #1a1a1e;
+      --line: #2a2a30;
+      --ink: #e8e8ea;
+      --ink-soft: #9a9aa3;
+      --ink-faint: #61616b;
+      --accent: #5e6ad2;
+      /* 克制靖蓝 / 选手A */
+      --accent-soft: rgba(94, 106, 210, .12);
+      --accent-b: #b3936a;
+      /* 低饱和暖砂 / 选手B */
+      --accent-b-soft: rgba(179, 147, 106, .12);
+      --ok: #7b9e6b;
+      --err: #cf6b6b;
+      --warn: #c9a15f;
+      --glass: rgba(20, 20, 23, .72);
+      --grid: rgba(255, 255, 255, .015);
+      --dur-flow: 1.8s;
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    html,
+    body {
+      height: 100%
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1200px 600px at 70% -10%, rgba(94, 106, 210, .04), transparent 60%),
+        linear-gradient(var(--grid) 1px, transparent 1px) 0 0/22px 22px,
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/22px 22px,
+        var(--bg);
+      color: var(--ink);
+      font: 14px/1.5 -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .mono {
+      font-family: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+      font-variant-numeric: tabular-nums
+    }
+
+    .reduce-motion * {
+      animation: none !important;
+      transition: none !important
+    }
+
+    /* ---------------- 顶栏 ---------------- */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line)
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-weight: 600;
+      letter-spacing: .3px
+    }
+
+    .brand .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: .8;
+      animation: breathe 2.4s ease-in-out infinite
+    }
+
+    .brand small {
+      color: var(--ink-faint);
+      font-weight: 400
+    }
+
+    .spacer {
+      flex: 1
+    }
+
+    .stage-tag {
+      padding: 4px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      font-size: 12px
+    }
+
+    .btn {
+      border: 1px solid var(--line);
+      background: var(--bg-input);
+      color: var(--ink-soft);
+      padding: 6px 13px;
+      border-radius: 9px;
+      cursor: pointer;
+      font-size: 12.5px;
+      transition: .15s
+    }
+
+    .btn:hover {
+      border-color: var(--accent);
+      color: var(--ink)
+    }
+
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+      font-weight: 600
+    }
+
+    .btn.primary:hover {
+      opacity: .92
+    }
+
+    .btn:disabled {
+      opacity: .35;
+      cursor: not-allowed
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--ink-faint);
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none
+    }
+
+    /* ---------------- 赛程电路 HUD ---------------- */
+    .circuit-wrap {
+      padding: 26px 40px 10px;
+      position: relative
+    }
+
+    .circuit {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      position: relative;
+      max-width: 960px;
+      margin: 0 auto
+    }
+
+    .node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 9px;
+      width: 120px;
+      position: relative;
+      z-index: 2
+    }
+
+    .orb {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 2px solid var(--line);
+      background: var(--bg-input);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: var(--ink-faint);
+      position: relative;
+      transition: .35s
+    }
+
+    .node .label {
+      font-size: 12.5px;
+      color: var(--ink-faint);
+      transition: .3s;
+      text-align: center
+    }
+
+    .node .telemetry {
+      font-size: 10px;
+      color: var(--ink-faint);
+      opacity: .7;
+      text-align: center;
+      min-height: 12px
+    }
+
+    /* 已完成 */
+    .node.done .orb {
+      border-color: var(--accent);
+      background: rgba(94, 106, 210, .1);
+      color: var(--accent)
+    }
+
+    .node.done .label {
+      color: var(--ink-soft)
+    }
+
+    /* 进行中：脉冲光环 */
+    .node.active .orb {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(94, 106, 210, .14);
+      animation: pulse-halo 1.6s ease-in-out infinite
+    }
+
+    .node.active .label {
+      color: var(--accent);
+      font-weight: 600
+    }
+
+    /* 连接线 + 能量流 */
+    .link {
+      position: absolute;
+      top: 21px;
+      height: 2px;
+      background: var(--line);
+      z-index: 1;
+      overflow: hidden
+    }
+
+    .link.filled {
+      background: linear-gradient(90deg, var(--accent), rgba(94, 106, 210, .45))
+    }
+
+    .link.flowing::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      background-size: 40% 100%;
+      background-repeat: no-repeat;
+      animation: flow var(--dur-flow) linear infinite
+    }
+
+    /* 修复回环支线（SVG） */
+    .loop-svg {
+      position: absolute;
+      left: 50%;
+      top: 56px;
+      transform: translateX(-50%);
+      pointer-events: none;
+      z-index: 0
+    }
+
+    .loop-path {
+      fill: none;
+      stroke: var(--line);
+      stroke-width: 2;
+      stroke-dasharray: 5 5
+    }
+
+    .loop-path.active {
+      stroke: var(--err);
+      stroke-dasharray: 6 6;
+      animation: loop-flow 1s linear infinite
+    }
+
+    .loop-label {
+      fill: var(--ink-faint);
+      font-size: 11px
+    }
+
+    .loop-label.active {
+      fill: var(--err)
+    }
+
+    /* ---------------- 主舞台 ---------------- */
+    .stage {
+      max-width: 1040px;
+      margin: 8px auto 0;
+      padding: 16px 24px 36px;
+      min-height: 440px
+    }
+
+    /* 配置台 */
+    .config-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      margin-top: 8px
+    }
+
+    .role-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--bg-panel);
+      padding: 15px 15px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+      transition: border-color .15s
+    }
+
+    .role-card:hover {
+      border-color: #3a3a44
+    }
+
+    .rc-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between
+    }
+
+    .role-card h4 {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+      letter-spacing: 0
+    }
+
+    .rc-tag {
+      font-size: 10px;
+      color: var(--ink-faint);
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 6px
+    }
+
+    .select {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--bg-input);
+      padding: 8px 11px;
+      font-size: 12.5px;
+      color: var(--ink-soft);
+      cursor: pointer;
+      transition: .15s
+    }
+
+    .select:hover {
+      border-color: #3a3a44;
+      color: var(--ink)
+    }
+
+    .select .nm {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap
+    }
+
+    .select .chev {
+      margin-left: auto;
+      color: var(--ink-faint);
+      font-size: 10px
+    }
+
+    .effort-block {
+      margin-top: auto
+    }
+
+    .effort-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--ink-faint);
+      margin-bottom: 9px
+    }
+
+    .effort-head .val {
+      color: var(--ink);
+      font-weight: 500;
+      text-transform: capitalize
+    }
+
+    .slider {
+      height: 9px;
+      border-radius: 999px;
+      background: var(--bg-input);
+      position: relative;
+      margin-top: 2px;
+      box-shadow: inset 0 0 0 1px var(--line)
+    }
+
+    /* 跑过的痕迹：蓝紫→青 渐变轨道，内嵌一条移动高光 */
+    .slider>i {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      border-radius: 999px;
+      width: 66%;
+      overflow: hidden;
+      background: linear-gradient(90deg, #3a3a42, var(--accent));
+      box-shadow: none
+    }
+
+    .slider>i::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .12), transparent);
+      background-size: 45% 100%;
+      background-repeat: no-repeat;
+      animation: flow 1.8s linear infinite
+    }
+
+    /* 滑块：简洁旋钮 */
+    .slider>b {
+      position: absolute;
+      top: 50%;
+      left: 66%;
+      transform: translate(-50%, -50%);
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background: #d9e2ff;
+      border: 2px solid var(--accent);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, .45)
+    }
+
+    .config-hint {
+      text-align: center;
+      color: var(--ink-faint);
+      margin-top: 24px;
+      font-size: 13px
+    }
+
+    /* 双泳道 */
+    .lanes {
+      display: grid;
+      grid-template-columns: 1fr 2px 1fr;
+      gap: 0;
+      margin-top: 6px
+    }
+
+    .divider {
+      background: linear-gradient(180deg, transparent, var(--line), transparent);
+      position: relative
+    }
+
+    .divider.lead-a {
+      background: linear-gradient(180deg, transparent, var(--accent), transparent);
+      opacity: .6
+    }
+
+    .divider.lead-b {
+      background: linear-gradient(180deg, transparent, var(--accent-b), transparent);
+      opacity: .6
+    }
+
+    .lane {
+      padding: 0 18px
+    }
+
+    .lane-head {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 0
+    }
+
+    .lane-head .avatar {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700
+    }
+
+    .lane.a .avatar {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent)
+    }
+
+    .lane.b .avatar {
+      background: var(--accent-b-soft);
+      color: var(--accent-b);
+      border: 1px solid var(--accent-b)
+    }
+
+    .lane-head .name {
+      font-weight: 600;
+      font-size: 13.5px
+    }
+
+    .lane-head .meta {
+      color: var(--ink-faint);
+      font-size: 11px
+    }
+
+    .lane-head .flag {
+      margin-left: auto;
+      font-size: 12px;
+      color: var(--ink-faint);
+      display: flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    .lane-head .flag.finished {
+      color: var(--ink-soft)
+    }
+
+    /* 进度条 */
+    .prog {
+      height: 3px;
+      border-radius: 2px;
+      background: var(--bg-input);
+      overflow: hidden;
+      position: relative
+    }
+
+    .prog>i {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      border-radius: 2px;
+      width: 0;
+      transition: width .4s ease
+    }
+
+    .lane.a .prog>i {
+      background: var(--accent);
+      opacity: .8
+    }
+
+    .lane.b .prog>i {
+      background: var(--accent-b);
+      opacity: .8
+    }
+
+    .lane-body {
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--glass);
+      padding: 14px 15px;
+      min-height: 280px;
+      backdrop-filter: blur(8px);
+      transition: .5s;
+      position: relative;
+      overflow: hidden
+    }
+
+    .lane.finished .lane-body {
+      border-color: var(--line)
+    }
+
+    .lane.losing .lane-body {
+      filter: grayscale(.7) brightness(.6);
+      opacity: .5;
+      transform: translateY(10px) scale(.98)
+    }
+
+    .lane.winning .lane-body {
+      border-color: var(--accent);
+      transform: scale(1.005)
+    }
+
+    .think {
+      font-size: 11.5px;
+      color: var(--ink-faint);
+      border-left: 2px solid var(--line);
+      padding: 2px 0 2px 10px;
+      margin-bottom: 10px;
+      white-space: pre-wrap
+    }
+
+    .think b {
+      color: var(--accent);
+      font-weight: 600
+    }
+
+    .content {
+      font-size: 13px;
+      color: var(--ink-soft);
+      white-space: pre-wrap
+    }
+
+    .content .h {
+      color: var(--ink);
+      font-weight: 600
+    }
+
+    .caret::after {
+      content: "▍";
+      color: var(--accent);
+      animation: blink .9s step-end infinite
+    }
+
+    /* 等待中扫描 shimmer */
+    .waiting {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--ink-faint);
+      font-size: 12.5px;
+      gap: 8px;
+      background:
+        linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, .05) 50%, transparent 70%) var(--bg-panel);
+      background-size: 200% 100%;
+      animation: shimmer 1.6s linear infinite
+    }
+
+    .rebut {
+      margin-top: 12px;
+      border-top: 1px dashed var(--line);
+      padding-top: 10px
+    }
+
+    .rebut .tag {
+      font-size: 11px;
+      color: var(--warn);
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 6px
+    }
+
+    /* 裁判台 */
+    .judge {
+      max-width: 820px;
+      margin: 10px auto 0;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--glass);
+      backdrop-filter: blur(10px);
+      padding: 22px 26px;
+      animation: rise .5s cubic-bezier(.2, .9, .3, 1);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .4)
+    }
+
+    .judge h3 {
+      margin: 0 0 4px;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px
+    }
+
+    .judge .sub {
+      color: var(--ink-faint);
+      font-size: 12px;
+      margin-bottom: 18px
+    }
+
+    /* 裁判台：两方案并排预览 */
+    .plan-previews {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 20px
+    }
+
+    .plan-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--bg-input);
+      padding: 12px 14px;
+      max-height: 240px;
+      overflow: auto
+    }
+
+    .plan-card .pc-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      position: sticky;
+      top: -12px;
+      background: var(--bg-input);
+      padding: 4px 0
+    }
+
+    .plan-card.a .pc-head {
+      color: var(--accent)
+    }
+
+    .plan-card.b .pc-head {
+      color: var(--accent-b)
+    }
+
+    .plan-card .badge {
+      width: 20px;
+      height: 20px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 11px
+    }
+
+    .plan-card.a .badge {
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      color: var(--accent)
+    }
+
+    .plan-card.b .badge {
+      background: var(--accent-b-soft);
+      border: 1px solid var(--accent-b);
+      color: var(--accent-b)
+    }
+
+    .judge-grid {
+      display: grid;
+      grid-template-columns: 1fr 220px;
+      gap: 26px;
+      align-items: center
+    }
+
+    .scores {
+      display: flex;
+      flex-direction: column;
+      gap: 14px
+    }
+
+    .score-row {
+      display: grid;
+      grid-template-columns: 74px 1fr 1fr;
+      gap: 10px;
+      align-items: center;
+      font-size: 12px
+    }
+
+    .score-row .dim {
+      color: var(--ink-soft)
+    }
+
+    .bar {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--bg-input);
+      position: relative;
+      overflow: hidden
+    }
+
+    .bar>i {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 0;
+      border-radius: 999px;
+      animation: charge .8s cubic-bezier(.2, .8, .2, 1) forwards
+    }
+
+    .bar.a>i {
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent)
+    }
+
+    .bar.b>i {
+      background: var(--accent-b);
+      box-shadow: 0 0 8px var(--accent-b)
+    }
+
+    .radar {
+      display: flex;
+      align-items: center;
+      justify-content: center
+    }
+
+    .verdict {
+      margin-top: 20px;
+      display: flex;
+      gap: 12px;
+      align-items: center
+    }
+
+    .verdict .rec {
+      flex: 1;
+      font-size: 12.5px;
+      color: var(--ink-soft)
+    }
+
+    .verdict .rec b {
+      color: var(--accent)
+    }
+
+    .pick {
+      padding: 9px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--bg-input);
+      cursor: pointer;
+      font-size: 12.5px;
+      font-weight: 600;
+      transition: .15s;
+      display: flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    .pick.a:hover {
+      border-color: var(--accent);
+      color: var(--accent)
+    }
+
+    .pick.b:hover {
+      border-color: var(--accent-b);
+      color: var(--accent-b)
+    }
+
+    /* 裁判：融合最终方案 + 批注修订 */
+    .ver {
+      font-size: 11px;
+      color: var(--ink-faint);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 1px 6px
+    }
+
+    .ref-plans {
+      margin-bottom: 16px
+    }
+
+    .ref-plans summary {
+      cursor: pointer;
+      color: var(--ink-soft);
+      font-size: 12px;
+      padding: 6px 0;
+      list-style: none
+    }
+
+    .ref-plans summary::-webkit-details-marker {
+      display: none
+    }
+
+    .final-plan {
+      border: 1px solid var(--line);
+      border-left: 2px solid var(--accent);
+      border-radius: 12px;
+      background: var(--bg-input);
+      padding: 16px 18px
+    }
+
+    .final-plan .fp-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      margin-bottom: 10px
+    }
+
+    .fusion-basis {
+      margin-top: 14px;
+      border-top: 1px dashed var(--line);
+      padding-top: 12px
+    }
+
+    .fusion-basis .fb-h {
+      font-size: 11px;
+      color: var(--ink-faint);
+      letter-spacing: .5px;
+      margin-bottom: 6px
+    }
+
+    .fusion-basis ul {
+      margin: 0;
+      padding-left: 16px;
+      font-size: 12.5px;
+      color: var(--ink-soft)
+    }
+
+    .fusion-basis li {
+      margin: 4px 0
+    }
+
+    .notes-log {
+      margin-top: 12px;
+      font-size: 12px;
+      color: var(--ink-soft);
+      border-left: 2px solid var(--accent-b);
+      padding: 6px 12px;
+      background: var(--accent-b-soft);
+      border-radius: 0 8px 8px 0
+    }
+
+    .annotate {
+      margin-top: 16px
+    }
+
+    .annotate textarea {
+      width: 100%;
+      min-height: 62px;
+      resize: vertical;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: var(--ink);
+      font: inherit;
+      font-size: 13px;
+      outline: none;
+      box-sizing: border-box
+    }
+
+    .annotate textarea:focus {
+      border-color: var(--accent)
+    }
+
+    .anno-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 10px
+    }
+
+    /* Builder / 审计 */
+    .builder {
+      max-width: 900px;
+      margin: 6px auto 0
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--glass);
+      backdrop-filter: blur(8px);
+      padding: 18px 20px;
+      margin-bottom: 16px
+    }
+
+    .panel .ph {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-weight: 600;
+      margin-bottom: 12px
+    }
+
+    .panel .ph .avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 7px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700
+    }
+
+    .file-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 10px;
+      border-radius: 9px;
+      font-size: 12.5px;
+      opacity: .25;
+      transform: translateX(-6px);
+      transition: .4s
+    }
+
+    .file-row.lit {
+      opacity: 1;
+      transform: none;
+      background: var(--bg-input)
+    }
+
+    .file-row .add {
+      color: var(--ok)
+    }
+
+    .file-row .del {
+      color: var(--err)
+    }
+
+    .file-row .fp {
+      flex: 1;
+      color: var(--ink-soft)
+    }
+
+    .file-row .fp b {
+      color: var(--ink)
+    }
+
+    .stamp {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 13px;
+      animation: stamp .4s cubic-bezier(.2, 1.5, .4, 1)
+    }
+
+    .stamp.pass {
+      background: rgba(56, 211, 159, .14);
+      color: var(--ok);
+      border: 1px solid var(--ok)
+    }
+
+    .stamp.fail {
+      background: rgba(242, 85, 90, .14);
+      color: var(--err);
+      border: 1px solid var(--err)
+    }
+
+    .issues {
+      margin-top: 12px;
+      font-size: 12.5px;
+      color: var(--ink-soft)
+    }
+
+    .issues li {
+      margin: 5px 0
+    }
+
+    .repair-note {
+      margin-top: 14px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--err);
+      background: rgba(242, 85, 90, .08);
+      color: var(--err);
+      font-size: 12.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px
+    }
+
+    /* ---------------- keyframes ---------------- */
+    @keyframes flow {
+      from {
+        background-position: -40% 0
+      }
+
+      to {
+        background-position: 140% 0
+      }
+    }
+
+    @keyframes loop-flow {
+      to {
+        stroke-dashoffset: -24
+      }
+    }
+
+    @keyframes pulse-halo {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 rgba(122, 162, 247, .35)
+      }
+
+      50% {
+        box-shadow: 0 0 0 7px rgba(122, 162, 247, 0)
+      }
+    }
+
+    @keyframes breathe {
+
+      0%,
+      100% {
+        opacity: .6
+      }
+
+      50% {
+        opacity: 1
+      }
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0
+      }
+    }
+
+    @keyframes shimmer {
+      to {
+        background-position: -200% 0
+      }
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(26px) scale(.97)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+
+    @keyframes charge {
+      from {
+        width: 0
+      }
+    }
+
+    @keyframes stamp {
+      from {
+        opacity: 0;
+        transform: scale(1.6) rotate(-6deg)
+      }
+
+      to {
+        opacity: 1;
+        transform: none
+      }
+    }
+
+    @keyframes thumb-pulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 3px rgba(34, 211, 238, .16), 0 0 14px 2px rgba(34, 211, 238, .5)
+      }
+
+      50% {
+        box-shadow: 0 0 0 6px rgba(34, 211, 238, .04), 0 0 22px 5px rgba(34, 211, 238, .85)
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span>大模型赛马 <small>· 竞速电路概念原型</small></div>
+    <div class="spacer"></div>
+    <span class="stage-tag" id="stageTag">配置</span>
+    <button class="btn" id="prevBtn">← 上一步</button>
+    <button class="btn primary" id="nextBtn">发令 ▶</button>
+    <button class="btn" id="resetBtn">重置</button>
+    <label class="toggle"><input type="checkbox" id="rm" /> 降低动效</label>
+  </div>
+
+  <div class="circuit-wrap">
+    <div class="circuit" id="circuit"></div>
+    <svg class="loop-svg" id="loopSvg" width="360" height="60" viewBox="0 0 360 60">
+      <path class="loop-path" id="loopPath" d="M330,6 C330,46 30,46 30,10" />
+      <text class="loop-label" id="loopLabel" x="180" y="52" text-anchor="middle">⟲ 修复回环</text>
+    </svg>
+  </div>
+
+  <div class="stage" id="stage"></div>
+
+  <script>
+    /* ============ 阶段状态机 ============ */
+    const NODES = [
+      { key: 'plan', label: '双规划', icon: '⚑' },
+      { key: 'rebut', label: '交叉反驳', icon: '⚔' },
+      { key: 'judge', label: '裁判', icon: '⚖' },
+      { key: 'build', label: 'Builder', icon: '🔨' },
+      { key: 'audit', label: '审计', icon: '🛡' },
+    ];
+    // stage: 0配置 1双规划 2反驳 3裁判 4Builder 5审计 6修复
+    const STAGES = ['配置', '双规划', '交叉反驳', '裁判台', 'Builder 执行', '独立审计', '修复回环'];
+    let stage = 0;
+    let winner = 'a';
+    let judgeVer = 1;
+    let judgeNotes = [];
+
+    const $ = (s) => document.querySelector(s);
+    const stageEl = $('#stage');
+
+    /* ---- 电路 HUD 渲染 ---- */
+    function renderCircuit() {
+      const wrap = $('#circuit');
+      wrap.innerHTML = '';
+      // 当前激活节点：stage1->0 ... stage5->4；stage6(修复)->3(Builder)
+      const activeIdx = stage === 0 ? -1 : stage === 6 ? 3 : stage - 1;
+      NODES.forEach((n, i) => {
+        const done = activeIdx > i || (stage === 6 && i < 3);
+        const active = i === activeIdx;
+        const el = document.createElement('div');
+        el.className = 'node' + (done ? ' done' : '') + (active ? ' active' : '');
+        el.innerHTML = `<div class="orb">${done ? '✓' : n.icon}</div>
+      <div class="label">${n.label}</div>
+      <div class="telemetry mono">${telemetry(i, done, active)}</div>`;
+        wrap.appendChild(el);
+      });
+      // 连接线（4段），置于节点之间
+      requestAnimationFrame(() => {
+        document.querySelectorAll('.link').forEach(l => l.remove());
+        const nodes = [...wrap.children];
+        for (let i = 0; i < nodes.length - 1; i++) {
+          const a = nodes[i].querySelector('.orb').getBoundingClientRect();
+          const b = nodes[i + 1].querySelector('.orb').getBoundingClientRect();
+          const wrapRect = wrap.getBoundingClientRect();
+          const link = document.createElement('div');
+          const filled = activeIdx > i || (stage === 6 && i < 3);
+          link.className = 'link' + (filled ? ' filled' : '') + ((activeIdx === i + 1) ? ' flowing' : '');
+          link.style.left = (a.right - wrapRect.left) + 'px';
+          link.style.width = (b.left - a.right) + 'px';
+          wrap.appendChild(link);
+        }
+      });
+      // 修复回环高亮
+      $('#loopPath').classList.toggle('active', stage === 6);
+      $('#loopLabel').classList.toggle('active', stage === 6);
+      $('#stageTag').textContent = STAGES[stage];
+    }
+    function telemetry(i, done, active) {
+      const t = ['Codex·GPT-5', 'Kimi·k2', 'Claude', 'Codex·GPT-5', 'Gemini'];
+      const times = ['8.2s', '6.7s', '3.1s', '—', '—'];
+      if (!done && !active) return '';
+      return t[i] + (done ? ' · ' + times[i] : ' · running');
+    }
+
+    /* ---- 各阶段主舞台 ---- */
+    function renderStage() {
+      clearTypers();
+      if (stage === 0) return renderConfig();
+      if (stage === 1) return renderRacing(false);
+      if (stage === 2) return renderRacing(true);
+      if (stage === 3) return renderJudge();
+      if (stage >= 4) return renderBuilder();
+    }
+
+    function renderConfig() {
+      const EFF_PCT = { low: 20, medium: 50, high: 78, xhigh: 100 };
+      const roles = [
+        { h: '选手 A', tag: '规划', eng: '⬡ Codex', model: 'GPT-5', eff: 'high' },
+        { h: '选手 B', tag: '规划', eng: '◆ Kimi', model: 'k2-0711', eff: 'medium' },
+        { h: '裁判', tag: '融合', eng: '✳ Claude', model: 'Sonnet', eff: 'high' },
+        { h: 'Builder', tag: '执行', eng: '⬡ Codex', model: 'GPT-5', eff: 'high' },
+        { h: '审计', tag: '复审', eng: '✦ Gemini', model: '2.5-Pro', eff: 'medium' },
+      ];
+      stageEl.innerHTML = `<div class="config-grid">${roles.map(r => {
+        const pct = EFF_PCT[r.eff] ?? 66;
+        return `
+    <div class="role-card">
+      <div class="rc-head"><h4>${r.h}</h4><span class="rc-tag">${r.tag}</span></div>
+      <div class="select"><span class="nm">${r.eng}</span><span class="chev">▾</span></div>
+      <div class="select"><span class="nm">${r.model}</span><span class="chev">▾</span></div>
+      <div class="effort-block">
+        <div class="effort-head"><span>思考深度</span><span class="val">${r.eff}</span></div>
+        <div class="slider"><i style="width:${pct}%"></i><b style="left:${pct}%"></b></div>
+      </div>
+    </div>`;
+      }).join('')}</div>
+    <div class="config-hint">每个角色独立配置引擎 / 模型 / 思考深度 —— 点击「发令 ▶」开始双模型对决</div>`;
+    }
+
+    function renderRacing(withRebuttal) {
+      const finishedA = withRebuttal, finishedB = withRebuttal; // 反驳阶段两方都已冲线
+      stageEl.innerHTML = `
+    <div class="lanes">
+      <div class="lane a ${finishedA ? 'finished' : ''}" id="laneA">
+        ${laneHead('a', 'A', 'Codex · GPT-5', 'high', finishedA, '8.2s')}
+        <div class="prog"><i id="progA"></i></div>
+        <div class="lane-body" id="bodyA"></div>
+      </div>
+      <div class="divider ${!withRebuttal ? 'lead-a' : ''}"></div>
+      <div class="lane b ${finishedB ? 'finished' : ''}" id="laneB">
+        ${laneHead('b', 'B', 'Kimi · k2', 'medium', finishedB, '6.7s')}
+        <div class="prog"><i id="progB"></i></div>
+        <div class="lane-body" id="bodyB"></div>
+      </div>
+    </div>`;
+      if (!withRebuttal) {
+        // 双规划：A 流式打字，B 稍慢
+        setTimeout(() => setProg('progA', 72), 50); setTimeout(() => setProg('progB', 48), 400);
+        typeInto('bodyA', PLAN_A, true);
+        typeInto('bodyB', PLAN_B_PARTIAL, true, () => { }, 'b');
+      } else {
+        setProg('progA', 100); setProg('progB', 100);
+        $('#bodyA').innerHTML = renderPlan(PLAN_A) + REBUT_A + DEFEND_A;
+        $('#bodyB').innerHTML = renderPlan(PLAN_B_FULL) + REBUT_B + DEFEND_B;
+      }
+    }
+    function laneHead(cls, letter, meta, eff, finished, time) {
+      return `<div class="lane-head">
+    <div class="avatar">${letter}</div>
+    <div><div class="name">选手 ${letter}</div><div class="meta mono">${meta} · ${eff}</div></div>
+    <div class="flag ${finished ? 'finished' : ''}">${finished ? ('🏁 冲线 ' + time) : '⋯ 竞速中'}</div>
+  </div>`;
+    }
+
+    function renderJudge() {
+      const basis = judgeVer === 1 ? BASIS_V1 : BASIS_V2;
+      const plan = judgeVer === 1 ? FINAL_PLAN_V1 : FINAL_PLAN_V2;
+      stageEl.innerHTML = `
+   <div class="judge">
+     <h3>⚖ 裁判 · 融合方案 <span class="ver mono">v${judgeVer}</span> <span style="font-size:11px;color:var(--ink-faint);font-weight:400">Claude · Sonnet</span></h3>
+     <div class="sub">裁判融合两方优点产出一份最终方案；你批注后裁判据此修订，定稿后交给 Builder。</div>
+
+     <details class="ref-plans">
+       <summary>▸ 参考：双方原始方案（已冻结）</summary>
+       <div class="plan-previews">
+         <div class="plan-card a"><div class="pc-head"><span class="badge">A</span> 方案 A · Codex·GPT-5</div>${PLAN_A}${REBUT_A}${DEFEND_A}</div>
+         <div class="plan-card b"><div class="pc-head"><span class="badge">B</span> 方案 B · Kimi·k2</div>${PLAN_B_FULL}${REBUT_B}${DEFEND_B}</div>
+       </div>
+     </details>
+
+     <div class="final-plan">
+       <div class="fp-title">📋 最终融合方案 <span class="ver mono">v${judgeVer}</span></div>
+       ${plan}
+       <div class="fusion-basis">
+         <div class="fb-h">融合依据</div>
+         <ul>${basis.map(b => `<li>${b}</li>`).join('')}</ul>
+       </div>
+     </div>
+
+     ${judgeNotes.length ? `<div class="notes-log">✂ 已根据你的批注修订：“${judgeNotes[judgeNotes.length - 1]}”</div>` : ''}
+
+     <div class="annotate">
+       <textarea id="annoBox" placeholder="在此批注 / 提出修改意见（如：第 3 步缺少并发锁，请补充）…"></textarea>
+       <div class="anno-actions">
+         <button class="btn" onclick="reviseJudge()">✎ 按批注让裁判修订</button>
+         <button class="btn primary" onclick="finalize()">✓ 定稿，交给 Builder</button>
+       </div>
+     </div>
+   </div>`;
+    }
+    window.reviseJudge = function () {
+      const box = document.getElementById('annoBox');
+      const note = (box && box.value.trim()) || '补充第 3 步的并发锁与回滚点';
+      judgeNotes.push(note);
+      judgeVer = 2;
+      renderStage();
+    };
+    window.finalize = function () { stage = 4; update(); };
+    function scoreRow(dim, a, b) {
+      return `<div class="score-row"><span class="dim">${dim}</span>
+    <div class="bar a"><i style="width:${a}%"></i></div>
+    <div class="bar b"><i style="width:${b}%;animation-delay:.15s"></i></div></div>`;
+    }
+    function radarSVG() {
+      const cx = 90, cy = 90, R = 64, ax = [92, 85, 88, 90], bx = [70, 78, 60, 82];
+      const pts = (v) => v.map((s, i) => {
+        const ang = -Math.PI / 2 + i * Math.PI / 2; const r = R * s / 100;
+        return (cx + r * Math.cos(ang)).toFixed(1) + ',' + (cy + r * Math.sin(ang)).toFixed(1)
+      }).join(' ');
+      let rings = '';[0.33, 0.66, 1].forEach(k => { rings += `<polygon points="${[0, 1, 2, 3].map(i => { const ang = -Math.PI / 2 + i * Math.PI / 2; return (cx + R * k * Math.cos(ang)).toFixed(1) + ',' + (cy + R * k * Math.sin(ang)).toFixed(1) }).join(' ')}" fill="none" stroke="var(--line)"/>` });
+      return `<svg width="180" height="180" viewBox="0 0 180 180">${rings}
+    <polygon points="${pts(bx)}" fill="rgba(179,147,106,.16)" stroke="var(--accent-b)" stroke-width="1.5"/>
+    <polygon points="${pts(ax)}" fill="rgba(94,106,210,.2)" stroke="var(--accent)" stroke-width="1.5"/>
+  </svg>`;
+    }
+    window.choose = function (w) { winner = w; stage = 4; update(); };
+    function renderBuilder() {
+      const isAudit = stage >= 5, isRepair = stage === 6;
+      const files = [
+        { op: 'M', add: '+42', del: '-8', fp: 'src/renderer/src/components/<b>RaceView.tsx</b>' },
+        { op: 'A', add: '+156', del: '', fp: 'src/main/engine/<b>RaceOrchestrator.ts</b>' },
+        { op: 'M', add: '+23', del: '-3', fp: 'src/shared/<b>types.ts</b>' },
+        { op: 'M', add: '+11', del: '-1', fp: 'src/renderer/src/store/<b>chatStore.ts</b>' },
+      ];
+      stageEl.innerHTML = `<div class="builder">
+    <div class="panel">
+      <div class="ph"><span class="avatar">🔨</span> Builder 执行 <span class="mono" style="font-size:11px;color:var(--ink-faint);font-weight:400">· 最终融合方案（裁判 v${judgeVer}）· Codex · GPT-5</span></div>
+      <div id="fileList">${files.map((f, i) => `
+        <div class="file-row" data-i="${i}">
+          <span class="${f.op === 'A' ? 'add' : ''}">${f.op}</span>
+          <span class="fp">${f.fp}</span>
+          <span class="add mono">${f.add}</span><span class="del mono">${f.del}</span>
+        </div>`).join('')}</div>
+    </div>
+    ${isAudit ? `<div class="panel">
+      <div class="ph"><span class="avatar" style="background:rgba(179,147,106,.14);color:var(--accent-b);border-color:var(--accent-b)">🛡</span> 独立审计 <span class="mono" style="font-size:11px;color:var(--ink-faint);font-weight:400">· Gemini 2.5-Pro 复审 diff</span></div>
+      ${isRepair
+            ? `<span class="stamp fail">✗ 未通过 · 发现 2 处问题</span>
+           <ul class="issues"><li>· RaceOrchestrator 未处理选手中途崩溃的 turn.ended 缺失</li><li>· 修复回环缺少最大轮次上限，存在死循环风险</li></ul>
+           <div class="repair-note">⟲ 问题清单已回注 Builder，进入第 <b>1</b> 轮修复 —— 电路回环能量逆流中</div>`
+            : `<span class="stamp pass">✓ 审计通过 · 方案可交付</span>
+           <div class="issues" style="color:var(--ink-faint)">diff 与最终融合方案一致，无越权写入，风险点已覆盖。</div>`}
+    </div>`: ''}
+  </div>`;
+      if (!isAudit) {
+        // Builder：文件逐条点亮
+        const rows = [...document.querySelectorAll('.file-row')];
+        rows.forEach((r, i) => setTimeout(() => r.classList.add('lit'), 250 + i * 300));
+      }
+    }
+
+    /* ---- 打字机（流式模拟） ---- */
+    let typers = [];
+    function clearTypers() { typers.forEach(t => clearInterval(t)); typers = []; }
+    function typeInto(id, html, caret, done, cls) {
+      const el = document.getElementById(id); if (!el) return;
+      const full = html; let i = 0;
+      const speed = cls === 'b' ? 18 : 12;
+      const t = setInterval(() => {
+        i += Math.ceil(Math.random() * 4);
+        el.innerHTML = full.slice(0, i) + (caret ? '<span class="caret"></span>' : '');
+        if (i >= full.length) { clearInterval(t); el.innerHTML = full; done && done(); }
+      }, speed);
+      typers.push(t);
+    }
+    function setProg(id, pct) { const el = document.getElementById(id); if (el) el.style.width = pct + '%'; }
+    function renderPlan(txt) { return txt; }
+
+    /* ---- 假数据 ---- */
+    const PLAN_A = `<div class="think">思考：先分析约束，Builder 唯一写盘，其余只读… <b>权衡回滚成本</b></div>
+<div class="content"><span class="h">方案 A · 会话组编排</span>
+1. RaceGroup 作为编排层，拥有 5 个只读/可写角色会话
+2. 复用现有 fork + contextSeed 做中途转赛马
+3. 唯 Builder 具写权限，天然无并发冲突
+4. 阶段间用 turn.ended 事件驱动状态机推进
+5. 增加最大修复轮次上限，防死循环</div>`;
+    const PLAN_B_FULL = `<div class="think">思考：能否更轻量？直接并行两个 session… <b>省去编排层</b></div>
+<div class="content"><span class="h">方案 B · 轻量并行</span>
+1. 仅起两个并行 session，前端比对
+2. 裁判用一次性拼接 prompt
+3. 优胜直接 forkToEngine 继续
+4. 不引入独立 Orchestrator，逻辑放前端</div>`;
+    const PLAN_B_PARTIAL = `<div class="think">思考：能否更轻量？直接并行两个 session…</div>
+<div class="content"><span class="h">方案 B · 轻量并行</span>
+1. 仅起两个并行 session，前端比对
+2. 裁判用一次性拼接 prompt`;
+    const REBUT_A = `<div class="rebut"><div class="tag">⚔ 反驳 选手 B</div>
+<div class="content" style="font-size:12.5px">B 把编排逻辑放前端，重启后无法续跑赛程；且优胜后直接 fork 丢失了审计闭环。</div></div>`;
+    const REBUT_B = `<div class="rebut"><div class="tag">⚔ 反驳 选手 A</div>
+<div class="content" style="font-size:12.5px">A 引入独立 Orchestrator 增加复杂度，对简单任务过重；5 个会话进程资源占用偏高。</div></div>`;
+    const DEFEND_A = `<div class="rebut" style="border-color:var(--accent)"><div class="tag" style="color:var(--accent)">🛡 A 辩护</div>
+<div class="content" style="font-size:12.5px">编排层确实增加代码量，但恰好用来承载“重启续跑”与“审计闭环”——这正是 B 的短板；复杂度可控。</div></div>`;
+    const DEFEND_B = `<div class="rebut" style="border-color:var(--accent-b)"><div class="tag" style="color:var(--accent-b)">🛡 B 辩护</div>
+<div class="content" style="font-size:12.5px">前端逻辑可加轻量持久化补上续跑；5 进程占用可按需回收，不必常驻。</div></div>`;
+
+    const FINAL_PLAN_V1 = `<div class="content"><span class="h">融合方案 · 轻量编排层</span>
+1. 保留 A 的 RaceGroup 编排层（承载重启续跑 + 审计闭环）
+2. 采纳 B 的“进程按需回收”，空闲角色不常驻
+3. 复用 fork + contextSeed 做中途转赛马
+4. 唯 Builder 具写权限，阶段由 turn.ended 驱动
+5. 修复回环设最大轮次上限（防死循环）</div>`;
+    const FINAL_PLAN_V2 = `<div class="content"><span class="h">融合方案 · 轻量编排层 <span style="color:var(--accent-b);font-size:11px">（v2 按批注修订）</span></span>
+1. 保留 A 的 RaceGroup 编排层（承载重启续跑 + 审计闭环）
+2. 采纳 B 的“进程按需回收”，空闲角色不常驻
+3. 复用 fork + contextSeed 做中途转赛马
+4. 唯 Builder 具写权限；<span style="color:var(--accent-b)">新增：并发写盘加文件级锁与回滚快照</span>
+5. 修复回环设最大轮次上限（防死循环）</div>`;
+    const BASIS_V1 = [
+      '采纳 <b>A</b>：编排层——唯一能支撑重启续跑与审计闭环（B 辩护未能推翻）',
+      '采纳 <b>B</b>：进程按需回收——有效回应 A “资源占用高”的批评',
+      '舍弃 <b>B</b>：“逻辑全放前端”——实为真问题（重启无法续跑），辩护不成立',
+    ];
+    const BASIS_V2 = [
+      '保留 v1 全部融合决策',
+      '根据你的批注：第 4 步补充并发写盘的文件级锁与回滚快照',
+    ];
+
+    /* ---- 控制 ---- */
+    function update() {
+      renderCircuit(); renderStage();
+      $('#prevBtn').disabled = stage === 0;
+      $('#nextBtn').textContent = stage === 0 ? '发令 ▶' : stage >= 6 ? '完成 ✓' : '下一步 →';
+      $('#nextBtn').disabled = stage >= 6;
+    }
+    $('#nextBtn').onclick = () => { if (stage < 6) { stage++; update(); } };
+    $('#prevBtn').onclick = () => { if (stage > 0) { stage--; update(); } };
+    $('#resetBtn').onclick = () => { stage = 0; winner = 'a'; judgeVer = 1; judgeNotes = []; update(); };
+    $('#rm').onchange = (e) => document.body.classList.toggle('reduce-motion', e.target.checked);
+    window.addEventListener('resize', () => renderCircuit());
+    update();
+  </script>
+</body>
+
+</html>
