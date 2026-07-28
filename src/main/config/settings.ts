@@ -17,6 +17,7 @@ const DEFAULTS: AppSettings = {
   language: 'zh',
   defaultPermissionMode: 'default',
   sendKey: 'enter',
+  autoCompactRatio: 90,
   notifications: { taskComplete: true, question: true, error: true },
   workspaces: [],
   routing: { kimi: false, codex: false },
@@ -32,6 +33,8 @@ function migrate(stored: Record<string, unknown>): AppSettings {
     language: s.language ?? DEFAULTS.language,
     defaultPermissionMode: s.defaultPermissionMode ?? DEFAULTS.defaultPermissionMode,
     sendKey: s.sendKey ?? DEFAULTS.sendKey,
+    autoCompactRatio:
+      typeof s.autoCompactRatio === 'number' ? Math.max(0, Math.min(100, s.autoCompactRatio)) : DEFAULTS.autoCompactRatio,
     notifications: { ...DEFAULTS.notifications, ...(s.notifications ?? {}) },
     workspaces: s.workspaces ?? [],
     routing: { ...DEFAULTS.routing, ...(s.routing ?? {}) },

@@ -27,6 +27,10 @@ const api: CyberSlotsApi = {
   sessionFork: (sessionId) => ipcRenderer.invoke(IPC.sessionFork, sessionId),
   sessionForkEngine: (sessionId, engine) => ipcRenderer.invoke(IPC.sessionForkEngine, sessionId, engine),
   sessionCompact: (sessionId) => ipcRenderer.invoke(IPC.sessionCompact, sessionId),
+  sessionChangesList: (sessionId) => ipcRenderer.invoke(IPC.sessionChangesList, sessionId),
+  sessionChangesDiff: (sessionId, path) => ipcRenderer.invoke(IPC.sessionChangesDiff, sessionId, path),
+  sessionChangesRevert: (sessionId, path) => ipcRenderer.invoke(IPC.sessionChangesRevert, sessionId, path),
+  sessionChangesAccept: (sessionId, path) => ipcRenderer.invoke(IPC.sessionChangesAccept, sessionId, path),
   sessionSteer: (sessionId, text) => ipcRenderer.invoke(IPC.sessionSteer, sessionId, text),
   sessionGoalSet: (sessionId, objective) => ipcRenderer.invoke(IPC.sessionGoalSet, sessionId, objective),
   sessionGoalControl: (sessionId, action) => ipcRenderer.invoke(IPC.sessionGoalControl, sessionId, action),
@@ -49,6 +53,15 @@ const api: CyberSlotsApi = {
   fsWrite: (path, text, root) => ipcRenderer.invoke(IPC.fsWrite, path, text, root),
   fsGitStatus: (root) => ipcRenderer.invoke(IPC.fsGitStatus, root),
   openIn: (target, path) => ipcRenderer.invoke(IPC.openIn, target, path),
+  terminalCreate: (id, cwd) => ipcRenderer.invoke(IPC.terminalCreate, id, cwd),
+  terminalInput: (id, data) => ipcRenderer.invoke(IPC.terminalInput, id, data),
+  terminalResize: (id, cols, rows) => ipcRenderer.invoke(IPC.terminalResize, id, cols, rows),
+  terminalDispose: (id) => ipcRenderer.invoke(IPC.terminalDispose, id),
+  onTerminalData: (listener) => {
+    const wrapped = (_e: Electron.IpcRendererEvent, payload: { id: string; data: string }): void => listener(payload);
+    ipcRenderer.on(IPC.terminalData, wrapped);
+    return () => ipcRenderer.removeListener(IPC.terminalData, wrapped);
+  },
   onEngineEvent: (listener) => {
     const wrapped = (_e: Electron.IpcRendererEvent, envelope: EngineEventEnvelope): void =>
       listener(envelope);

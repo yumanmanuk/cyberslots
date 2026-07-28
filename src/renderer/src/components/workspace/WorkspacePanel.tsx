@@ -6,13 +6,15 @@
  * tree stays visible while reading code.
  */
 
-import { useMemo, useState } from 'react';
-import { Bot, FileDiff, FolderTree, Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Bot, Check, FileDiff, FolderTree, Loader2, RotateCcw } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
+import type { SessionChangeEntry } from '@shared/ipc';
 import { useChatStore } from '../../store/chatStore';
 import FileTree from './FileTree';
 import FilePreview from './FilePreview';
+import DiffView from './DiffView';
 
 interface Props {
   sessionId: string;
@@ -24,25 +26,51 @@ interface Props {
 
 export type PanelTab = 'files' | 'changes' | 'agents';
 
-interface ChangeEntry {
-  path: string;
-  name: string;
-  adds: number;
-  dels: number;
-  count: number;
-}
+// 变更清单改由主进程台账（ChangeTracker）驱动，条目类型 = SessionChangeEntry。
 
 export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Props): JSX.Element {
   const [openFile, setOpenFile] = useState<string | null>(null);
-  const changes = useChangedFiles(sessionId);
+  const [openDiff, setOpenDiff] = useState<string | null>(null);
+  const [changesNonce, setChangesNonce] = useState(0);
+  const changes = useChangedFiles(sessionId, changesNonce);
   const agents = useAgentActivity(sessionId);
+
+  // 文件被回退/接受后从清单消失 → 关掉其 diff 视图。
+  useEffect(() => {
+    if (openDiff && !changes.some((c) => c.path === openDiff)) setOpenDiff(null);
+  }, [changes, openDiff]);
+
+  // 预览刷新信号：工具调用数（AI 流式编辑）+ 会话状态（回合边界，捕获
+  // shell 改动）+ 回退 nonce（磁盘被写回）任一变化 → FilePreview 重读盘。
+  const previewReloadKey = useChatStore((s) => {
+    const msgs = s.ui[sessionId]?.messages ?? [];
+    let n = 0;
+    for (const m of msgs) if (m.kind === 'tool_call') n++;
+    const st = s.sessions.find((x) => x.id === sessionId)?.status ?? '';
+    return `${n}|${st}`;
+  });
 
   return (
     <>
-      {/* 文件预览 — 独立小面板，开在文件树左侧，树保持可见（item 9） */}
-      {openFile && (
-        <aside className="flex w-[400px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg-panel/30">
-          <FilePreview path={openFile} root={root} onClose={() => setOpenFile(null)} />
+      {/* 左侧详情面板：变更行 → diff 对照；文件树 → 只读预览（树保持可见） */}
+      {(openDiff || openFile) && (
+        <aside className="flex w-[440px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg-panel/30">
+          {openDiff ? (
+            <DiffView
+              sessionId={sessionId}
+              path={openDiff}
+              nonce={changesNonce}
+              onClose={() => setOpenDiff(null)}
+              onRevert={() =>
+                void window.cyberslots.sessionChangesRevert(sessionId, openDiff).then(() => {
+                  setChangesNonce((n) => n + 1);
+                  setOpenDiff(null);
+                })
+              }
+            />
+          ) : (
+            <FilePreview path={openFile!} root={root} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
+          )}
         </aside>
       )}
 
@@ -65,9 +93,17 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
 
         <div className="min-h-0 flex-1">
           {tab === 'files' ? (
-            <FileTree root={root} onOpenFile={setOpenFile} />
+            <FileTree root={root} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
           ) : tab === 'changes' ? (
-            <ChangesList changes={changes} onOpen={setOpenFile} />
+            <ChangesList
+              changes={changes}
+              sessionId={sessionId}
+              onOpen={(p) => {
+                setOpenFile(null);
+                setOpenDiff(p);
+              }}
+              onRefresh={() => setChangesNonce((n) => n + 1)}
+            />
           ) : (
             <AgentsList agents={agents} />
           )}
@@ -90,87 +126,123 @@ function TabButton({ active, onClick, icon, label }: { active: boolean; onClick:
   );
 }
 
-/** Aggregate tool-call activity into a per-file change summary.
- *  Prefers structured diffs; falls back to edit/write tool locations
- *  (some engines report file writes without a diff payload). */
-function useChangedFiles(sessionId: string): ChangeEntry[] {
-  const messages = useChatStore((s) => s.ui[sessionId]?.messages);
-  return useMemo(() => {
-    const byPath = new Map<string, ChangeEntry>();
-    const bump = (path: string, adds: number, dels: number): void => {
-      const prev = byPath.get(path);
-      byPath.set(path, {
-        path,
-        name: path.split(/[\\/]/).pop() ?? path,
-        adds: (prev?.adds ?? 0) + adds,
-        dels: (prev?.dels ?? 0) + dels,
-        count: (prev?.count ?? 0) + 1,
-      });
-    };
-    for (const m of messages ?? []) {
-      if (m.kind !== 'tool_call') continue;
-      const tc = m as Extract<UnifiedMessage, { kind: 'tool_call' }>;
-      const diff = tc.content?.diff;
-      if (diff?.path) {
-        bump(
-          diff.path,
-          diff.newText ? diff.newText.split('\n').length : 0,
-          diff.oldText ? diff.oldText.split('\n').length : 0,
-        );
-      } else if (isWriteLike(tc) && tc.status === 'completed') {
-        const paths = tc.locations?.length ? tc.locations : pathsFromTitle(tc.title);
-        for (const loc of paths) bump(loc, 0, 0);
-      }
+/** 变更清单来自主进程台账（ChangeTracker）：真实基线 diff + 可回退。
+ *  编辑类工具调用数变化时自动刷新；接受/回退后由 onRefresh 触发重取。 */
+function useChangedFiles(sessionId: string, nonce: number): SessionChangeEntry[] {
+  const editTick = useChatStore((s) => {
+    let n = 0;
+    for (const m of s.ui[sessionId]?.messages ?? []) {
+      if (m.kind === 'tool_call' && isEditish(m.toolKind, m.title)) n++;
     }
-    return [...byPath.values()];
-  }, [messages]);
+    return n;
+  });
+  const [entries, setEntries] = useState<SessionChangeEntry[]>([]);
+  // 回合结束（status 变化）也要重取：shell 命令改动由主进程在 turn.ended
+  // 后异步 git 扫尾登记（~百毫秒），故延迟再取一次兜底。
+  const status = useChatStore((s) => s.sessions.find((x) => x.id === sessionId)?.status);
+  useEffect(() => {
+    let alive = true;
+    const fetchNow = (): void =>
+      void window.cyberslots.sessionChangesList(sessionId).then((e) => {
+        if (alive) setEntries(e);
+      });
+    fetchNow();
+    const timer = setTimeout(fetchNow, 900);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [sessionId, editTick, status, nonce]);
+  return entries;
 }
 
-/** Write-ish tool calls, by ACP kind or by title verb (kimi uses
- *  "Writing <path>" / "Editing <path>" with kind variance across tools). */
-function isWriteLike(tc: Extract<UnifiedMessage, { kind: 'tool_call' }>): boolean {
-  if (['edit', 'write', 'delete', 'move'].includes(tc.toolKind)) return true;
-  return /^(writing|editing|creating|deleting|moving)\b/i.test(tc.title);
+/** 编辑类工具（按 ACP kind 或标题动词）。 */
+function isEditish(toolKind: string, title: string): boolean {
+  if (['edit', 'write', 'delete', 'move'].includes(toolKind)) return true;
+  return /^(writing|editing|creating|deleting|moving|修改|创建|删除|写入)/i.test(title);
 }
 
-/** Extract file paths from titles like "Writing D:/proj/file.txt". */
-function pathsFromTitle(title: string): string[] {
-  const m = title.match(/(?:[A-Za-z]:[\\/]|\.{0,2}\/)[^\s'"]+/g);
-  return m ?? [];
-}
+const STATUS_BADGE: Record<SessionChangeEntry['status'], { label: string; cls: string }> = {
+  modified: { label: 'M', cls: 'text-warn' },
+  added: { label: 'A', cls: 'text-ok' },
+  deleted: { label: 'D', cls: 'text-err' },
+};
 
-function ChangesList({ changes, onOpen }: { changes: ChangeEntry[]; onOpen: (path: string) => void }): JSX.Element {
+function ChangesList({
+  changes,
+  sessionId,
+  onOpen,
+  onRefresh,
+}: {
+  changes: SessionChangeEntry[];
+  sessionId: string;
+  onOpen: (path: string) => void;
+  onRefresh: () => void;
+}): JSX.Element {
+  // 全部回退是不可逆写盘，用两次点击确认（3s 自动撤销）。
+  const [confirmAll, setConfirmAll] = useState(false);
+  useEffect(() => {
+    if (!confirmAll) return;
+    const timer = setTimeout(() => setConfirmAll(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmAll]);
+
   if (changes.length === 0) {
     return <div className="px-3 py-8 text-center text-ui text-ink-faint">本会话还没有文件变更</div>;
   }
   const totalAdds = changes.reduce((n, c) => n + c.adds, 0);
   const totalDels = changes.reduce((n, c) => n + c.dels, 0);
+  const revert = (path?: string): void => void window.cyberslots.sessionChangesRevert(sessionId, path).then(onRefresh);
+  const accept = (path?: string): void => void window.cyberslots.sessionChangesAccept(sessionId, path).then(onRefresh);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-ui">
         <span className="font-medium">{changes.length} 个文件变更</span>
         <span className="font-mono text-[11px] text-ok">+{totalAdds}</span>
         <span className="font-mono text-[11px] text-err">-{totalDels}</span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => accept()}
+            title="接受全部改动（保留、停止跟踪）"
+            className="rounded-md px-2 py-0.5 text-[11px] text-ink-soft transition hover:bg-bg-hover"
+          >
+            全部接受
+          </button>
+          <button
+            onClick={() => (confirmAll ? revert() : setConfirmAll(true))}
+            title="回退全部改动到编辑前（新建文件将被删除）"
+            className={`rounded-md px-2 py-0.5 text-[11px] transition ${confirmAll ? 'bg-err/10 font-medium text-err' : 'text-ink-soft hover:bg-bg-hover'
+              }`}
+          >
+            {confirmAll ? '确认回退全部' : '全部回退'}
+          </button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto py-1">
         {changes.map((c) => (
-          <button
-            key={c.path}
-            onClick={() => onOpen(c.path)}
-            title={c.path}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] hover:bg-bg-hover"
-          >
-            <span className="min-w-0 flex-1 truncate">{c.name}</span>
-            {c.count > 1 && <span className="rounded-md bg-bg-active px-1 text-[10px] text-ink-faint">×{c.count}</span>}
-            {c.adds + c.dels > 0 ? (
-              <>
-                <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
-                <span className="font-mono text-[11px] text-err">-{c.dels}</span>
-              </>
-            ) : (
-              <span className="rounded-md bg-warn/10 px-1 text-[10px] text-warn">已写入</span>
-            )}
-          </button>
+          <div key={c.path} className="group flex items-center gap-2 px-3 py-1.5 text-[12.5px] hover:bg-bg-hover">
+            <button onClick={() => onOpen(c.path)} title={c.path} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+              <span className={`w-3 shrink-0 text-center font-mono text-[10px] ${STATUS_BADGE[c.status].cls}`}>{STATUS_BADGE[c.status].label}</span>
+              <span className="min-w-0 flex-1 truncate">{c.name}</span>
+              <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
+              <span className="font-mono text-[11px] text-err">-{c.dels}</span>
+            </button>
+            <button
+              title="接受此文件"
+              onClick={() => accept(c.path)}
+              className="shrink-0 rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ok group-hover:opacity-100"
+            >
+              <Check size={13} />
+            </button>
+            <button
+              title="回退此文件到编辑前"
+              onClick={() => revert(c.path)}
+              className="shrink-0 rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-err group-hover:opacity-100"
+            >
+              <RotateCcw size={13} />
+            </button>
+          </div>
         ))}
       </div>
     </div>
@@ -236,10 +308,10 @@ function AgentsList({ agents }: { agents: AgentEntry[] }): JSX.Element {
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{a.title}</span>
             <span
               className={`rounded-md px-1.5 py-0.5 text-[10px] ${a.status === 'failed'
-                  ? 'bg-err/10 text-err'
-                  : a.status === 'completed'
-                    ? 'bg-ok/10 text-ok'
-                    : 'bg-accent-soft text-accent'
+                ? 'bg-err/10 text-err'
+                : a.status === 'completed'
+                  ? 'bg-ok/10 text-ok'
+                  : 'bg-accent-soft text-accent'
                 }`}
             >
               {a.status}

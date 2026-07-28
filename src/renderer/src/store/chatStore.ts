@@ -724,6 +724,14 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         const [next, ...rest] = queue;
         set((s) => ({ queues: { ...s.queues, [sessionId]: rest } }));
         setTimeout(() => void get().sendPromptTo(sessionId, next!.text, next!.attachments), 500);
+      } else if (event.stopReason !== 'error') {
+        // 自动压缩：无排队且占用达阈值 → 在回合边界（现在）触发一次；
+        // 仅回合结束处判定，绝不打断进行中的回合（0=关闭）。
+        const ratio = get().settings?.autoCompactRatio ?? 0;
+        const u = get().ui[sessionId]?.usage;
+        if (ratio > 0 && u && u.size > 0 && u.used / u.size >= ratio / 100) {
+          void window.cyberslots.sessionCompact(sessionId);
+        }
       }
       return;
     }

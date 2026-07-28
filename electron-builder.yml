@@ -7,6 +7,10 @@ directories:
 files:
   - out/**
   - package.json
+# 原生模块（@lydell/node-pty 的 conpty.node）必须从 asar 解包，
+# 否则无法 dlopen（面板内嵌终端依赖）。
+asarUnpack:
+  - "**/@lydell/node-pty*/**"
 extraResources:
   - from: resources/ai-server
     to: ai-server

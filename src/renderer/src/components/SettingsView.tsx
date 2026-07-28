@@ -142,6 +142,20 @@ function GeneralPane({ draft, setDraft }: PaneProps): JSX.Element {
           onChange={(sendKey) => setDraft({ ...draft, sendKey: sendKey as AppSettings['sendKey'] })}
         />
       </Section>
+      <Section title={t('autoCompact')}>
+        <Segmented
+          value={String(draft.autoCompactRatio)}
+          options={[
+            { id: '0', label: t('autoCompactOff') },
+            { id: '70', label: '70%' },
+            { id: '80', label: '80%' },
+            { id: '90', label: '90%' },
+            { id: '95', label: '95%' },
+          ]}
+          onChange={(v) => setDraft({ ...draft, autoCompactRatio: Number(v) })}
+        />
+        <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('autoCompactHint')}</p>
+      </Section>
     </div>
   );
 }

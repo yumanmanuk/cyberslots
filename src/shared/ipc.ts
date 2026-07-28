@@ -36,6 +36,10 @@ export const IPC = {
   sessionFork: 'session:fork',
   sessionForkEngine: 'session:fork-engine',
   sessionCompact: 'session:compact',
+  sessionChangesList: 'session:changes-list',
+  sessionChangesDiff: 'session:changes-diff',
+  sessionChangesRevert: 'session:changes-revert',
+  sessionChangesAccept: 'session:changes-accept',
   sessionSteer: 'session:steer',
   sessionGoalSet: 'session:goal-set',
   sessionGoalControl: 'session:goal-control',
@@ -59,8 +63,14 @@ export const IPC = {
   fsWrite: 'fs:write',
   fsGitStatus: 'fs:git-status',
   openIn: 'sys:open-in',
+  // 面板内嵌终端
+  terminalCreate: 'terminal:create',
+  terminalInput: 'terminal:input',
+  terminalResize: 'terminal:resize',
+  terminalDispose: 'terminal:dispose',
   // main → renderer (send/on)
   engineEvent: 'engine:event',
+  terminalData: 'terminal:data',
 } as const;
 
 export interface SessionCreateRequest {
@@ -108,6 +118,22 @@ export interface FileContent {
 
 export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt' | 'terminal';
 
+/** 本会话被 AI 编辑的单个文件（含行级增删与变更类型），供「变更」面板接受/回退。 */
+export interface SessionChangeEntry {
+  path: string;
+  name: string;
+  adds: number;
+  dels: number;
+  status: 'modified' | 'added' | 'deleted';
+}
+
+/** 单个变更文件的编辑前/后内容（null = 不存在），供 before/after diff 视图。 */
+export interface SessionChangeDiff {
+  path: string;
+  before: string | null;
+  after: string | null;
+}
+
 /** Renderer-facing API exposed by the preload bridge. */
 export interface CyberSlotsApi {
   sessionCreate(req: SessionCreateRequest): Promise<SessionMeta>;
@@ -127,6 +153,14 @@ export interface CyberSlotsApi {
   sessionFork(sessionId: string): Promise<SessionMeta>;
   sessionForkEngine(sessionId: string, engine: EngineId): Promise<SessionMeta>;
   sessionCompact(sessionId: string): Promise<void>;
+  /** 本会话 AI 编辑过的文件清单（含 +/- 行数与变更类型）。 */
+  sessionChangesList(sessionId: string): Promise<SessionChangeEntry[]>;
+  /** 单文件编辑前/后内容（diff 视图）。 */
+  sessionChangesDiff(sessionId: string, path: string): Promise<SessionChangeDiff>;
+  /** 回退：写回编辑前基线（新建文件则删除）；path 省略 = 全部回退。 */
+  sessionChangesRevert(sessionId: string, path?: string): Promise<void>;
+  /** 接受：保留改动并停止跟踪（不动磁盘）；path 省略 = 全部接受。 */
+  sessionChangesAccept(sessionId: string, path?: string): Promise<void>;
   /** Steer the in-flight turn; resolves false when not steerable. */
   sessionSteer(sessionId: string, text: string): Promise<boolean>;
   /** Engine-native goal (codex thread/goal). */
@@ -157,6 +191,16 @@ export interface CyberSlotsApi {
   fsWrite(path: string, text: string, root: string): Promise<void>;
   fsGitStatus(root: string): Promise<Record<string, string>>;
   openIn(target: OpenTarget, path: string): Promise<void>;
+  /** 面板内嵌终端：确保会话 shell 存在（cwd = 会话目录）。 */
+  terminalCreate(id: string, cwd: string): Promise<void>;
+  /** renderer 键入 → shell stdin。 */
+  terminalInput(id: string, data: string): Promise<void>;
+  /** 终端尺寸变化（xterm fit → PTY resize）。 */
+  terminalResize(id: string, cols: number, rows: number): Promise<void>;
+  /** 关闭会话 shell（会话删除时）。 */
+  terminalDispose(id: string): Promise<void>;
+  /** 订阅 shell 输出流（main → renderer）。 */
+  onTerminalData(listener: (payload: { id: string; data: string }) => void): () => void;
   onEngineEvent(listener: (e: EngineEventEnvelope) => void): () => void;
   /** Absolute path of a dropped File (drag-and-drop attachments). */
   getPathForFile(file: File): string;

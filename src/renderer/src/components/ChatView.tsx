@@ -24,10 +24,11 @@ import Composer from './Composer';
 import PermissionSheet from './PermissionSheet';
 import WorkspacePanel, { type PanelTab } from './workspace/WorkspacePanel';
 import SideChatPanel from './SideChatPanel';
+import TerminalPanel from './TerminalPanel';
 import PlanDocPanel from './PlanDocPanel';
 import TurnRail from './TurnRail';
 
-type RightPanel = 'workspace' | 'sidechat' | 'plan' | null;
+type RightPanel = 'workspace' | 'sidechat' | 'plan' | 'terminal' | null;
 
 export default function ChatView({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
@@ -170,7 +171,11 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             <Bot size={16} />
           </RailButton>
           <div className="my-1 h-px w-5 bg-line" />
-          <RailButton title={t('railTerminal')} onClick={() => void window.cyberslots.openIn('terminal', meta!.cwd)}>
+          <RailButton
+            title={t('railTerminal')}
+            active={rightPanel === 'terminal'}
+            onClick={() => setRightPanel(rightPanel === 'terminal' ? null : 'terminal')}
+          >
             <SquareTerminal size={16} />
           </RailButton>
         </>
@@ -238,6 +243,9 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       )}
       {rightPanel === 'sidechat' && sidechatId && (
         <SideChatPanel sessionId={sidechatId} onClose={() => setRightPanel(null)} />
+      )}
+      {rightPanel === 'terminal' && meta && (
+        <TerminalPanel sessionId={sessionId} cwd={meta.cwd} onClose={() => setRightPanel(null)} />
       )}
       {rightPanel === 'plan' && planMsg && planMsg.kind === 'text' && (
         <PlanDocPanel

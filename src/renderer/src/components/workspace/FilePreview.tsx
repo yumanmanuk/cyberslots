@@ -4,7 +4,7 @@
  * colors + line numbers. Edit mode is a plain editor with save.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
@@ -37,12 +37,14 @@ const LANG_BY_EXT: Record<string, string> = {
 interface Props {
   path: string;
   root: string;
+  /** 变化时重新读盘刷新（AI 编辑/回退后实时同步）。 */
+  reloadKey?: string;
   onClose: () => void;
 }
 
 type Mode = 'preview' | 'source' | 'edit';
 
-export default function FilePreview({ path, root, onClose }: Props): JSX.Element {
+export default function FilePreview({ path, root, reloadKey, onClose }: Props): JSX.Element {
   const [text, setText] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [truncated, setTruncated] = useState(false);
@@ -50,6 +52,8 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
   const [mode, setMode] = useState<Mode>('preview');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** 非 null = 编辑中未保存，但 AI 已改磁盘 — 存磁盘新内容供冲突提示。 */
+  const [conflict, setConflict] = useState<string | null>(null);
 
   const isMd = ext === 'md' || ext === 'markdown';
   const fileName = useMemo(() => path.split(/[\\/]/).pop() ?? path, [path]);
@@ -57,6 +61,7 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
   useEffect(() => {
     setText(null);
     setError(null);
+    setConflict(null);
     window.cyberslots
       .fsRead(path)
       .then((f) => {
@@ -69,12 +74,38 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [path]);
 
+  // AI 改动/回退后重新读盘 — 实时同步预览。编辑模式不覆盖未保存草稿；
+  // 首渲染跳过（交由上面的 [path] 效果加载）。
+  const firstRef = useRef(true);
+  useEffect(() => {
+    if (reloadKey === undefined) return;
+    if (firstRef.current) {
+      firstRef.current = false;
+      return;
+    }
+    window.cyberslots
+      .fsRead(path)
+      .then((f) => {
+        // 编辑模式且有未保存改动：磁盘也变了 → 冲突，不覆盖草稿，弹提示条。
+        if (mode === 'edit' && draft !== text) {
+          if (f.text !== text) setConflict(f.text);
+          return;
+        }
+        setText(f.text);
+        setDraft(f.text);
+        setTruncated(f.truncated);
+        setExt(f.ext);
+      })
+      .catch(() => undefined); // 文件可能被回退删除：保留现有内容
+  }, [reloadKey]);
+
   const save = async (): Promise<void> => {
     setSaving(true);
     setError(null);
     try {
       await window.cyberslots.fsWrite(path, draft, root);
       setText(draft);
+      setConflict(null);
       setMode(isMd ? 'preview' : 'source');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -111,6 +142,24 @@ export default function FilePreview({ path, root, onClose }: Props): JSX.Element
 
       {truncated && <div className="bg-warn/10 px-2 py-1 text-[11px] text-warn">文件过大，仅预览前 512KB</div>}
       {error && <div className="bg-err/10 px-2 py-1 text-[11px] text-err">{error}</div>}
+      {conflict !== null && (
+        <div className="flex items-center gap-2 bg-warn/10 px-2 py-1.5 text-[11px] text-warn">
+          <span className="min-w-0 flex-1">此文件已被 AI 修改（磁盘已更新），与你未保存的编辑冲突。</span>
+          <button
+            onClick={() => {
+              setText(conflict);
+              setDraft(conflict);
+              setConflict(null);
+            }}
+            className="shrink-0 rounded-md bg-warn/20 px-2 py-0.5 font-medium hover:bg-warn/30"
+          >
+            加载 AI 版本
+          </button>
+          <button onClick={() => setConflict(null)} className="shrink-0 rounded-md px-2 py-0.5 hover:bg-bg-hover">
+            保留我的
+          </button>
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {text === null && !error ? (

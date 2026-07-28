@@ -407,6 +407,8 @@ export interface AppSettings {
   language: AppLanguage;
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';
+  /** 上下文占用达该百分比时，在回合边界自动压缩；0 = 关闭。默认 90。 */
+  autoCompactRatio: number;
   notifications: NotificationSettings;
   workspaces: WorkspaceInfo[];
   /** 协议路由开关（仅影响本程序内 spawn 的 CLI，不碰用户配置文件）。 */

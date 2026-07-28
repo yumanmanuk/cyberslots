@@ -12,6 +12,7 @@ import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
 import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
+import type { TerminalService } from './terminal/TerminalService';
 import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
 import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
@@ -21,6 +22,7 @@ export function registerIpc(
   settings: SettingsStore,
   cron: CronService,
   opencodeHost: OpencodeServerHost,
+  terminal: TerminalService,
 ): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
@@ -52,6 +54,16 @@ export function registerIpc(
     sessions.forkToEngine(sessionId, engine),
   );
   ipcMain.handle(IPC.sessionCompact, (_e, sessionId: string) => sessions.compact(sessionId));
+  ipcMain.handle(IPC.sessionChangesList, (_e, sessionId: string) => sessions.changesList(sessionId));
+  ipcMain.handle(IPC.sessionChangesDiff, (_e, sessionId: string, path: string) =>
+    sessions.changesDiff(sessionId, path),
+  );
+  ipcMain.handle(IPC.sessionChangesRevert, (_e, sessionId: string, path?: string) =>
+    sessions.changesRevert(sessionId, path),
+  );
+  ipcMain.handle(IPC.sessionChangesAccept, (_e, sessionId: string, path?: string) =>
+    sessions.changesAccept(sessionId, path),
+  );
   ipcMain.handle(IPC.sessionSteer, (_e, sessionId: string, text: string) => sessions.steer(sessionId, text));
   ipcMain.handle(IPC.sessionGoalSet, (_e, sessionId: string, objective: string) =>
     sessions.setGoal(sessionId, objective),
@@ -103,4 +115,10 @@ export function registerIpc(
   );
   ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
+
+  // 面板内嵌终端：每会话一个管道式 shell（cwd = 会话目录）。
+  ipcMain.handle(IPC.terminalCreate, (_e, id: string, cwd: string) => terminal.create(id, cwd));
+  ipcMain.handle(IPC.terminalInput, (_e, id: string, data: string) => terminal.input(id, data));
+  ipcMain.handle(IPC.terminalResize, (_e, id: string, cols: number, rows: number) => terminal.resize(id, cols, rows));
+  ipcMain.handle(IPC.terminalDispose, (_e, id: string) => terminal.dispose(id));
 }

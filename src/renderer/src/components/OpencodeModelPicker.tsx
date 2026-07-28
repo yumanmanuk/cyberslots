@@ -183,58 +183,58 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
               </div>
             )}
             <div className="flex w-80 flex-col overflow-hidden rounded-xl border border-line bg-bg-input shadow-lg">
-            {/* 搜索框 */}
-            <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-              <Search size={12} className="shrink-0 text-ink-faint" />
-              <input
-                autoFocus
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索模型…"
-                className="w-full bg-transparent text-ui outline-none placeholder:text-ink-faint"
-              />
-              <button
-                title="刷新模型目录"
-                onClick={() => void loadCatalog(true)}
-                className="shrink-0 rounded p-0.5 text-ink-faint transition hover:text-ink"
-              >
-                <RefreshCw size={11} />
-              </button>
-            </div>
-            {/* 列表 */}
-            <div className="max-h-72 overflow-y-auto py-1">
-              {catalog?.error && (
-                <div className="px-3 py-2 text-[11px] leading-5 text-err">
-                  模型目录加载失败：{catalog.error}
-                </div>
-              )}
-              {!catalog && <div className="animate-pulse px-3 py-2 text-[11px] text-ink-faint">加载中…</div>}
-              {favModels.length > 0 && !q && (
-                <>
-                  <GroupTitle label="收藏" />
-                  {favModels.map(row)}
-                </>
-              )}
-              {recentModels.length > 0 && !q && (
-                <>
-                  <GroupTitle label="最近使用" />
-                  {recentModels.map(row)}
-                </>
-              )}
-              {[...groups.entries()].map(([provider, list]) => (
-                <div key={provider}>
-                  <GroupTitle label={provider} />
-                  {list.map(row)}
-                </div>
-              ))}
-              {catalog && !filtered.length && !catalog.error && (
-                <div className="px-3 py-2 text-[11px] text-ink-faint">无匹配模型</div>
-              )}
-            </div>
-            {/* provider 引导（不做连接管理 — 委托 opencode 自身） */}
-            <div className="border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
-              连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
-            </div>
+              {/* 搜索框 */}
+              <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+                <Search size={12} className="shrink-0 text-ink-faint" />
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="搜索模型…"
+                  className="w-full bg-transparent text-ui outline-none placeholder:text-ink-faint"
+                />
+                <button
+                  title="刷新模型目录"
+                  onClick={() => void loadCatalog(true)}
+                  className="shrink-0 rounded p-0.5 text-ink-faint transition hover:text-ink"
+                >
+                  <RefreshCw size={11} />
+                </button>
+              </div>
+              {/* 列表 */}
+              <div className="max-h-72 overflow-y-auto py-1">
+                {catalog?.error && (
+                  <div className="px-3 py-2 text-[11px] leading-5 text-err">
+                    模型目录加载失败：{catalog.error}
+                  </div>
+                )}
+                {!catalog && <div className="animate-pulse px-3 py-2 text-[11px] text-ink-faint">加载中…</div>}
+                {favModels.length > 0 && !q && (
+                  <>
+                    <GroupTitle label="收藏" />
+                    {favModels.map(row)}
+                  </>
+                )}
+                {recentModels.length > 0 && !q && (
+                  <>
+                    <GroupTitle label="最近使用" />
+                    {recentModels.map(row)}
+                  </>
+                )}
+                {[...groups.entries()].map(([provider, list]) => (
+                  <div key={provider}>
+                    <GroupTitle label={provider} />
+                    {list.map(row)}
+                  </div>
+                ))}
+                {catalog && !filtered.length && !catalog.error && (
+                  <div className="px-3 py-2 text-[11px] text-ink-faint">无匹配模型</div>
+                )}
+              </div>
+              {/* provider 引导（不做连接管理 — 委托 opencode 自身） */}
+              <div className="border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
+                连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
+              </div>
             </div>
           </div>
         </>

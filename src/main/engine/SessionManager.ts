@@ -12,11 +12,13 @@ import { join } from 'node:path';
 import type { WebContents } from 'electron';
 
 import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, SessionMeta, UnifiedMessage } from '@shared/types';
+import type { SessionChangeDiff, SessionChangeEntry } from '@shared/ipc';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
 import { CodexAdapter } from './codex/CodexAdapter';
+import { ChangeTracker } from './changeTracker';
 import { OpencodeAdapter } from './opencode/OpencodeAdapter';
 import type { OpencodeServerHost } from './opencode/OpencodeServerHost';
 import type { OpencodeEventHub } from './opencode/OpencodeEventHub';
@@ -41,6 +43,8 @@ interface LiveSession {
 export class SessionManager {
   private readonly sessions = new Map<string, LiveSession>();
   private target: WebContents | undefined;
+  /** 逐会话文件编辑台账 + 回退能力（变更面板接受/拒绝）。 */
+  private readonly changes = new ChangeTracker();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -230,6 +234,26 @@ export class SessionManager {
     await s.adapter.compact();
   }
 
+  /** 本会话 AI 编辑过的文件清单（含 +/- 与变更类型）。 */
+  changesList(sessionId: string): SessionChangeEntry[] {
+    return this.changes.list(sessionId);
+  }
+
+  /** 单文件编辑前/后内容（diff 视图）。 */
+  changesDiff(sessionId: string, path: string): SessionChangeDiff {
+    return this.changes.diff(sessionId, path);
+  }
+
+  /** 回退到编辑前基线（新建则删）；path 省略 = 全部。 */
+  changesRevert(sessionId: string, path?: string): void {
+    this.changes.revert(sessionId, path);
+  }
+
+  /** 接受（保留改动、停止跟踪）；path 省略 = 全部。 */
+  changesAccept(sessionId: string, path?: string): void {
+    this.changes.accept(sessionId, path);
+  }
+
   /** Steer the running turn; false = not supported / not steerable (re-queue). */
   async steer(sessionId: string, text: string): Promise<boolean> {
     const s = this.require(sessionId);
@@ -337,6 +361,7 @@ export class SessionManager {
   async delete(sessionId: string): Promise<void> {
     await this.close(sessionId);
     this.sessions.delete(sessionId);
+    this.changes.clear(sessionId);
     this.persistMetas();
     try {
       rmSync(this.messagesFile(sessionId), { force: true });
@@ -482,6 +507,22 @@ export class SessionManager {
       } else if (event.type === 'turn.ended') {
         s.meta.unread = true;
         this.persistMetas();
+        // shell 命令产生的文件改动没有 fileChange 事件 → 回合结束 git 扫尾登记。
+        void this.changes.scanTurnEnd(s.meta.id, s.meta.cwd);
+      } else if (event.type === 'turn.started') {
+        // AI 尚未动手：提前锁定未提交文件的基线（保留用户手改）。
+        void this.changes.snapshotDirtyFiles(s.meta.id, s.meta.cwd);
+      } else if (event.type === 'tool.upsert') {
+        // 文件编辑事件 → 首见时捕获基线（供变更面板回退）。
+        const kind = event.toolKind ?? '';
+        const editish =
+          ['edit', 'write', 'delete', 'move'].includes(kind) ||
+          /^(writing|editing|creating|deleting|moving|\u4fee\u6539|\u521b\u5efa|\u5220\u9664|\u5199\u5165)/i.test(event.title ?? '');
+        if (editish) {
+          const paths = new Set<string>(event.locations ?? []);
+          if (event.content?.diff?.path) paths.add(event.content.diff.path);
+          for (const p of paths) void this.changes.noteEdit(s.meta.id, p, s.meta.cwd);
+        }
       }
       this.maybeNotify(s.meta, event);
     }

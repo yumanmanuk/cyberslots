@@ -25,7 +25,10 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.23.0",
+    "@lydell/node-pty": "^1.1.0",
     "@opencode-ai/sdk": "^1.18.5",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "clsx": "^2.1.1",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.468.0",

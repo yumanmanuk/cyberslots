@@ -67,7 +67,7 @@ export class OpencodeAdapter implements EngineAdapter {
   /** messageID → role（过滤用户消息 echo 的 part 事件）。 */
   private readonly messageRoles = new Map<string, string>();
   /** 本回合 assistant 消息的 token/cost 快照（message.updated 持续刷新）。 */
-  private turnTokens: { input: number; output: number; reasoning: number; cacheRead: number } | undefined;
+  private turnTokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number } | undefined;
   private turnCost = 0;
   private readonly pendingPermissions = new Set<string>();
 
@@ -294,6 +294,7 @@ export class OpencodeAdapter implements EngineAdapter {
               output: num(tokens.output),
               reasoning: num(tokens.reasoning),
               cacheRead: num(cache.read),
+              cacheWrite: num(cache.write),
             };
           }
           this.turnCost = num(info.cost) || this.turnCost;
@@ -413,7 +414,7 @@ export class OpencodeAdapter implements EngineAdapter {
         // 消息级 tokens 由 message.updated 提供；这里只刷上下文占用。
         const tokens = (part.tokens ?? {}) as Json;
         const cache = (tokens.cache ?? {}) as Json;
-        const used = num(tokens.input) + num(tokens.output) + num(tokens.reasoning) + num(cache.read);
+        const used = num(tokens.input) + num(tokens.output) + num(tokens.reasoning) + num(cache.read) + num(cache.write);
         const max = this.entryOf(this.modelId)?.contextWindow ?? 0;
         if (used > 0) this.emit({ type: 'usage.update', used, size: max });
         return;
@@ -428,13 +429,16 @@ export class OpencodeAdapter implements EngineAdapter {
     if (!done) return;
     this.turnDone = undefined;
     const t = this.turnTokens;
+    // opencode 的 tokens.input 不含缓存部分（cache.read/write 单列），这里归一成
+    // codex 语义：inputTokens = 总输入（含缓存），cachedInputTokens 为其子集。
+    const totalInput = t ? t.input + t.cacheRead + t.cacheWrite : 0;
     const usage: UsageInfo | undefined = t
       ? {
-          inputTokens: t.input,
+          inputTokens: totalInput,
           outputTokens: t.output + t.reasoning,
-          totalTokens: t.input + t.output + t.reasoning + t.cacheRead,
+          totalTokens: totalInput + t.output + t.reasoning,
           cachedInputTokens: t.cacheRead || undefined,
-          contextUsed: t.input + t.output + t.reasoning + t.cacheRead,
+          contextUsed: totalInput + t.output + t.reasoning,
           contextMax: this.entryOf(this.modelId)?.contextWindow,
         }
       : undefined;

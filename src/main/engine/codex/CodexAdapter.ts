@@ -89,6 +89,11 @@ export class CodexAdapter implements EngineAdapter {
   private lastGoal: GoalInfo | null = null;
   private lastGoalAt = 0;
   private userClearedGoal = false;
+  /** 上一次上报的上下文占用（token）— 压缩前后对比用。 */
+  private lastContextUsed = 0;
+  /** 压缩开始时的占用快照 + 待回填的压缩行 id（真实释放量要等压缩后的 tokenUsage）。 */
+  private compactBeforeUsed: number | undefined;
+  private compactReportId: string | undefined;
 
   constructor(
     private readonly opts: CodexAdapterOptions,
@@ -300,7 +305,13 @@ export class CodexAdapter implements EngineAdapter {
 
   /** Native compaction; progress streams through normal turn/item events. */
   async compact(): Promise<void> {
-    await this.requireRpc().request('thread/compact/start', { threadId: this.threadId });
+    try {
+      await this.requireRpc().request('thread/compact/start', { threadId: this.threadId });
+    } catch (err) {
+      // 显性化压缩失败（如回合进行中被引擎拒绝），不再静默。
+      this.emit({ type: 'error', source: classifyError(err), message: `压缩失败：${errorMessage(err)}` });
+      throw err;
+    }
   }
 
   /** Native mid-turn steering (turn/steer). Review/compact turns reject it. */
@@ -432,7 +443,21 @@ export class CodexAdapter implements EngineAdapter {
           }
           this.latestTotalUsage = totalNow;
         }
+        this.lastContextUsed = used;
         this.emit({ type: 'usage.update', used, size });
+        // 压缩完成后的首个 usage 更新 → 用 X→Y 回填压缩行标题（真实释放量）。
+        if (this.compactReportId && this.compactBeforeUsed != null && used < this.compactBeforeUsed) {
+          this.emit({
+            type: 'tool.upsert',
+            turnId: this.turnId,
+            toolCallId: this.compactReportId,
+            title: `已压缩上下文：${fmtTokensK(this.compactBeforeUsed)} → ${fmtTokensK(used)} tokens`,
+            toolKind: 'other',
+            status: 'completed',
+          });
+          this.compactReportId = undefined;
+          this.compactBeforeUsed = undefined;
+        }
         return;
       }
       case 'thread/goal/updated':
@@ -565,6 +590,22 @@ export class CodexAdapter implements EngineAdapter {
           status: mapItemStatus(String(item.status ?? 'inProgress')),
         });
         return;
+      case 'contextCompaction': {
+        // 压缩以前完全不可见（落入 default）— 现在渲染为一条工具行，
+        // 进行中→完成；完成后的真实释放量由下一次 tokenUsage 回填。
+        const status = mapItemStatus(String(item.status ?? 'inProgress'));
+        if (status !== 'completed') this.compactBeforeUsed = this.lastContextUsed || undefined;
+        this.emit({
+          type: 'tool.upsert',
+          turnId,
+          toolCallId: id,
+          title: status === 'completed' ? '已压缩上下文' : '正在压缩上下文…',
+          toolKind: 'other',
+          status,
+        });
+        if (status === 'completed') this.compactReportId = id;
+        return;
+      }
       default:
         return; // userMessage / agentMessage / reasoning — covered by deltas
     }
@@ -693,6 +734,10 @@ function diffBreakdown(a: UsageBreakdown, b: UsageBreakdown): UsageBreakdown {
     cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
     outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
   };
+}
+
+function fmtTokensK(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n);
 }
 
 function mapItemStatus(s: string): ToolCallStatus {

@@ -13,6 +13,7 @@ import { CronService } from './cron/CronService';
 import { AiServerHost } from './proxy/AiServerHost';
 import { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import { OpencodeEventHub } from './engine/opencode/OpencodeEventHub';
+import { TerminalService } from './terminal/TerminalService';
 import { registerIpc } from './ipc';
 import { sweepOrphanEngines } from './orphanSweep';
 import { TITLEBAR_HEIGHT, applyWindowTheme, chromeFor, resolveMode } from './windowTheme';
@@ -45,6 +46,7 @@ let sessions: SessionManager | undefined;
 let cron: CronService | undefined;
 let proxy: AiServerHost | undefined;
 let opencodeHost: OpencodeServerHost | undefined;
+let terminal: TerminalService | undefined;
 
 function createWindow(appSettings: AppSettings): void {
   const appearance: WindowAppearance = { palette: appSettings.themePalette, mode: resolveMode(appSettings.themeMode) };
@@ -80,6 +82,7 @@ function createWindow(appSettings: AppSettings): void {
   });
 
   sessions?.attach(mainWindow.webContents);
+  terminal?.attach(mainWindow.webContents);
 
   if (isDev) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL!);
@@ -159,9 +162,10 @@ function startApp(): void {
     proxy = new AiServerHost();
     opencodeHost = new OpencodeServerHost();
     const opencodeHub = new OpencodeEventHub(opencodeHost);
+    terminal = new TerminalService();
     sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub);
     cron = new CronService(sessions, settings);
-    registerIpc(sessions, settings, cron, opencodeHost);
+    registerIpc(sessions, settings, cron, opencodeHost, terminal);
     cron.start();
     createWindow(settings.get());
 
@@ -183,6 +187,7 @@ function startApp(): void {
     cron?.stop();
     proxy?.stop();
     opencodeHost?.stop();
+    terminal?.disposeAll();
     if (cleanedUp || !sessions) return;
     cleanedUp = true;
     if (isDev) {
