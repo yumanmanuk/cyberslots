@@ -62,6 +62,7 @@ export const IPC = {
   fsRead: 'fs:read',
   fsWrite: 'fs:write',
   fsGitStatus: 'fs:git-status',
+  fsImport: 'fs:import',
   openIn: 'sys:open-in',
   attachmentSaveTemp: 'attachment:save-temp',
   // 面板内嵌终端
@@ -126,6 +127,8 @@ export interface SessionChangeEntry {
   adds: number;
   dels: number;
   status: 'modified' | 'added' | 'deleted';
+  /** 当前有多少个会话在跟踪该文件（>1 = 多会话共编，回退会影响彼此）。 */
+  sessions: number;
 }
 
 /** 单个变更文件的编辑前/后内容（null = 不存在），供 before/after diff 视图。 */
@@ -191,6 +194,8 @@ export interface CyberSlotsApi {
   fsRead(path: string): Promise<FileContent>;
   fsWrite(path: string, text: string, root: string): Promise<void>;
   fsGitStatus(root: string): Promise<Record<string, string>>;
+  /** 将拖入的外部文件/文件夹拷贝进工作区根目录；返回成功个数。 */
+  fsImport(root: string, srcPaths: string[]): Promise<number>;
   openIn(target: OpenTarget, path: string): Promise<void>;
   /** 粘贴/拖拽的二进制写临时文件，返回绝对路径（图片附件）。 */
   attachmentSaveTemp(bytes: Uint8Array, ext: string): Promise<string>;

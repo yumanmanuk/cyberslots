@@ -52,6 +52,7 @@ const api: CyberSlotsApi = {
   fsRead: (path) => ipcRenderer.invoke(IPC.fsRead, path),
   fsWrite: (path, text, root) => ipcRenderer.invoke(IPC.fsWrite, path, text, root),
   fsGitStatus: (root) => ipcRenderer.invoke(IPC.fsGitStatus, root),
+  fsImport: (root, srcPaths) => ipcRenderer.invoke(IPC.fsImport, root, srcPaths),
   openIn: (target, path) => ipcRenderer.invoke(IPC.openIn, target, path),
   attachmentSaveTemp: (bytes, ext) => ipcRenderer.invoke(IPC.attachmentSaveTemp, bytes, ext),
   terminalCreate: (id, cwd) => ipcRenderer.invoke(IPC.terminalCreate, id, cwd),

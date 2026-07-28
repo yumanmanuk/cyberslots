@@ -195,14 +195,37 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
-    const next: Attachment[] = [];
+    const imgs: Attachment[] = [];
+    const refs: string[] = [];
     for (const file of Array.from(e.dataTransfer.files)) {
       const path = window.cyberslots.getPathForFile(file);
-      if (!path || attachments.some((a) => a.path === path)) continue;
-      const isImage = IMAGE_RE.test(path);
-      next.push({ path, name: file.name, isImage, preview: isImage ? URL.createObjectURL(file) : undefined });
+      if (!path) continue;
+      if (IMAGE_RE.test(path)) {
+        // 图片：缩略图附件（可预览）。
+        if (attachments.some((a) => a.path === path)) continue;
+        imgs.push({ path, name: file.name, isImage: true, preview: URL.createObjectURL(file) });
+      } else {
+        // 非图片：在光标处插入「文件名(绝对路径)」纯文本，
+        // 复制输入框内容时自然得到该格式，引擎也能据此路径读文件。
+        refs.push(`${file.name}(${path})`);
+      }
     }
-    if (next.length) setAttachments((prev) => [...prev, ...next]);
+    if (imgs.length) setAttachments((prev) => [...prev, ...imgs]);
+    if (refs.length) insertAtCursor(`${refs.join(' ')} `);
+  };
+
+  /** 在 textarea 当前光标处插入文本，插入后光标落在末尾。 */
+  const insertAtCursor = (snippet: string): void => {
+    const el = textareaRef.current;
+    const start = el?.selectionStart ?? text.length;
+    const end = el?.selectionEnd ?? text.length;
+    setText((prev) => prev.slice(0, start) + snippet + prev.slice(end));
+    requestAnimationFrame(() => {
+      if (!el) return;
+      const pos = start + snippet.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+    });
   };
 
   // 粘贴图片（Ctrl+V）：剪贴板里是原始图像数据（无文件路径），写临时
@@ -257,7 +280,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         <div
           onDrop={onDrop}
           onDragOver={(e) => e.preventDefault()}
-          className="rounded-2xl border border-line bg-bg-input shadow-sm transition focus-within:border-ink-faint"
+          className="rounded-2xl border border-line bg-bg-input shadow-sm"
         >
           {/* 图片附件 — 输入框内顶部缩略图（点击放大，悬停右上角 × 移除） */}
           {images.length > 0 && (

@@ -122,7 +122,7 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
 
       {/* mini composer：与主输入框同规格（圆角/字号/内距/按钮尺寸），pb-5 与底缘对齐 */}
       <div className="shrink-0 px-3 pb-5 pt-1">
-        <div className="rounded-2xl border border-line bg-bg-input shadow-sm transition focus-within:border-ink-faint">
+        <div className="rounded-2xl border border-line bg-bg-input shadow-sm">
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}

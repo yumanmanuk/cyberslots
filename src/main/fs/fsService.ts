@@ -6,8 +6,8 @@
 
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { join, relative, resolve, sep, extname } from 'node:path';
+import { cp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { basename, join, relative, resolve, sep, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { app, shell } from 'electron';
@@ -127,6 +127,26 @@ export async function openIn(target: OpenTarget, path: string): Promise<void> {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/** 将拖入的外部文件/文件夹拷贝到工作区根目录（文件树拖放导入）。
+ *  目标与源同路径则跳过（避免拷贝自身）；逐个尽力，单个失败不阻断其余。
+ *  @returns 成功导入的个数。 */
+export async function importPaths(root: string, srcPaths: string[]): Promise<number> {
+  const rootAbs = resolve(root);
+  let ok = 0;
+  for (const src of srcPaths) {
+    try {
+      const srcAbs = resolve(src);
+      const dest = join(rootAbs, basename(srcAbs));
+      if (resolve(dest) === srcAbs) continue; // 源已在目录里，无需拷贝
+      await cp(srcAbs, dest, { recursive: true, force: true, errorOnExist: false });
+      ok++;
+    } catch (err) {
+      console.error('[fs] import failed:', src, err);
+    }
+  }
+  return ok;
+}
 
 async function spawnDetached(argv: string[], cwd?: string): Promise<void> {
   const [cmd, ...args] = argv;

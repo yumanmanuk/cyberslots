@@ -15,7 +15,7 @@ import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import type { TerminalService } from './terminal/TerminalService';
 import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
-import { gitStatus, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
+import { gitStatus, importPaths, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
 
 export function registerIpc(
   sessions: SessionManager,
@@ -114,6 +114,7 @@ export function registerIpc(
     writeFileChecked(path, text, root),
   );
   ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
+  ipcMain.handle(IPC.fsImport, (_e, root: string, srcPaths: string[]) => importPaths(root, srcPaths));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
   ipcMain.handle(IPC.attachmentSaveTemp, (_e, bytes: Uint8Array, ext: string) => saveTempAttachment(bytes, ext));
 
