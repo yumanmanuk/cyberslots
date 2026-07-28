@@ -17,6 +17,7 @@ import type {
   UnifiedMessage,
   WindowAppearance,
 } from './types';
+import type { RaceAdoptStrategy, RaceCreateRequest, RaceEventEnvelope, RaceGroup } from './race';
 
 export const IPC = {
   // renderer → main (invoke/handle)
@@ -70,9 +71,18 @@ export const IPC = {
   terminalInput: 'terminal:input',
   terminalResize: 'terminal:resize',
   terminalDispose: 'terminal:dispose',
+  // 大模型赛马
+  raceCreate: 'race:create',
+  raceList: 'race:list',
+  raceGet: 'race:get',
+  raceAdopt: 'race:adopt',
+  raceRevise: 'race:revise',
+  raceFinalize: 'race:finalize',
+  raceCancel: 'race:cancel',
   // main → renderer (send/on)
   engineEvent: 'engine:event',
   terminalData: 'terminal:data',
+  raceEvent: 'race:event',
 } as const;
 
 export interface SessionCreateRequest {
@@ -210,6 +220,20 @@ export interface CyberSlotsApi {
   /** 订阅 shell 输出流（main → renderer）。 */
   onTerminalData(listener: (payload: { id: string; data: string }) => void): () => void;
   onEngineEvent(listener: (e: EngineEventEnvelope) => void): () => void;
+  // --- 大模型赛马 ---
+  /** 发起一场赛马（config → 立即开跑 planning）。 */
+  raceCreate(req: RaceCreateRequest): Promise<RaceGroup>;
+  raceList(): Promise<RaceGroup[]>;
+  raceGet(raceId: string): Promise<RaceGroup | null>;
+  /** 裁判阶段第一步：用户选定采纳策略（4选1 + 可选评语）→ 裁判出最终方案。 */
+  raceAdopt(raceId: string, strategy: RaceAdoptStrategy, comment?: string): Promise<void>;
+  /** 裁判融合方案的批注修订循环。 */
+  raceRevise(raceId: string, annotation: string): Promise<void>;
+  /** 定稿裁判方案 → 交给 Builder 执行。 */
+  raceFinalize(raceId: string): Promise<void>;
+  raceCancel(raceId: string): Promise<void>;
+  /** 订阅赛马阶段/角色/融合方案/审计等编排事件（main → renderer）。 */
+  onRaceEvent(listener: (e: RaceEventEnvelope) => void): () => void;
   /** Absolute path of a dropped File (drag-and-drop attachments). */
   getPathForFile(file: File): string;
 }

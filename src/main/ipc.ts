@@ -8,11 +8,13 @@ import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode, UnifiedMessage, WindowAppearance } from '@shared/types';
+import type { RaceAdoptStrategy, RaceCreateRequest } from '@shared/race';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
 import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import type { TerminalService } from './terminal/TerminalService';
+import type { RaceManager } from './race/RaceManager';
 import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
 import { gitStatus, importPaths, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
@@ -23,6 +25,7 @@ export function registerIpc(
   cron: CronService,
   opencodeHost: OpencodeServerHost,
   terminal: TerminalService,
+  race: RaceManager,
 ): void {
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
@@ -123,4 +126,15 @@ export function registerIpc(
   ipcMain.handle(IPC.terminalInput, (_e, id: string, data: string) => terminal.input(id, data));
   ipcMain.handle(IPC.terminalResize, (_e, id: string, cols: number, rows: number) => terminal.resize(id, cols, rows));
   ipcMain.handle(IPC.terminalDispose, (_e, id: string) => terminal.dispose(id));
+
+  // 大模型赛马：编排层公开的动作（事件走 IPC.raceEvent 主动推送）。
+  ipcMain.handle(IPC.raceCreate, (_e, req: RaceCreateRequest) => race.create(req));
+  ipcMain.handle(IPC.raceList, () => race.list());
+  ipcMain.handle(IPC.raceGet, (_e, raceId: string) => race.get(raceId));
+  ipcMain.handle(IPC.raceAdopt, (_e, raceId: string, strategy: RaceAdoptStrategy, comment?: string) =>
+    race.adopt(raceId, strategy, comment),
+  );
+  ipcMain.handle(IPC.raceRevise, (_e, raceId: string, annotation: string) => race.revise(raceId, annotation));
+  ipcMain.handle(IPC.raceFinalize, (_e, raceId: string) => race.finalize(raceId));
+  ipcMain.handle(IPC.raceCancel, (_e, raceId: string) => race.cancel(raceId));
 }

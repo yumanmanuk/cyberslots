@@ -8,6 +8,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { CyberSlotsApi } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineEventEnvelope } from '@shared/types';
+import type { RaceEventEnvelope } from '@shared/race';
 
 const api: CyberSlotsApi = {
   sessionCreate: (req) => ipcRenderer.invoke(IPC.sessionCreate, req),
@@ -69,6 +70,18 @@ const api: CyberSlotsApi = {
       listener(envelope);
     ipcRenderer.on(IPC.engineEvent, wrapped);
     return () => ipcRenderer.removeListener(IPC.engineEvent, wrapped);
+  },
+  raceCreate: (req) => ipcRenderer.invoke(IPC.raceCreate, req),
+  raceList: () => ipcRenderer.invoke(IPC.raceList),
+  raceGet: (raceId) => ipcRenderer.invoke(IPC.raceGet, raceId),
+  raceAdopt: (raceId, strategy, comment) => ipcRenderer.invoke(IPC.raceAdopt, raceId, strategy, comment),
+  raceRevise: (raceId, annotation) => ipcRenderer.invoke(IPC.raceRevise, raceId, annotation),
+  raceFinalize: (raceId) => ipcRenderer.invoke(IPC.raceFinalize, raceId),
+  raceCancel: (raceId) => ipcRenderer.invoke(IPC.raceCancel, raceId),
+  onRaceEvent: (listener) => {
+    const wrapped = (_e: Electron.IpcRendererEvent, envelope: RaceEventEnvelope): void => listener(envelope);
+    ipcRenderer.on(IPC.raceEvent, wrapped);
+    return () => ipcRenderer.removeListener(IPC.raceEvent, wrapped);
   },
   /** Absolute path of a dropped File (drag-and-drop attachments). */
   getPathForFile: (file) => webUtils.getPathForFile(file),
