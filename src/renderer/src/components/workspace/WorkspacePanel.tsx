@@ -186,6 +186,13 @@ function ChangesList({
     const timer = setTimeout(() => setConfirmAll(false), 3000);
     return () => clearTimeout(timer);
   }, [confirmAll]);
+  // 多会话共编文件的单文件回退需二次确认（会影响其它会话的改动）。
+  const [confirmPath, setConfirmPath] = useState<string | null>(null);
+  useEffect(() => {
+    if (!confirmPath) return;
+    const timer = setTimeout(() => setConfirmPath(null), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmPath]);
 
   if (changes.length === 0) {
     return <div className="px-3 py-8 text-center text-ui text-ink-faint">本会话还没有文件变更</div>;
@@ -225,6 +232,14 @@ function ChangesList({
             <button onClick={() => onOpen(c.path)} title={c.path} className="flex min-w-0 flex-1 items-center gap-2 text-left">
               <span className={`w-3 shrink-0 text-center font-mono text-[10px] ${STATUS_BADGE[c.status].cls}`}>{STATUS_BADGE[c.status].label}</span>
               <span className="min-w-0 flex-1 truncate">{c.name}</span>
+              {c.sessions > 1 && (
+                <span
+                  title={`${c.sessions} 个会话都编辑了此文件；回退会一并影响它们`}
+                  className="shrink-0 rounded bg-warn/15 px-1 text-[10px] text-warn"
+                >
+                  {c.sessions} 会话
+                </span>
+              )}
               <span className="font-mono text-[11px] text-ok">+{c.adds}</span>
               <span className="font-mono text-[11px] text-err">-{c.dels}</span>
             </button>
@@ -236,9 +251,17 @@ function ChangesList({
               <Check size={13} />
             </button>
             <button
-              title="回退此文件到编辑前"
-              onClick={() => revert(c.path)}
-              className="shrink-0 rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-err group-hover:opacity-100"
+              title={c.sessions > 1 ? '此文件被多个会话编辑，回退将影响所有会话；再点一次确认' : '回退此文件到编辑前'}
+              onClick={() => {
+                if (c.sessions > 1 && confirmPath !== c.path) {
+                  setConfirmPath(c.path);
+                  return;
+                }
+                setConfirmPath(null);
+                revert(c.path);
+              }}
+              className={`shrink-0 rounded-md p-1 transition hover:bg-bg-active hover:text-err ${confirmPath === c.path ? 'text-err opacity-100' : 'text-ink-faint opacity-0 group-hover:opacity-100'
+                }`}
             >
               <RotateCcw size={13} />
             </button>
