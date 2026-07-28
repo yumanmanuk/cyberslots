@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { SettingsStore } from './config/settings';
 import { SessionManager } from './engine/SessionManager';
 import { CronService } from './cron/CronService';
+import { RaceManager } from './race/RaceManager';
 import { AiServerHost } from './proxy/AiServerHost';
 import { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import { OpencodeEventHub } from './engine/opencode/OpencodeEventHub';
@@ -47,6 +48,7 @@ let cron: CronService | undefined;
 let proxy: AiServerHost | undefined;
 let opencodeHost: OpencodeServerHost | undefined;
 let terminal: TerminalService | undefined;
+let race: RaceManager | undefined;
 
 function createWindow(appSettings: AppSettings): void {
   const appearance: WindowAppearance = { palette: appSettings.themePalette, mode: resolveMode(appSettings.themeMode) };
@@ -83,6 +85,7 @@ function createWindow(appSettings: AppSettings): void {
 
   sessions?.attach(mainWindow.webContents);
   terminal?.attach(mainWindow.webContents);
+  race?.attach(mainWindow.webContents);
 
   if (isDev) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL!);
@@ -165,7 +168,8 @@ function startApp(): void {
     terminal = new TerminalService();
     sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub);
     cron = new CronService(sessions, settings);
-    registerIpc(sessions, settings, cron, opencodeHost, terminal);
+    race = new RaceManager(sessions);
+    registerIpc(sessions, settings, cron, opencodeHost, terminal, race);
     cron.start();
     createWindow(settings.get());
 

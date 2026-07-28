@@ -45,6 +45,12 @@ export class SessionManager {
   private target: WebContents | undefined;
   /** 逐会话文件编辑台账 + 回退能力（变更面板接受/拒绝）。 */
   private readonly changes = new ChangeTracker();
+  /** 内部事件订阅（赛马编排器观察 turn.ended 等，与 renderer 转发并行）。 */
+  private readonly localListeners = new Map<string, Set<(event: EngineEvent) => void>>();
+  /** 主进程侧「当前回合助手正文」缓冲（供赛马角色产物交接；renderer
+   *  持久化有防抖延迟，主进程不能依赖磁盘文件的即时性）。 */
+  private readonly turnText = new Map<string, string>();
+  private readonly turnOpen = new Set<string>();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -235,18 +241,21 @@ export class SessionManager {
   }
 
   /** 本会话 AI 编辑过的文件清单（含 +/- 与变更类型）。 */
-  changesList(sessionId: string): SessionChangeEntry[] {
-    return this.changes.list(sessionId);
+  changesList(sessionId: string): Promise<SessionChangeEntry[]> {
+    const s = this.sessions.get(sessionId);
+    return s ? this.changes.list(sessionId, s.meta.cwd) : Promise.resolve([]);
   }
 
   /** 单文件编辑前/后内容（diff 视图）。 */
-  changesDiff(sessionId: string, path: string): SessionChangeDiff {
-    return this.changes.diff(sessionId, path);
+  changesDiff(sessionId: string, path: string): Promise<SessionChangeDiff> {
+    const s = this.sessions.get(sessionId);
+    return s ? this.changes.diff(sessionId, s.meta.cwd, path) : Promise.resolve({ path, before: null, after: null });
   }
 
   /** 回退到编辑前基线（新建则删）；path 省略 = 全部。 */
-  changesRevert(sessionId: string, path?: string): void {
-    this.changes.revert(sessionId, path);
+  changesRevert(sessionId: string, path?: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    return s ? this.changes.revert(sessionId, s.meta.cwd, path) : Promise.resolve();
   }
 
   /** 接受（保留改动、停止跟踪）；path 省略 = 全部。 */
@@ -362,6 +371,9 @@ export class SessionManager {
     await this.close(sessionId);
     this.sessions.delete(sessionId);
     this.changes.clear(sessionId);
+    this.localListeners.delete(sessionId);
+    this.turnText.delete(sessionId);
+    this.turnOpen.delete(sessionId);
     this.persistMetas();
     try {
       rmSync(this.messagesFile(sessionId), { force: true });
@@ -507,13 +519,13 @@ export class SessionManager {
       } else if (event.type === 'turn.ended') {
         s.meta.unread = true;
         this.persistMetas();
-        // shell 命令产生的文件改动没有 fileChange 事件 → 回合结束 git 扫尾登记。
+        // shell 命令产生的文件改动没有 fileChange 事件 → 回合结束快照 diff 扫尾登记。
         void this.changes.scanTurnEnd(s.meta.id, s.meta.cwd);
       } else if (event.type === 'turn.started') {
-        // AI 尚未动手：提前锁定未提交文件的基线（保留用户手改）。
-        void this.changes.snapshotDirtyFiles(s.meta.id, s.meta.cwd);
+        // AI 尚未动手：首个回合拍基线影子快照（含用户未提交手改）。
+        void this.changes.onTurnStart(s.meta.id, s.meta.cwd);
       } else if (event.type === 'tool.upsert') {
-        // 文件编辑事件 → 首见时捕获基线（供变更面板回退）。
+        // 文件编辑事件 → 标记本会话编辑过该文件（供变更面板过滤）。
         const kind = event.toolKind ?? '';
         const editish =
           ['edit', 'write', 'delete', 'move'].includes(kind) ||
@@ -521,11 +533,13 @@ export class SessionManager {
         if (editish) {
           const paths = new Set<string>(event.locations ?? []);
           if (event.content?.diff?.path) paths.add(event.content.diff.path);
-          for (const p of paths) void this.changes.noteEdit(s.meta.id, p, s.meta.cwd);
+          for (const p of paths) this.changes.noteEdit(s.meta.id, p, s.meta.cwd);
         }
       }
       this.maybeNotify(s.meta, event);
     }
+    this.trackTurnText(sessionId, event);
+    this.emitLocal(sessionId, event);
     this.forward(sessionId, event);
   }
 
@@ -555,6 +569,64 @@ export class SessionManager {
     if (this.target && !this.target.isDestroyed()) {
       this.target.send(IPC.engineEvent, envelope);
     }
+  }
+
+  /** 内部订阅某会话的引擎事件（返回取消函数）；赛马编排器据此观察
+   *  turn.ended 推进阶段，与 renderer 事件转发互不影响。 */
+  subscribe(sessionId: string, cb: (event: EngineEvent) => void): () => void {
+    let set = this.localListeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.localListeners.set(sessionId, set);
+    }
+    set.add(cb);
+    return () => {
+      const cur = this.localListeners.get(sessionId);
+      if (!cur) return;
+      cur.delete(cb);
+      if (cur.size === 0) this.localListeners.delete(sessionId);
+    };
+  }
+
+  private emitLocal(sessionId: string, event: EngineEvent): void {
+    const set = this.localListeners.get(sessionId);
+    if (!set) return;
+    for (const cb of [...set]) {
+      try {
+        cb(event);
+      } catch {
+        /* 单个监听器异常隔离，不影响其它订阅与 renderer 转发 */
+      }
+    }
+  }
+
+  private trackTurnText(sessionId: string, event: EngineEvent): void {
+    if (event.type === 'turn.started') {
+      this.turnText.set(sessionId, '');
+      this.turnOpen.add(sessionId);
+    } else if (event.type === 'text.delta') {
+      if (!this.turnOpen.has(sessionId)) {
+        this.turnText.set(sessionId, '');
+        this.turnOpen.add(sessionId);
+      }
+      this.turnText.set(sessionId, (this.turnText.get(sessionId) ?? '') + event.text);
+    } else if (event.type === 'turn.ended') {
+      this.turnOpen.delete(sessionId);
+    }
+  }
+
+  /** 最新一个回合的助手正文（赛马角色间产物交接用）。 */
+  transcript(sessionId: string): string {
+    return (this.turnText.get(sessionId) ?? '').trim();
+  }
+
+  /** Builder 改动的文本摘要（供审计角色对照 diff）。 */
+  async changesDigest(sessionId: string): Promise<string> {
+    const list = await this.changesList(sessionId);
+    if (!list.length) return '（无文件改动）';
+    return list
+      .map((c) => `${c.status === 'added' ? 'A' : c.status === 'deleted' ? 'D' : 'M'} ${c.path} (+${c.adds}/-${c.dels})`)
+      .join('\n');
   }
 
   private require(sessionId: string): LiveSession {
