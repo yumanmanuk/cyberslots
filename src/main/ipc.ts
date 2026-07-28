@@ -15,7 +15,7 @@ import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import type { TerminalService } from './terminal/TerminalService';
 import { readEngineConfigs } from './config/engineConfigs';
 import { applyWindowTheme } from './windowTheme';
-import { gitStatus, listTree, openIn, readFilePreview, writeFileChecked } from './fs/fsService';
+import { gitStatus, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
 
 export function registerIpc(
   sessions: SessionManager,
@@ -115,6 +115,7 @@ export function registerIpc(
   );
   ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
+  ipcMain.handle(IPC.attachmentSaveTemp, (_e, bytes: Uint8Array, ext: string) => saveTempAttachment(bytes, ext));
 
   // 面板内嵌终端：每会话一个管道式 shell（cwd = 会话目录）。
   ipcMain.handle(IPC.terminalCreate, (_e, id: string, cwd: string) => terminal.create(id, cwd));

@@ -5,16 +5,29 @@
  */
 
 import { execFile } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep, extname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { shell } from 'electron';
+import { app, shell } from 'electron';
 
 import type { FileContent, FsNode, OpenTarget } from '@shared/ipc';
 
 const execFileAsync = promisify(execFile);
 const PREVIEW_CAP = 512 * 1024; // 512 KB
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store', '.hg', '.svn']);
+
+/** 把剪贴板/拖拽的二进制（如粘贴的图片）写入一个临时文件，返回绝对
+ *  路径（作为附件传给引擎）。落在 userData/pasted 下，app 退出不主动清。 */
+export function saveTempAttachment(bytes: Uint8Array, ext: string): string {
+  const dir = join(app.getPath('userData'), 'pasted');
+  mkdirSync(dir, { recursive: true });
+  const safeExt = /^[a-z0-9]{1,8}$/i.test(ext) ? ext.toLowerCase() : 'png';
+  const file = join(dir, `${randomUUID()}.${safeExt}`);
+  writeFileSync(file, bytes);
+  return file;
+}
 
 /** List one directory level, dirs first then files, alpha-sorted. */
 export async function listTree(root: string, sub = ''): Promise<FsNode[]> {

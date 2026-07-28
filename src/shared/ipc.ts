@@ -63,6 +63,7 @@ export const IPC = {
   fsWrite: 'fs:write',
   fsGitStatus: 'fs:git-status',
   openIn: 'sys:open-in',
+  attachmentSaveTemp: 'attachment:save-temp',
   // 面板内嵌终端
   terminalCreate: 'terminal:create',
   terminalInput: 'terminal:input',
@@ -191,6 +192,8 @@ export interface CyberSlotsApi {
   fsWrite(path: string, text: string, root: string): Promise<void>;
   fsGitStatus(root: string): Promise<Record<string, string>>;
   openIn(target: OpenTarget, path: string): Promise<void>;
+  /** 粘贴/拖拽的二进制写临时文件，返回绝对路径（图片附件）。 */
+  attachmentSaveTemp(bytes: Uint8Array, ext: string): Promise<string>;
   /** 面板内嵌终端：确保会话 shell 存在（cwd = 会话目录）。 */
   terminalCreate(id: string, cwd: string): Promise<void>;
   /** renderer 键入 → shell stdin。 */

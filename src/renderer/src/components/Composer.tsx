@@ -199,6 +199,27 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     if (next.length) setAttachments((prev) => [...prev, ...next]);
   };
 
+  // 粘贴图片（Ctrl+V）：剪贴板里是原始图像数据（无文件路径），写临时
+  // 文件拿到路径再当附件加入；纯文本粘贴不拦截，走 textarea 默认行为。
+  const onPaste = (e: React.ClipboardEvent): void => {
+    const imageItems = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith('image/'));
+    if (imageItems.length === 0) return;
+    e.preventDefault();
+    for (const item of imageItems) {
+      const file = item.getAsFile();
+      if (!file) continue;
+      void file.arrayBuffer().then(async (buf) => {
+        const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        const path = await window.cyberslots.attachmentSaveTemp(new Uint8Array(buf), ext);
+        setAttachments((prev) =>
+          prev.some((a) => a.path === path)
+            ? prev
+            : [...prev, { path, name: `粘贴图片.${ext}`, isImage: true }],
+        );
+      });
+    }
+  };
+
   const removeAttachment = (path: string): void => setAttachments((prev) => prev.filter((a) => a.path !== path));
 
   const images = attachments.filter((a) => a.isImage);
@@ -241,6 +262,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
             rows={Math.min(5, Math.max(2, text.split('\n').length))}
             placeholder={goalMode ? t('goalPlaceholder') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
             className="no-scrollbar w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
