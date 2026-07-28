@@ -34,6 +34,7 @@ import { useChatStore, type QueuedMessage } from '../store/chatStore';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
 import OpencodeModelPicker from './OpencodeModelPicker';
+import ChipInput, { type ChipInputHandle } from './ChipInput';
 import PlanWidget from './PlanWidget';
 
 const PERM_LABEL_KEYS: Record<string, MsgKey> = {
@@ -81,7 +82,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const [goalMode, setGoalMode] = useState(false);
   // 点击缩略图放大预览的灯箱（图片 object URL；null = 关闭）。
   const [lightbox, setLightbox] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chipRef = useRef<ChipInputHandle>(null);
   // 控件条响应式收缩（codex 风）：右侧面板挤压到窄宽时，按优先级依次退避
   // —— level 越大越窄。引擎图标 / 放大输入框 / 发送按钮永不退避。
   //   level>=1 权限变图标 → >=2 隐思考深度 → >=3 隐模型名 → >=4 隐权限图标
@@ -121,7 +122,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       setText('');
       setGoalMode(false);
       void useChatStore.getState().setGoal(value);
-      textareaRef.current?.focus();
+      chipRef.current?.focus();
       return;
     }
     // 上下文 100%：先弹确认弹窗要求压缩，避免静默丢失早期内容。
@@ -139,7 +140,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     } else {
       void sendPrompt(value, paths);
     }
-    textareaRef.current?.focus();
+    chipRef.current?.focus();
   };
 
   /** 🎯 Goal (codex-only) — 目标是「模式」而非即时发送：点击只切换目标
@@ -149,7 +150,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const toggleGoalMode = (): void => {
     if (isPlan) void useChatStore.getState().setMode('default'); // 互斥：退出 Plan
     setGoalMode((v) => !v);
-    textareaRef.current?.focus();
+    chipRef.current?.focus();
   };
 
   const cycleMode = (): void => {
@@ -176,7 +177,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   // 切换会话时重置目标编辑模式（Composer 不随会话 remount）。
   useEffect(() => setGoalMode(false), [sessionId]);
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
     // Shift+Tab 由上面的 window 监听统一处理（避免双重触发）。
     if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
     // 发送键可配：Enter 发送（Shift+Enter 换行） / Ctrl+Enter 发送（Enter 换行）
@@ -196,7 +197,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     const imgs: Attachment[] = [];
-    const refs: string[] = [];
+    const refs: Array<{ name: string; path: string }> = [];
     for (const file of Array.from(e.dataTransfer.files)) {
       const path = window.cyberslots.getPathForFile(file);
       if (!path) continue;
@@ -205,35 +206,24 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         if (attachments.some((a) => a.path === path)) continue;
         imgs.push({ path, name: file.name, isImage: true, preview: URL.createObjectURL(file) });
       } else {
-        // 非图片：在光标处插入「文件名(绝对路径)」纯文本，
-        // 复制输入框内容时自然得到该格式，引擎也能据此路径读文件。
-        refs.push(`${file.name}(${path})`);
+        // 非图片：在光标处插入文件引用 chip。
+        refs.push({ name: file.name, path });
       }
     }
     if (imgs.length) setAttachments((prev) => [...prev, ...imgs]);
-    if (refs.length) insertAtCursor(`${refs.join(' ')} `);
-  };
-
-  /** 在 textarea 当前光标处插入文本，插入后光标落在末尾。 */
-  const insertAtCursor = (snippet: string): void => {
-    const el = textareaRef.current;
-    const start = el?.selectionStart ?? text.length;
-    const end = el?.selectionEnd ?? text.length;
-    setText((prev) => prev.slice(0, start) + snippet + prev.slice(end));
-    requestAnimationFrame(() => {
-      if (!el) return;
-      const pos = start + snippet.length;
-      el.focus();
-      el.setSelectionRange(pos, pos);
-    });
+    if (refs.length) {
+      // 非图片：逐个在光标处插入文件引用 chip（显示彩色胶囊，
+      // 复制/发送时序列化为 `名(路径)` 纯文本）。
+      for (const r of refs) chipRef.current?.insertFileChip(r.name, r.path);
+    }
   };
 
   // 粘贴图片（Ctrl+V）：剪贴板里是原始图像数据（无文件路径），写临时
-  // 文件拿到路径再当附件加入；预览直接用 File 生成 object URL（无需读盘）。
-  const onPaste = (e: React.ClipboardEvent): void => {
-    const imageItems = Array.from(e.clipboardData.items).filter((it) => it.type.startsWith('image/'));
-    if (imageItems.length === 0) return;
-    e.preventDefault();
+  // 文件拿到路径再当附件加入；预览直接用 File 生成 object URL。
+  // 返回 true = 含图片已处理（ChipInput 据此阻止默认粘贴）。
+  const handleImagePaste = (items: DataTransferItem[]): boolean => {
+    const imageItems = items.filter((it) => it.type.startsWith('image/'));
+    if (imageItems.length === 0) return false;
     for (const item of imageItems) {
       const file = item.getAsFile();
       if (!file) continue;
@@ -248,6 +238,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         );
       });
     }
+    return true;
   };
 
   const removeAttachment = (path: string): void =>
@@ -269,17 +260,20 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             // 编辑 = 回填目标到输入框并进入目标模式，改完点发送即 UpdateGoal
             setText(goalText);
             setGoalMode(true);
-            textareaRef.current?.focus();
+            chipRef.current?.focus();
           }}
           onEditItem={(item) => {
             setText(item.text);
             useChatStore.getState().removeQueued(sessionId, item.id);
-            textareaRef.current?.focus();
+            chipRef.current?.focus();
           }}
         />
         <div
           onDrop={onDrop}
-          onDragOver={(e) => e.preventDefault()}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+          }}
           className="rounded-2xl border border-line bg-bg-input shadow-sm"
         >
           {/* 图片附件 — 输入框内顶部缩略图（点击放大，悬停右上角 × 移除） */}
@@ -296,15 +290,14 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           )}
 
-          <textarea
-            ref={textareaRef}
+          <ChipInput
+            ref={chipRef}
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={setText}
             onKeyDown={onKeyDown}
-            onPaste={onPaste}
-            rows={Math.min(5, Math.max(2, text.split('\n').length))}
+            onImagePaste={handleImagePaste}
             placeholder={goalMode ? t('goalPlaceholder') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
-            className="no-scrollbar w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
+            className="no-scrollbar max-h-32 min-h-[3.25rem] overflow-y-auto px-4 pb-1 pt-3 text-body"
           />
 
           {/* 非图片文件附件 — 中性色小块 */}

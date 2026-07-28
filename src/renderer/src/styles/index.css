@@ -181,6 +181,40 @@ body {
   display: none;
 }
 
+/* ChipInput（contenteditable 输入框）的文件引用胶囊 — 行内显示，
+   复制时序列化为“名(路径)”纯文本（见 ChipInput.tsx onCopy）。 */
+.oc-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: baseline;
+  margin: 0 1px;
+  padding: 1px 7px 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  user-select: none;
+  cursor: default;
+}
+.oc-file-chip::before {
+  content: '</>';
+  font-family: Iosevka, 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* contenteditable 空态占位符 */
+.oc-chip-input[data-empty='true']::before {
+  content: attr(data-placeholder);
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+
 /* Markdown body (chat stream) */
 .md-body {
   @apply text-body;

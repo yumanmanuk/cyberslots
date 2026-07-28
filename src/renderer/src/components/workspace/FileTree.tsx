@@ -110,8 +110,14 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
   return (
     <div
       className={`flex h-full flex-col ${dragOver ? 'outline outline-2 -outline-offset-2 outline-accent/60' : ''}`}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
       onDragOver={(e) => {
         e.preventDefault();
+        // 显式声明拷贝意图 — Windows Electron 下不设可能不触发 drop。
+        e.dataTransfer.dropEffect = 'copy';
         if (!dragOver) setDragOver(true);
       }}
       onDragLeave={(e) => {
