@@ -146,7 +146,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 三态主题)
 - codex：原生 `thread/fork`
 - 客户端复制消息文件，分支立即可见完整历史；打开即预热分支引擎（sessionWarmUp）
 - 右侧面板宽度可拖拽调节（左缘把手，300–720px，localStorage 记忆）+ 打开滑入动画（panel-in）
-- mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兜底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left）
+- mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兜底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left，codex/opencode 会话显示）；输入框行高与主输入框一致（2 行起 5 行封顶、无滚动条）
 
 ### 4.9 定时任务（Cron）
 - 左下角入口 → 管理模态：列表（启停开关 / cron 表达式徽章 / 立即运行 / 编辑 / 删除）+ 新建表单
