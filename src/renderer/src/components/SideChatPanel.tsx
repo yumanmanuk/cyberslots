@@ -127,7 +127,7 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
-            rows={Math.min(12, Math.max(3, text.split('\n').length))}
+            rows={Math.min(5, Math.max(2, text.split('\n').length))}
             placeholder={t('sidechatPlaceholder')}
             className="no-scrollbar w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
           />
