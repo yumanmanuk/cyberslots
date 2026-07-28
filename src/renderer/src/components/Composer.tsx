@@ -78,10 +78,12 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const [ctxFullOpen, setCtxFullOpen] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // 控件条响应式收缩（codex 风）：右侧面板挤压到窄宽时，长文案控件
-  // 降级成图标/截断，避免 CJK 文本竖排折行。
+  // 控件条响应式收缩（codex 风）：右侧面板挤压到窄宽时，按优先级依次退避
+  // —— level 越大越窄。引擎图标 / 放大输入框 / 发送按钮永不退避。
+  //   level>=1 权限变图标 → >=2 隐思考深度 → >=3 隐模型名 → >=4 隐权限图标
+  //   → >=5 隐 Agent/Plan。
   const cardRef = useRef<HTMLDivElement>(null);
-  const [compact, setCompact] = useState(false);
+  const [level, setLevel] = useState(0);
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const goalActive = useChatStore((s) => !!s.goals[sessionId]);
@@ -97,7 +99,10 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   useEffect(() => {
     const el = cardRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setCompact(el.clientWidth < 600));
+    // 断点从窄到宽依次判定，取第一个命中的 level（阈值 = 控件条内容宽度经验值）。
+    const compute = (w: number): number =>
+      w < 400 ? 5 : w < 470 ? 4 : w < 560 ? 3 : w < 650 ? 2 : w < 730 ? 1 : 0;
+    const ro = new ResizeObserver(() => setLevel(compute(el.clientWidth)));
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -236,9 +241,9 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
-            rows={Math.min(8, Math.max(1, text.split('\n').length))}
+            rows={Math.min(12, Math.max(3, text.split('\n').length))}
             placeholder={goalMode ? t('goalPlaceholder') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
-            className="w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
+            className="no-scrollbar w-full resize-none bg-transparent px-4 pb-1 pt-3 text-body outline-none placeholder:text-ink-faint"
           />
 
           {/* 文件附件 — 输入框内高亮小块 */}
@@ -252,8 +257,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
           <div className="flex items-center gap-1.5 px-3 pb-2.5">
             <EngineBadge sessionId={sessionId} />
-            <ModeSwitch isPlan={isPlan} onCycle={cycleMode} compact={compact} />
-            {!isPlan && <PermissionPicker sessionId={sessionId} compact={compact} />}
+            {level < 5 && <ModeSwitch isPlan={isPlan} onCycle={cycleMode} compact={level >= 1} />}
+            {!isPlan && level < 4 && <PermissionPicker sessionId={sessionId} compact={level >= 1} />}
             <SwarmToggle />
             {meta?.engine === 'codex' && (
               <button
@@ -268,12 +273,13 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
             <div className="flex-1" />
 
-            {meta?.engine === 'opencode' ? (
-              <OpencodeModelPicker sessionId={sessionId} />
-            ) : (
-              <ModelPicker sessionId={sessionId} />
-            )}
-            {(meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} />}
+            {level < 3 &&
+              (meta?.engine === 'opencode' ? (
+                <OpencodeModelPicker sessionId={sessionId} />
+              ) : (
+                <ModelPicker sessionId={sessionId} />
+              ))}
+            {level < 2 && (meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} />}
             <ContextRing sessionId={sessionId} />
             <button
               title={t('expandInput')}
@@ -879,6 +885,10 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
   const t = useT();
   const usage = useChatStore((s) => s.ui[sessionId]?.usage);
   const compactSession = useChatStore((s) => s.compactSession);
+  const busy = useChatStore((s) => {
+    const st = s.sessions.find((m) => m.id === sessionId)?.status;
+    return st === 'running' || st === 'awaiting';
+  });
   const [open, setOpen] = useState(false);
   useEscClose(open, () => setOpen(false));
   if (!usage || usage.size <= 0) return null;
@@ -941,16 +951,25 @@ function ContextRing({ sessionId }: { sessionId: string }): JSX.Element | null {
                 <span className="font-mono tabular-nums text-ink">{fmtTokens(usage.size)}</span>
               </div>
             </div>
-            <div className="mb-3 rounded-lg bg-bg-panel px-3 py-2 text-[11px] leading-5 text-ink-soft">{t('compactConfirm')}</div>
-            <button
-              onClick={() => {
-                setOpen(false);
-                void compactSession();
-              }}
-              className="w-full rounded-lg bg-accent py-1.5 text-ui font-medium text-white transition hover:opacity-90"
-            >
-              {t('compactStart')}
-            </button>
+            {busy ? (
+              // 任务进行中不能压缩（会与正跑的回合争引擎回合）— 给提示。
+              <div className="rounded-lg bg-bg-panel px-3 py-2 text-[11px] leading-5 text-warn">
+                {t('compactBusy')}
+              </div>
+            ) : (
+              <>
+                <div className="mb-3 rounded-lg bg-bg-panel px-3 py-2 text-[11px] leading-5 text-ink-soft">{t('compactConfirm')}</div>
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    void compactSession();
+                  }}
+                  className="w-full rounded-lg bg-accent py-1.5 text-ui font-medium text-white transition hover:opacity-90"
+                >
+                  {t('compactStart')}
+                </button>
+              </>
+            )}
           </div>
         </>
       )}

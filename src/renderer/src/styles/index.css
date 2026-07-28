@@ -176,6 +176,11 @@ body {
   background: var(--line);
 }
 
+/* 无滚动条 — 输入框用：内容超高时靠自动扩行承载，永不显滚动条。 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* Markdown body (chat stream) */
 .md-body {
   @apply text-body;
