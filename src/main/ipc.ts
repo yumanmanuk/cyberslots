@@ -3,12 +3,12 @@
  * / SettingsStore. No business logic lives here.
  */
 
-import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 
-import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest } from '@shared/ipc';
+import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest, SlashListRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, CronTask, EngineId, GoalControlAction, PermissionMode, UnifiedMessage, WindowAppearance } from '@shared/types';
-import type { RaceAdoptStrategy, RaceCreateRequest } from '@shared/race';
+import type { AppSettings, CronTask, EngineId, GoalControlAction, OmpCatalog, PermissionMode, UnifiedMessage, UsageStatsQuery, WindowAppearance } from '@shared/types';
+import type { RaceAdoptStrategy, RaceCreateRequest, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
 import type { CronService } from './cron/CronService';
@@ -16,8 +16,11 @@ import type { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import type { TerminalService } from './terminal/TerminalService';
 import type { RaceManager } from './race/RaceManager';
 import { readEngineConfigs } from './config/engineConfigs';
+import { fetchOmpCatalog } from './engine/omp/resolveOmp';
 import { applyWindowTheme } from './windowTheme';
-import { gitStatus, importPaths, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
+import { gitStatus, importPaths, isDirectory, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
+import { listSlashItems } from './slash/slashService';
+import { getProviderQuotas } from './usage/providerQuota';
 
 export function registerIpc(
   sessions: SessionManager,
@@ -30,7 +33,7 @@ export function registerIpc(
   ipcMain.handle(IPC.sessionCreate, (_e, req: SessionCreateRequest) => sessions.create(req));
   ipcMain.handle(IPC.sessionList, () => sessions.list());
   ipcMain.handle(IPC.sessionPrompt, (_e, req: SessionPromptRequest) =>
-    sessions.prompt(req.sessionId, req.text, req.attachments, req.effort),
+    sessions.prompt(req.sessionId, req.text, req.attachments, req.effort, req.userMessageId),
   );
   ipcMain.handle(IPC.sessionCancel, (_e, sessionId: string) => sessions.cancel(sessionId));
   ipcMain.handle(IPC.sessionWarmUp, (_e, sessionId: string) => sessions.warmUp(sessionId));
@@ -67,6 +70,12 @@ export function registerIpc(
   ipcMain.handle(IPC.sessionChangesAccept, (_e, sessionId: string, path?: string) =>
     sessions.changesAccept(sessionId, path),
   );
+  ipcMain.handle(IPC.sessionUndoPreview, (_e, sessionId: string, messageId: string) =>
+    sessions.undoPreview(sessionId, messageId),
+  );
+  ipcMain.handle(IPC.sessionUndo, (_e, sessionId: string, messageId: string) =>
+    sessions.undoToMessage(sessionId, messageId),
+  );
   ipcMain.handle(IPC.sessionSteer, (_e, sessionId: string, text: string) => sessions.steer(sessionId, text));
   ipcMain.handle(IPC.sessionGoalSet, (_e, sessionId: string, objective: string) =>
     sessions.setGoal(sessionId, objective),
@@ -87,15 +96,34 @@ export function registerIpc(
 
   ipcMain.handle(IPC.settingsGet, () => settings.get());
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => settings.set(patch));
+  // 用量统计 — 扫描各会话消息文件的 turn_end 统计行按时间桶聚合。
+  ipcMain.handle(IPC.usageStats, (_e, query: UsageStatsQuery) => sessions.usageStats(query));
+  // 供应商套餐余量/余额 — key 只在主进程使用，结果不含任何密钥。
+  ipcMain.handle(IPC.providerQuota, (_e, force?: boolean) => getProviderQuotas(!!force));
   // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
   ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
   // opencode 模型目录 — 主进程代理 /config/providers（renderer 不直连
   // serve 端口，server 密码不出主进程）；按需启动 server。
   ipcMain.handle(IPC.opencodeCatalogGet, (_e, force?: boolean) => opencodeHost.getCatalog(force));
+  // omp 模型目录 — 主进程代理 `omp models --json`，进程级缓存（force = 重拉）。
+  let ompCatalogCache: OmpCatalog | undefined;
+  ipcMain.handle(IPC.ompCatalogGet, async (_e, force?: boolean) => {
+    if (!force && ompCatalogCache && !ompCatalogCache.error) return ompCatalogCache;
+    ompCatalogCache = await fetchOmpCatalog();
+    return ompCatalogCache;
+  });
 
   ipcMain.handle(IPC.themeSync, (e, appearance: WindowAppearance) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (win) applyWindowTheme(win, appearance);
+  });
+
+  // 任务栏角标（Windows overlay icon）— renderer 用 canvas 画好角标图推过来，
+  // null = 清除。非 Windows 平台 setOverlayIcon 是 no-op，无需分支。
+  ipcMain.handle(IPC.badgeSet, (e, dataUrl: string | null, description: string) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return;
+    win.setOverlayIcon(dataUrl ? nativeImage.createFromDataURL(dataUrl) : null, description);
   });
 
   ipcMain.handle(IPC.cronList, () => cron.list());
@@ -118,8 +146,12 @@ export function registerIpc(
   );
   ipcMain.handle(IPC.fsGitStatus, (_e, root: string) => gitStatus(root));
   ipcMain.handle(IPC.fsImport, (_e, root: string, srcPaths: string[]) => importPaths(root, srcPaths));
+  ipcMain.handle(IPC.fsIsDir, (_e, path: string) => isDirectory(path));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
   ipcMain.handle(IPC.attachmentSaveTemp, (_e, bytes: Uint8Array, ext: string) => saveTempAttachment(bytes, ext));
+
+  // 斜线命令候选（skills/commands 目录扫描，纯只读）。
+  ipcMain.handle(IPC.slashList, (_e, req: SlashListRequest) => listSlashItems(req.cwd, req.engine));
 
   // 面板内嵌终端：每会话一个管道式 shell（cwd = 会话目录）。
   ipcMain.handle(IPC.terminalCreate, (_e, id: string, cwd: string) => terminal.create(id, cwd));
@@ -136,5 +168,13 @@ export function registerIpc(
   );
   ipcMain.handle(IPC.raceRevise, (_e, raceId: string, annotation: string) => race.revise(raceId, annotation));
   ipcMain.handle(IPC.raceFinalize, (_e, raceId: string) => race.finalize(raceId));
+  ipcMain.handle(IPC.raceResume, (_e, raceId: string) => race.resume(raceId));
+  ipcMain.handle(IPC.raceUpdateRole, (_e, raceId: string, role: RaceRole, cfg: RaceRoleConfig) =>
+    race.updateRole(raceId, role, cfg),
+  );
+  ipcMain.handle(IPC.raceRetryRacer, (_e, raceId: string, role: RaceRole) => race.retryRacer(raceId, role));
+  ipcMain.handle(IPC.raceRevokeAdopt, (_e, raceId: string) => race.revokeAdopt(raceId));
+  ipcMain.handle(IPC.raceEliminate, (_e, raceId: string, role: RaceRole) => race.eliminateRacer(raceId, role));
+  ipcMain.handle(IPC.raceRestartPlanning, (_e, raceId: string) => race.restartPlanning(raceId));
   ipcMain.handle(IPC.raceCancel, (_e, raceId: string) => race.cancel(raceId));
 }

@@ -18,14 +18,16 @@ import { randomUUID } from 'node:crypto';
 import type { EngineId, PermissionMode } from '@shared/types';
 import type {
   RaceAdoptStrategy,
+  RaceArtifacts,
   RaceCreateRequest,
   RaceEvent,
   RaceGroup,
   RaceRole,
   RaceRoleConfig,
   RaceStage,
+  RacerRole,
 } from '@shared/race';
-import { resolveRoleMode } from '@shared/race';
+import { RACER_ROLES, resolveRoleMode } from '@shared/race';
 import {
   auditPrompt,
   builderPrompt,
@@ -46,6 +48,8 @@ export interface RaceSpawnSpec {
   modelId: string;
   permissionMode: PermissionMode;
   title: string;
+  /** 所属赛马 id —— 角色会话的侧栏隐藏标记（寄生于宿主对话）。 */
+  raceId: string;
 }
 
 /**
@@ -57,6 +61,8 @@ export interface RaceSessionHost {
   spawn(spec: RaceSpawnSpec): Promise<string>;
   /** Dispatch a prompt to a session (awaits engine readiness internally). */
   prompt(sessionId: string, text: string, effort?: string): Promise<void>;
+  /** 取消会话当前回合（剔除选手时就地叫停其运行中回合）。 */
+  cancelTurn(sessionId: string): void;
   /** Fold a session's assistant output into plain text (for hand-off). */
   transcript(sessionId: string): string;
   /** A textual digest of the builder's file changes (for the auditor). */
@@ -69,19 +75,24 @@ export interface RaceSessionHost {
   persist(groups: RaceGroup[]): void;
 }
 
-/** Transient per-race artifacts (plans/rebuttals), not persisted. */
-interface RaceArtifacts {
-  planA: string;
-  planB: string;
-  rebuttalA: string;
-  rebuttalB: string;
-}
+/** Transient per-race artifacts — superseded: 产物现在直接落在
+ *  RaceGroup.artifacts（持久化 + race.artifacts 事件推送裁判预览）。 */
 
 const DEFAULT_MAX_REPAIR = 3;
 
 export class RaceOrchestrator {
   private readonly groups = new Map<string, RaceGroup>();
-  private readonly artifacts = new Map<string, RaceArtifacts>();
+  /** 选手阶段链（规划/反驳）存活标记：链活着时单选手重试不代为推进阶段。 */
+  private readonly chainActive = new Set<string>();
+  /** 进行中的泳道级重试（`raceId:role`）：链收尾时若缺产物的选手正被
+   *  重试接管，链让位退出而非抛旧错（防“重试在跑却弹异常横幅”）。 */
+  private readonly retrying = new Set<string>();
+  /** 进行中回合等待的唤醒句柄（sessionId → abort）：剔除僵死选手时
+   *  主动 reject 其等待，防止阶段链永久挂起。 */
+  private readonly pendingTurns = new Map<string, () => void>();
+  /** 代际计数：重跑规划（restartPlanning）会 bump，旧阶段链收尾时
+   *  发现代际不符 → 静默退出，不报错不推进（防旧链尸变干扰新链）。 */
+  private readonly gen = new Map<string, number>();
 
   constructor(private readonly host: RaceSessionHost, persisted?: RaceGroup[]) {
     for (const g of persisted ?? []) this.groups.set(g.id, g);
@@ -110,11 +121,11 @@ export class RaceOrchestrator {
       repairRound: 0,
       maxRepairRounds: req.maxRepairRounds ?? DEFAULT_MAX_REPAIR,
       parentSessionId: req.parentSessionId,
+      contextSeed: req.contextSeed,
       createdAt: now,
       updatedAt: now,
     };
     this.groups.set(g.id, g);
-    this.artifacts.set(g.id, { planA: '', planB: '', rebuttalA: '', rebuttalB: '' });
     this.touch(g);
     this.setStage(g, 'planning');
     void this.safe(g.id, () => this.runPlanning(g));
@@ -125,55 +136,174 @@ export class RaceOrchestrator {
   adoptStrategy(raceId: string, strategy: RaceAdoptStrategy, comment?: string): void {
     const g = this.groups.get(raceId);
     if (!g || g.stage !== 'judging' || g.adopt) return;
-    const judgeId = g.sessions.judge;
-    if (!judgeId) return;
     g.adopt = { strategy, comment };
     this.touch(g);
-    void this.safe(raceId, async () => {
-      const cfg = g.roles.judge;
-      const art = this.artifact(g.id);
-      const plan = await this.runTurn(
-        judgeId,
-        withGuard(
-          judgeFusePrompt(g.prompt, art.planA, art.planB, art.rebuttalA, art.rebuttalB, strategy, comment),
-          this.needsGuard('judge', cfg),
+    void this.safe(raceId, () => this.runFuse(g));
+  }
+
+  /** 裁判按已定策略出方案（adoptStrategy 与重启恢复共用）。 */
+  private async runFuse(g: RaceGroup): Promise<void> {
+    const adopt = g.adopt;
+    if (!adopt) return;
+    const judgeId = await this.ensureRole(g, 'judge');
+    const cfg = g.roles.judge;
+    const art = g.artifacts ?? {};
+    const plan = await this.runTurnWithRetry(
+      judgeId,
+      withGuard(
+        judgeFusePrompt(
+          g.prompt,
+          this.racersOf(g).map((r) => ({
+            label: this.racerLetter(r),
+            plan: art[this.planKeyOf(r)] ?? '',
+            rebuttal: art[this.rebutKeyOf(r)] ?? '',
+          })),
+          adopt.strategy,
+          adopt.comment,
+          (g.eliminated ?? []).map((r) => this.racerLetter(r)),
         ),
-        cfg.effort,
-      );
-      g.finalPlan = plan;
-      g.finalPlanVersion = 1;
-      this.touch(g);
-      this.host.emit(g.id, { type: 'race.finalPlan', version: 1, text: plan });
-    });
+        this.needsGuard('judge', cfg),
+      ),
+      cfg.effort,
+    );
+    g.finalPlan = plan;
+    g.finalPlanVersion = 1;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.finalPlan', version: 1, text: plan });
   }
 
   /** Judge revision loop: apply a user annotation and re-fuse. */
   reviseJudge(raceId: string, annotation: string): void {
     const g = this.groups.get(raceId);
     if (!g || g.stage !== 'judging') return;
-    const judgeId = g.sessions.judge;
-    if (!judgeId) return;
     g.annotations.push(annotation);
     this.touch(g);
-    void this.safe(raceId, async () => {
-      const cfg = g.roles.judge;
-      const plan = await this.runTurn(
-        judgeId,
-        withGuard(judgeRevisePrompt(g.finalPlan ?? '', annotation), this.needsGuard('judge', cfg)),
-        cfg.effort,
-      );
-      g.finalPlan = plan;
-      g.finalPlanVersion += 1;
-      this.touch(g);
-      this.host.emit(g.id, { type: 'race.finalPlan', version: g.finalPlanVersion, text: plan });
-    });
+    void this.safe(raceId, () => this.runRevise(g, annotation));
+  }
+
+  /** 按批注修订方案（reviseJudge 与重启恢复共用）。 */
+  private async runRevise(g: RaceGroup, annotation: string): Promise<void> {
+    const judgeId = await this.ensureRole(g, 'judge');
+    const cfg = g.roles.judge;
+    const plan = await this.runTurnWithRetry(
+      judgeId,
+      withGuard(judgeRevisePrompt(g.finalPlan ?? '', annotation), this.needsGuard('judge', cfg)),
+      cfg.effort,
+    );
+    g.finalPlan = plan;
+    g.finalPlanVersion += 1;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.finalPlan', version: g.finalPlanVersion, text: plan });
+  }
+
+  /** ④a 反悔：撤回采纳决策（仅裁判尚未出方案时）—— 叫停裁判进行中
+   *  的回合，回到「选择采纳策略」关口重选；已出方案后不提供
+   *  （那时用批注修订道义更顺）。 */
+  revokeAdopt(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage !== 'judging' || !g.adopt || g.finalPlan) return;
+    const judgeId = g.sessions.judge;
+    if (judgeId) {
+      this.host.cancelTurn(judgeId);
+      // 先同步唤醒（superseded 静默路径），后到的 cancelled 事件无人
+      // 监听 → 不会误弹错误横幅。
+      this.pendingTurns.get(judgeId)?.();
+      this.pendingTurns.delete(judgeId);
+    }
+    g.adopt = undefined;
+    this.touch(g);
+    // 复播阶段事件：前端顺带清错误横幅；快照由 store 动作 refresh。
+    this.host.emit(g.id, { type: 'race.stage', stage: 'judging' });
   }
 
   /** User approved the final plan → hand off to the Builder. */
   finalize(raceId: string): void {
     const g = this.groups.get(raceId);
     if (!g || g.stage !== 'judging' || !g.finalPlan) return;
+    // 同步先切阶段：堵住双击/重复 IPC 导致的 Builder 双发 prompt。
+    this.setStage(g, 'building');
     void this.safe(raceId, () => this.runBuilding(g));
+  }
+
+  /** 重试前调整选手配置（仅限 racerA/racerB）；引擎/模型变更时弃用
+   *  旧会话（保留为普通会话），重跑阶段时以新配置重建。 */
+  updateRole(raceId: string, role: RaceRole, cfg: RaceRoleConfig): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage === 'done') return;
+    if (!(RACER_ROLES as readonly string[]).includes(role)) return;
+    const racer = role as RacerRole;
+    const prev = g.roles[racer];
+    if (!prev || g.eliminated?.includes(racer)) return; // 未参赛/已剔除不接受调整
+    if (prev.engine === cfg.engine && prev.modelId === cfg.modelId && prev.effort === cfg.effort) return;
+    const respawn = prev.engine !== cfg.engine || prev.modelId !== cfg.modelId;
+    g.roles = { ...g.roles, [racer]: cfg };
+    if (respawn) delete g.sessions[racer]; // effort 只影响下次 prompt，不必重建
+    // 调整了谁，谁当前阶段的产物作废 → 重试时只重跑该选手（其余产物保留跳过）。
+    const art = { ...g.artifacts };
+    if (g.stage === 'planning') {
+      delete art[this.planKeyOf(racer)];
+      delete art[this.rebutKeyOf(racer)];
+    } else if (g.stage === 'rebuttal') {
+      delete art[this.rebutKeyOf(racer)];
+    }
+    g.artifacts = art;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.artifacts', artifacts: art });
+    // 符合直觉：改完配置就是为了让它跑。阶段链已停摆（错误态）且
+    // 处在选手阶段 → 自动重跑该选手当前回合（新引擎/模型重建会话）；
+    // 链还活着则不插手，等它自己收尾。judging 阶段仍需配合「↩ 重跑规划」。
+    if (!this.chainActive.has(g.id) && (g.stage === 'planning' || g.stage === 'rebuttal')) {
+      this.retryRacer(raceId, racer);
+    }
+  }
+
+  /** 单选手重试：只补跑该选手当前阶段回合（另一侧产物/进行中回合不受
+   *  影响）；若补齐后双产物齐且阶段链已死，由此处代为推进下一阶段。 */
+  retryRacer(raceId: string, role: RaceRole): void {
+    const g = this.groups.get(raceId);
+    if (!g || (g.stage !== 'planning' && g.stage !== 'rebuttal')) return;
+    if (!(RACER_ROLES as readonly string[]).includes(role)) return;
+    const racer = role as RacerRole;
+    if (!g.roles[racer] || g.eliminated?.includes(racer)) return;
+    const key = g.stage === 'planning' ? this.planKeyOf(racer) : this.rebutKeyOf(racer);
+    if (g.artifacts?.[key]) return;
+    const tag = `${raceId}:${racer}`;
+    if (this.retrying.has(tag)) return; // 防重复点击双发
+    this.retrying.add(tag);
+    void this.safe(raceId, async () => {
+      const sessionId = await this.ensureRole(g, racer);
+      await this.runRacerTurn(g, racer, sessionId, key, this.racerStagePrompt(g, racer));
+      if (this.chainActive.has(g.id)) return; // 阶段链还活着 —— 由它推进
+      if (g.stage === 'planning' && this.stageComplete(g, 'plan')) return this.runRebuttal(g);
+      if (g.stage === 'rebuttal' && this.stageComplete(g, 'rebuttal')) return this.runJudging(g);
+    }).finally(() => this.retrying.delete(tag));
+  }
+
+  /** 对双方方案不满意 → 清空产物回炉重赛（仅裁判选策略前允许；
+   *  出方案/执行之后不提供回退）。 */
+  restartPlanning(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g) return;
+    if (g.stage !== 'planning' && g.stage !== 'rebuttal' && g.stage !== 'judging') return;
+    if (g.adopt || g.finalPlan) return;
+    // 开新代：旧阶段链（若还活着）收尾时会因代际不符静默退出；
+    // 同时叫停各在场选手的运行中回合并唤醒僵死等待，避免旧回合
+    // 的产出污染新一轮（产物已清空，旧回合落盘也无害，但白烧 token）。
+    this.gen.set(g.id, (this.gen.get(g.id) ?? 0) + 1);
+    for (const r of this.racersOf(g)) {
+      const sid = g.sessions[r];
+      if (!sid) continue;
+      this.host.cancelTurn(sid);
+      this.pendingTurns.get(sid)?.();
+      this.pendingTurns.delete(sid);
+    }
+    this.chainActive.delete(g.id);
+    g.artifacts = {};
+    g.interrupted = false;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.artifacts', artifacts: g.artifacts });
+    this.setStage(g, 'planning');
+    void this.safe(g.id, () => this.runPlanning(g));
   }
 
   /** Abort a race (best-effort): mark done; role sessions are left intact. */
@@ -183,51 +313,245 @@ export class RaceOrchestrator {
     this.finish(g, false);
   }
 
+  /**
+   * 重启后继续被打断的赛马：重跑当前阶段（复用已有角色会话，
+   * ensureRuntime 会自动复活引擎进程）。judging 纯等待态无需重跑，
+   * 仅重发事件让 UI 对齐。由用户手动触发，不自动（防重启风暴）。
+   */
+  resume(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage === 'done') return;
+    // 选手阶段链还活着（回合在跑）时重入会对同一会话双发 prompt ——
+    // 此时无需恢复，直接忽略（防误点/重启横幅残留的重复触发）。
+    if ((g.stage === 'planning' || g.stage === 'rebuttal') && this.chainActive.has(g.id)) return;
+    g.interrupted = false;
+    this.touch(g);
+    void this.safe(raceId, async () => {
+      switch (g.stage) {
+        case 'planning':
+          return this.runPlanning(g);
+        case 'rebuttal':
+          return this.runRebuttal(g);
+        case 'judging': {
+          // 裁判出方案/修订中被打断 → 重跑那一步；纯等待态 → 重发事件即可。
+          if (g.adopt && !g.finalPlan) return this.runFuse(g);
+          if (g.finalPlan && g.annotations.length >= g.finalPlanVersion) {
+            return this.runRevise(g, g.annotations[g.annotations.length - 1]!);
+          }
+          this.host.emit(g.id, { type: 'race.stage', stage: g.stage });
+          if (g.finalPlan) {
+            this.host.emit(g.id, { type: 'race.finalPlan', version: g.finalPlanVersion, text: g.finalPlan });
+          }
+          return;
+        }
+        case 'building':
+          return this.runBuilding(g);
+        case 'auditing':
+        case 'repairing':
+          // 修复中断 → 直接重审：若仍有问题会自然进入下一轮修复。
+          return this.runAuditing(g);
+        default:
+          return;
+      }
+    });
+  }
+
   // ------------------------------------------------------------- stages
 
   private async runPlanning(g: RaceGroup): Promise<void> {
-    const [a, b] = await Promise.all([this.spawnRole(g, 'racerA'), this.spawnRole(g, 'racerB')]);
-    const cfgA = g.roles.racerA;
-    const cfgB = g.roles.racerB;
-    const [planA, planB] = await Promise.all([
-      this.runTurn(a, withGuard(planPrompt(g.prompt), this.needsGuard('racerA', cfgA)), cfgA.effort),
-      this.runTurn(b, withGuard(planPrompt(g.prompt), this.needsGuard('racerB', cfgB)), cfgB.effort),
-    ]);
-    const art = this.artifact(g.id);
-    art.planA = planA;
-    art.planB = planB;
+    this.chainActive.add(g.id);
+    const myGen = this.gen.get(g.id) ?? 0;
+    const racers = this.racersOf(g);
+    const ids = await Promise.all(racers.map((r) => this.ensureRole(g, r)));
+    // 逐选手落盘：一方失败/被中止不影响其余产物，重试只补跑缺失方。
+    const failures = await this.settleRacers(
+      racers.map((r, i) => this.runRacerTurn(g, r, ids[i]!, this.planKeyOf(r), this.racerStagePrompt(g, r))),
+    );
+    // 重跑规划已开新代 → 本链是旧代尸变，静默退出（新链自行推进）。
+    if ((this.gen.get(g.id) ?? 0) !== myGen) return;
+    // 泳道级重试可能已并行补齐产物 —— 产物齐就静默推进，不报旧错。
+    if (!this.stageComplete(g, 'plan')) {
+      // 缺产物的选手正被泳道级重试补跑 → 链让位退出（删存活标记，
+      // 使重试收尾时接棒推进），不把上一回合的旧错抛成新横幅。
+      const pendingRetry = this.racersOf(g).some(
+        (r) => !g.artifacts?.[this.planKeyOf(r)] && this.retrying.has(`${g.id}:${r}`),
+      );
+      if (pendingRetry) {
+        this.chainActive.delete(g.id);
+        return;
+      }
+      // 重试恰在两次检查的缝隙间完成 → 复查一次再决定抛错。
+      if (this.stageComplete(g, 'plan')) {
+        await this.runRebuttal(g);
+        return;
+      }
+      throw new Error(failures.join('；') || '双规划未完成');
+    }
     await this.runRebuttal(g);
   }
 
   private async runRebuttal(g: RaceGroup): Promise<void> {
     this.setStage(g, 'rebuttal');
-    const a = g.sessions.racerA!;
-    const b = g.sessions.racerB!;
-    const cfgA = g.roles.racerA;
-    const cfgB = g.roles.racerB;
-    const art = this.artifact(g.id);
-    const [ra, rb] = await Promise.all([
-      this.runTurn(a, withGuard(rebuttalPrompt(art.planA, art.planB), this.needsGuard('racerA', cfgA)), cfgA.effort),
-      this.runTurn(b, withGuard(rebuttalPrompt(art.planB, art.planA), this.needsGuard('racerB', cfgB)), cfgB.effort),
-    ]);
-    art.rebuttalA = ra;
-    art.rebuttalB = rb;
+    this.chainActive.add(g.id);
+    const myGen = this.gen.get(g.id) ?? 0;
+    const racers = this.racersOf(g);
+    const ids = await Promise.all(racers.map((r) => this.ensureRole(g, r)));
+    const failures = await this.settleRacers(
+      racers.map((r, i) => this.runRacerTurn(g, r, ids[i]!, this.rebutKeyOf(r), this.racerStagePrompt(g, r))),
+    );
+    if ((this.gen.get(g.id) ?? 0) !== myGen) return; // 旧代链静默退出
+    if (!this.stageComplete(g, 'rebuttal')) {
+      const pendingRetry = this.racersOf(g).some(
+        (r) => !g.artifacts?.[this.rebutKeyOf(r)] && this.retrying.has(`${g.id}:${r}`),
+      );
+      if (pendingRetry) {
+        this.chainActive.delete(g.id);
+        return;
+      }
+      if (this.stageComplete(g, 'rebuttal')) {
+        await this.runJudging(g);
+        return;
+      }
+      throw new Error(failures.join('；') || '交叉反驳未完成');
+    }
     await this.runJudging(g);
   }
 
+  /** 当前阶段下该选手的回合提示词（规划/反驳共用，含只读护栏）。 */
+  private racerStagePrompt(g: RaceGroup, role: RacerRole): string {
+    const art = g.artifacts ?? {};
+    const cfg = g.roles[role]!;
+    if (g.stage === 'rebuttal') {
+      const own = art[this.planKeyOf(role)] ?? '';
+      const opponents = this.racersOf(g)
+        .filter((o) => o !== role)
+        .map((o) => ({ label: this.racerLetter(o), plan: art[this.planKeyOf(o)] ?? '' }));
+      return withGuard(rebuttalPrompt(own, opponents), this.needsGuard(role, cfg));
+    }
+    // 从对话中发起时可携带父对话摘录 —— 仅作背景资料注入规划回合。
+    const task = g.contextSeed
+      ? `${g.prompt}\n\n【发起对话背景摘录 · 仅供理解需求背景，非任务本身】\n${g.contextSeed}`
+      : g.prompt;
+    return withGuard(planPrompt(task), this.needsGuard(role, cfg));
+  }
+
+  /** ✂ 剔除选手（标记式，不删数据）：仅三人及以上在场且裁判选
+   *  策略前允许，剩余必须 ≥2。被剔者运行中回合就地取消（其失败由
+   *  runRacerTurn 的剔除静默分支吞掉）；链已死且剩余产物齐时代为推进。 */
+  eliminateRacer(raceId: string, role: RaceRole): void {
+    const g = this.groups.get(raceId);
+    if (!g) return;
+    const window =
+      g.stage === 'planning' || g.stage === 'rebuttal' || (g.stage === 'judging' && !g.adopt);
+    if (!window) return;
+    if (!(RACER_ROLES as readonly string[]).includes(role)) return;
+    const racer = role as RacerRole;
+    if (!g.roles[racer] || g.eliminated?.includes(racer)) return;
+    if (this.racersOf(g).length <= 2) return; // 铁规：剩余 ≥2
+    g.eliminated = [...(g.eliminated ?? []), racer];
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.eliminated', role: racer });
+    const sessionId = g.sessions[racer];
+    if (sessionId) {
+      this.host.cancelTurn(sessionId);
+      // 僵死等待（会话已 idle、不会再有任何事件）也要主动唤醒，
+      // 否则阶段链永远挂在被剔者身上（cancelTurn 对 idle 会话是空操作）。
+      this.pendingTurns.get(sessionId)?.();
+      this.pendingTurns.delete(sessionId);
+    }
+    // 阶段链活着 → 由它自己收尾（stageComplete 已按新参赛集判定）；
+    // 链已死（错误横幅态）且剩余产物齐 → 代为推进，与泳道级重试同款。
+    if (this.chainActive.has(g.id)) return;
+    if (g.stage === 'planning' && this.stageComplete(g, 'plan')) {
+      void this.safe(g.id, () => this.runRebuttal(g));
+    } else if (g.stage === 'rebuttal' && this.stageComplete(g, 'rebuttal')) {
+      void this.safe(g.id, () => this.runJudging(g));
+    }
+  }
+
+  /** ✂ 剔除选手后的参赛下限检查由前端按钮可见性兼顾；此处为最终门禁。 */
+  private async runRacerTurn(
+    g: RaceGroup,
+    role: RacerRole,
+    sessionId: string,
+    key: keyof RaceArtifacts,
+    text: string,
+  ): Promise<void> {
+    if (g.artifacts?.[key]) return;
+    const cfg = g.roles[role];
+    if (!cfg) return;
+    let out: string;
+    try {
+      out = await this.runTurnWithRetry(sessionId, text, cfg.effort);
+    } catch (err) {
+      // 回合进行中被剔除，或被主动打断（剔除唤醒/重跑规划叫停）
+      // → 都是预期内，静默退场不上浮（新代链/推进者会接管）。
+      const msg = err instanceof Error ? err.message : String(err);
+      if (g.eliminated?.includes(role) || msg.includes('superseded')) return;
+      throw err;
+    }
+    if (!out.trim()) {
+      if (g.eliminated?.includes(role)) return;
+      throw new Error(`${this.racerLabel(role)} 未产出内容（回合异常），可重试当前阶段（可先调整其引擎/模型）`);
+    }
+    // 即使刚被剔除也照常落盘（数据只增不减）：racersOf 已不含它，
+    // 产物不会进裁判输入，仅作历史可查。
+    g.artifacts = { ...g.artifacts, [key]: out };
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.artifacts', artifacts: g.artifacts });
+  }
+
+  /** 等各方都收尾（健康选手不被其它选手的失败中断），返回失败信息。 */
+  private async settleRacers(turns: Promise<void>[]): Promise<string[]> {
+    const results = await Promise.allSettled(turns);
+    return results
+      .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      .map((f) => (f.reason instanceof Error ? f.reason.message : String(f.reason)));
+  }
+
+  // ------------------------------------------------- racer set helpers
+
+  /** 本场参赛选手（A/B 必有；C 仅在发起时启用才存在；剔除者退场）。 */
+  private racersOf(g: RaceGroup): RacerRole[] {
+    return RACER_ROLES.filter((r) => !!g.roles[r] && !g.eliminated?.includes(r));
+  }
+
+  private planKeyOf(r: RacerRole): 'planA' | 'planB' | 'planC' {
+    return r === 'racerA' ? 'planA' : r === 'racerB' ? 'planB' : 'planC';
+  }
+
+  private rebutKeyOf(r: RacerRole): 'rebuttalA' | 'rebuttalB' | 'rebuttalC' {
+    return r === 'racerA' ? 'rebuttalA' : r === 'racerB' ? 'rebuttalB' : 'rebuttalC';
+  }
+
+  private racerLetter(r: RacerRole): string {
+    return r === 'racerA' ? 'A' : r === 'racerB' ? 'B' : 'C';
+  }
+
+  private racerLabel(r: RacerRole): string {
+    return `选手 ${this.racerLetter(r)}`;
+  }
+
+  /** 本阶段产物是否已齐（所有参赛选手都落盘）。 */
+  private stageComplete(g: RaceGroup, kind: 'plan' | 'rebuttal'): boolean {
+    const art = g.artifacts ?? {};
+    return this.racersOf(g).every((r) => !!art[kind === 'plan' ? this.planKeyOf(r) : this.rebutKeyOf(r)]);
+  }
+
   private async runJudging(g: RaceGroup): Promise<void> {
+    this.chainActive.delete(g.id); // 选手阶段链结束
     this.setStage(g, 'judging');
     // 只预热裁判会话，不出方案 —— 等用户先选定采纳策略（adoptStrategy），
     // 再按策略 + 评语产出最终方案；之后进入批注/修订循环直到定稿。
-    await this.spawnRole(g, 'judge');
+    await this.ensureRole(g, 'judge');
   }
 
   private async runBuilding(g: RaceGroup): Promise<void> {
     this.setStage(g, 'building');
-    const builderId = await this.spawnRole(g, 'builder');
+    const builderId = await this.ensureRole(g, 'builder');
     const cfg = g.roles.builder;
     // Builder writes — no read-only guard.
-    await this.runTurn(builderId, builderPrompt(g.finalPlan ?? ''), cfg.effort);
+    await this.runTurnWithRetry(builderId, builderPrompt(g.finalPlan ?? ''), cfg.effort);
     await this.runAuditing(g);
   }
 
@@ -235,9 +559,9 @@ export class RaceOrchestrator {
     this.setStage(g, 'auditing');
     const builderId = g.sessions.builder!;
     const digest = await this.host.changesDigest(builderId);
-    const auditorId = g.sessions.auditor ?? (await this.spawnRole(g, 'auditor'));
+    const auditorId = await this.ensureRole(g, 'auditor');
     const cfg = g.roles.auditor;
-    const out = await this.runTurn(
+    const out = await this.runTurnWithRetry(
       auditorId,
       withGuard(auditPrompt(g.finalPlan ?? '', digest), this.needsGuard('auditor', cfg)),
       cfg.effort,
@@ -261,7 +585,7 @@ export class RaceOrchestrator {
     this.setStage(g, 'repairing');
     const builderId = g.sessions.builder!;
     const cfg = g.roles.builder;
-    await this.runTurn(builderId, repairPrompt(issues), cfg.effort);
+    await this.runTurnWithRetry(builderId, repairPrompt(issues), cfg.effort);
     await this.runAuditing(g);
   }
 
@@ -272,15 +596,24 @@ export class RaceOrchestrator {
 
   // ------------------------------------------------------------- helpers
 
+  /** 取角色已有会话，没有才新建（重启恢复/重跑阶段时不重复 spawn）。 */
+  private async ensureRole(g: RaceGroup, role: RaceRole): Promise<string> {
+    const existing = g.sessions[role];
+    if (existing) return existing;
+    return this.spawnRole(g, role);
+  }
+
   /** Spawn a role's session, record it, and announce to the renderer. */
   private async spawnRole(g: RaceGroup, role: RaceRole): Promise<string> {
     const cfg = g.roles[role];
+    if (!cfg) throw new Error(`角色未配置：${role}`);
     const id = await this.host.spawn({
       engine: cfg.engine,
       cwd: g.cwd,
       modelId: cfg.modelId,
       permissionMode: resolveRoleMode(role, cfg),
       title: roleSessionTitle(role, g.prompt),
+      raceId: g.id,
     });
     g.sessions[role] = id;
     this.touch(g);
@@ -288,14 +621,43 @@ export class RaceOrchestrator {
     return id;
   }
 
-  /** Prompt a session and resolve with its transcript once the turn ends. */
+  /** 瞬时错误自动重试一次（用户主动中止/打断/剔除不重试 —— 对
+   *  被剔者重发 prompt 是灾难）；仍失败才上浮 race.error 交给用户。 */
+  private async runTurnWithRetry(sessionId: string, text: string, effort?: string): Promise<string> {
+    try {
+      return await this.runTurn(sessionId, text, effort);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 用户主动中止/打断/被主动唤醒（剔除或重跑规划）不自动重试。
+      if (msg.includes('cancelled') || msg.includes('interrupted') || msg.includes('superseded')) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+      return this.runTurn(sessionId, text, effort);
+    }
+  }
+
+  /** Prompt a session and resolve with its transcript once the turn ends.
+   *  等待登记到 pendingTurns：剔除僵死选手时可主动唤醒（reject），
+   *  否则阶段链会永远挂在一个不再产生任何事件的会话上。 */
   private runTurn(sessionId: string, text: string, effort?: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const off = this.host.onTurnEnded(sessionId, () => {
+      const off = this.host.onTurnEnded(sessionId, (stopReason) => {
+        this.pendingTurns.delete(sessionId);
         off();
+        // 出错/被中止的回合不算产出 —— 阻断阶段推进，交给用户重试。
+        if (stopReason === 'error' || stopReason === 'cancelled' || stopReason === 'interrupted') {
+          reject(new Error(`角色回合异常结束（${stopReason}），可重试当前阶段（可先调整选手配置）`));
+          return;
+        }
         resolve(this.host.transcript(sessionId));
       });
+      this.pendingTurns.set(sessionId, () => {
+        off();
+        // 中性打断语义：剔除僵死选手、重跑规划叫停旧链都走这里，
+        // 消费方（runRacerTurn）一律静默，不弹横幅。
+        reject(new Error('角色回合等待被打断（superseded：剔除或重跑）'));
+      });
       this.host.prompt(sessionId, text, effort).catch((err) => {
+        this.pendingTurns.delete(sessionId);
         off();
         reject(err instanceof Error ? err : new Error(String(err)));
       });
@@ -313,15 +675,6 @@ export class RaceOrchestrator {
     this.host.emit(g.id, { type: 'race.stage', stage });
   }
 
-  private artifact(raceId: string): RaceArtifacts {
-    let a = this.artifacts.get(raceId);
-    if (!a) {
-      a = { planA: '', planB: '', rebuttalA: '', rebuttalB: '' };
-      this.artifacts.set(raceId, a);
-    }
-    return a;
-  }
-
   private touch(g: RaceGroup): void {
     g.updatedAt = Date.now();
     this.host.persist(this.list());
@@ -332,10 +685,11 @@ export class RaceOrchestrator {
     try {
       await fn();
     } catch (err) {
-      this.host.emit(raceId, {
-        type: 'race.error',
-        message: err instanceof Error ? err.message : String(err),
-      });
+      this.chainActive.delete(raceId); // 链已死 —— 单选手重试成功后可代为推进
+      const message = err instanceof Error ? err.message : String(err);
+      // 被主动打断（撤回决策/重跑规划/剔除唤醒）不是错误，不弹横幅。
+      if (message.includes('superseded')) return;
+      this.host.emit(raceId, { type: 'race.error', message });
     }
   }
 }

@@ -181,8 +181,9 @@ body {
   display: none;
 }
 
-/* ChipInput（contenteditable 输入框）的文件引用胶囊 — 行内显示，
-   复制时序列化为“名(路径)”纯文本（见 ChipInput.tsx onCopy）。 */
+/* ChipInput（contenteditable 输入框）的文件/文件夹引用胶囊 — 行内显示，
+   普通主题描边（不用 accent 高亮），复制时序列化为“名(路径)”纯文本
+   （见 ChipInput.tsx onCopy）。 */
 .oc-file-chip {
   display: inline-flex;
   align-items: center;
@@ -190,10 +191,10 @@ body {
   vertical-align: baseline;
   margin: 0 1px;
   padding: 1px 7px 1px 6px;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border: 1px solid var(--line);
   border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--bg-panel);
+  color: var(--ink-soft);
   font-size: 12.5px;
   font-weight: 500;
   line-height: 1.5;
@@ -209,9 +210,51 @@ body {
   opacity: 0.7;
 }
 
-/* contenteditable 空态占位符 */
+/* 文件夹引用胶囊 — 换文件夹图标（与文件引用的 </> 区分开）。 */
+.oc-file-chip[data-dir='1']::before {
+  content: '';
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  background: currentColor;
+  opacity: 0.8;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* 文件树拖拽 ghost — dragstart 瞬时挂到视口外供 setDragImage 快照，
+   下一帧即移除（FileTree.tsx onNodeDragStart）。 */
+.fs-drag-ghost {
+  position: absolute;
+  top: -1000px;
+  left: -1000px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--ink-soft);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.fs-drag-ghost span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* contenteditable 空态占位符 — 绝对定位脱离行内流，否则光标会被排到占位文字后面 */
+.oc-chip-input {
+  position: relative;
+}
+
 .oc-chip-input[data-empty='true']::before {
   content: attr(data-placeholder);
+  position: absolute;
   color: var(--ink-faint);
   pointer-events: none;
 }
@@ -313,17 +356,41 @@ body {
   text-underline-offset: 2px;
 }
 
-/* Blinking caret for streaming messages */
-.caret::after {
-  content: '▍';
-  color: var(--accent);
-  animation: caret-blink 1s steps(1) infinite;
+/* ============ activity shimmer ============
+   Thinking / Exploring / Generating 等进行态文字：从左到右的流光扫过
+   （claude code 同款）。用渐变剪切文字实现，颜色跟随主题 ink 变量。 */
+.shimmer-text {
+  background: linear-gradient(90deg, var(--ink-faint) 0%, var(--ink) 50%, var(--ink-faint) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-slide 1.8s linear infinite;
 }
 
-@keyframes caret-blink {
-  50% {
-    opacity: 0;
+@keyframes shimmer-slide {
+  to {
+    background-position: -200% 0;
   }
+}
+
+/* 编辑中的文件卡片头部：一道柔和的 accent 光带持续扫过卡面 */
+.card-sweep {
+  position: relative;
+  overflow: hidden;
+}
+
+.card-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg,
+      transparent 30%,
+      color-mix(in srgb, var(--accent) 14%, transparent) 50%,
+      transparent 70%);
+  background-size: 200% 100%;
+  animation: shimmer-slide 1.6s linear infinite;
 }
 
 /* Bottom-sheet slide-up (permission / ask-user) */
@@ -530,3 +597,169 @@ body {
 [data-mode='dark'] .hljs-built_in {
   color: #d1837a;
 }
+
+/* ============ 品牌动效（brand.tsx，黑金 Onyx） ============
+   BrandSpinner：三颗 AI 星芒 ✦ 错峰脉冲（agent 轮流思考）；
+   BrandHero：拉杆下压回弹 → 机身微震 → 星芒逐颗点亮 → 同步熄灭（完整拉霸仪式，3.2s）。
+   星芒以自身为中心缩放需 transform-box: fill-box；拉杆绕铰点旋转需 view-box + SVG 坐标 origin。 */
+@keyframes brand-sparkle-pulse {
+
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.68);
+  }
+
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.brand-sparkle {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: brand-sparkle-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes brand-lever-pull {
+
+  0%,
+  8%,
+  32%,
+  100% {
+    transform: rotate(0deg);
+  }
+
+  16% {
+    transform: rotate(100deg);
+  }
+
+  26% {
+    transform: rotate(-6deg);
+  }
+}
+
+.brand-lever {
+  transform-box: view-box;
+  transform-origin: 16.2px 12.3px;
+  animation: brand-lever-pull 3.2s cubic-bezier(0.5, 0, 0.3, 1.4) infinite;
+}
+
+@keyframes brand-body-shake {
+
+  0%,
+  16%,
+  30%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  19% {
+    transform: translate(0.12px, 0.1px);
+  }
+
+  22% {
+    transform: translate(-0.12px, -0.08px);
+  }
+
+  26% {
+    transform: translate(0.08px, 0.06px);
+  }
+}
+
+.brand-machine {
+  transform-box: view-box;
+  animation: brand-body-shake 3.2s ease-in-out infinite;
+}
+
+/* 中奖星芒：与拉杆严格时序关联——全暗待机 → 拉杆 8–16% → 机身抖 19–26%（滚轮转）
+   → 三星 31/37/43% 依次爆亮 → 常亮至 80% → 一起熄灭等下一把。
+   点亮错峰、熄灭同步无法用 delay 相位偏移实现（整条时间轴都会偏），故拆三组 keyframes */
+@keyframes brand-jackpot-1 {
+
+  0%,
+  26%,
+  90%,
+  100% {
+    opacity: 0.15;
+    transform: scale(0.55);
+  }
+
+  31% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+
+  36%,
+  80% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes brand-jackpot-2 {
+
+  0%,
+  32%,
+  90%,
+  100% {
+    opacity: 0.15;
+    transform: scale(0.55);
+  }
+
+  37% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+
+  42%,
+  80% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes brand-jackpot-3 {
+
+  0%,
+  38%,
+  90%,
+  100% {
+    opacity: 0.15;
+    transform: scale(0.55);
+  }
+
+  43% {
+    opacity: 1;
+    transform: scale(1.35);
+  }
+
+  48%,
+  80% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.brand-jack {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: 3.2s ease-out infinite;
+}
+
+.brand-jack-1 {
+  animation-name: brand-jackpot-1;
+}
+
+.brand-jack-2 {
+  animation-name: brand-jackpot-2;
+}
+
+.brand-jack-3 {
+  animation-name: brand-jackpot-3;
+}
+
+/* 注意：品牌 loading 动效是运行状态语义（区分进行中/停止），非装饰，
+   故不随 prefers-reduced-motion 降级，否则系统开启减动效时无法分辨任务是否在跑 */

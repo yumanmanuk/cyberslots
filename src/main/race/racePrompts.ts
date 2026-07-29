@@ -30,73 +30,94 @@ export function planPrompt(task: string): string {
 }
 
 /**
- * ② Rebuttal + defense (plans frozen): the racer sees the opponent's plan,
- * critiques it, and defends its own — one symmetric round, no plan changes.
+ * ② Rebuttal round (plans frozen), three sections with distinct object
+ * ownership: 驳（攻·对手方案）/ 吸纳（取·对手之长，声明而非改稿）/
+ * 辩护（守·自己方案的争议点，预防性）。
  */
-export function rebuttalPrompt(ownPlan: string, opponentPlan: string): string {
+export function rebuttalPrompt(ownPlan: string, opponents: Array<{ label: string; plan: string }>): string {
+  const oppBlocks = opponents.map((o) => `【选手 ${o.label} 的方案】\n${o.plan}`).join('\n\n');
   return [
-    '这是对手针对同一任务给出的方案。请做两件事，**不要修改你自己的方案**：',
-    '1. ⚔ 反驳：指出对手方案的具体缺陷、风险或遗漏；',
-    '2. 🛡 辩护：针对对手可能对你方案的质疑，做出澄清或说明。',
+    `这是其余 ${opponents.length} 位对手针对同一任务给出的方案。请做三件事，**不要修改你自己的方案正文**：`,
+    '',
+    '## ⚔ 反驳（只谈对手方案的内容）',
+    '逐个指出各对手方案的具体缺陷、风险或遗漏，按选手分节。',
+    '',
+    '## 🤝 吸纳（对手方案中确实比你更优的点）',
+    '如有，明确承认，并说明「若最终按你的方案实施，你会如何吸纳该点」；',
+    '只列真正重要、能实质提升方案的点，不要为了显得全面而堆砌，避免把方案越吸越复杂（过度设计）；',
+    '没有就写“无”——不许为了显得客观而硬凑。',
+    '',
+    '## 🛡 辩护（只谈你自己方案中的设计点）',
+    '预判对手可能对你方案的质疑，对容易被误读或看似激进的设计做出澄清与理由说明。',
+    '',
     '语言精炼，分条陈述。',
     '',
-    '【对手方案】',
-    opponentPlan,
+    oppBlocks,
     '',
-    '【你自己的方案（供参考，勿改）】',
-    ownPlan,
+    `【你自己的方案（供参考，勿改）】\n${ownPlan}`,
   ].join('\n');
 }
 
 /**
  * ③ Judge plan synthesis —— the USER picks the adoption strategy first
- * (adopt A / adopt B / A-over-B / B-over-A, plus an optional comment); the
- * judge then produces ONE final plan under that directive, with the fusion
- * basis explained. NOT a free "pick your own winner" judgement.
+ * (adopt X / prefer X, plus an optional comment); the judge then produces
+ * ONE final plan under that directive. Supports 2–3 racers.
  */
-const ADOPT_DIRECTIVES: Record<RaceAdoptStrategy, string> = {
-  adoptA:
-    '用户已决定【采纳选手 A 的方案】：请以 A 方案为最终方案，仅做必要的整理与完善（吸收其辩护中的澄清），不引入 B 的方案结构。',
-  adoptB:
-    '用户已决定【采纳选手 B 的方案】：请以 B 方案为最终方案，仅做必要的整理与完善（吸收其辩护中的澄清），不引入 A 的方案结构。',
-  aOverB:
-    '用户已决定【以 A 为准，结合 B】：请以 A 方案为主体框架，融入 B 方案中经得起反驳的优点。',
-  bOverA:
-    '用户已决定【以 B 为准，结合 A】：请以 B 方案为主体框架，融入 A 方案中经得起反驳的优点。',
-};
+function adoptDirective(strategy: string): string {
+  const norm = strategy === 'aOverB' ? 'preferA' : strategy === 'bOverA' ? 'preferB' : strategy;
+  const who = norm.endsWith('A') ? 'A' : norm.endsWith('B') ? 'B' : 'C';
+  return norm.startsWith('adopt')
+    ? `用户已决定【采纳选手 ${who} 的方案】：请以 ${who} 方案为最终方案，仅做必要的整理与完善（吸收其辩护中的澄清），不引入其他选手的方案结构。`
+    : `用户已决定【以选手 ${who} 为准，结合其余】：请以 ${who} 方案为主体框架，融入其他选手方案中经得起反驳的优点。`;
+}
+
+export interface JudgeRacerInput {
+  label: string;
+  plan: string;
+  rebuttal: string;
+}
 
 export function judgeFusePrompt(
   task: string,
-  planA: string,
-  planB: string,
-  rebuttalA: string,
-  rebuttalB: string,
+  racers: JudgeRacerInput[],
   strategy: RaceAdoptStrategy,
   comment?: string,
+  eliminated?: string[],
 ): string {
+  const sections = racers
+    .map((r) => `【选手 ${r.label} 方案】\n${r.plan}\n【选手 ${r.label} 的反驳/吸纳/辩护】\n${r.rebuttal}`)
+    .join('\n\n');
   return [
-    '你是这场方案赛马的裁判。用户已阅过双方方案与反驳/辩护并做出采纳决策，你的职责是**严格按用户的决策产出一份最终方案**。',
-    ADOPT_DIRECTIVES[strategy],
+    '你是这场方案赛马的裁判。用户已阅过各方方案与反驳/吸纳/辩护并做出采纳决策，你的职责是**严格按用户的决策产出一份最终方案**。',
+    adoptDirective(strategy),
+    '各选手「吸纳」节中互相认可的共识点视为高置信度设计，在符合用户决策的前提下优先纳入。',
+    '**你不是又一位选手**：除融合所必需的粘合设计外，禁止引入任何选手方案与吸纳声明之外的新设计；所有裁判自己补充的设计必须在溯源表中显式标注。',
+    ...(eliminated?.length
+      ? [`（选手 ${eliminated.join('、')} 已被用户剔除：其方案不在输入中，其余选手反驳中针对其的内容请忽略，不作为融合输入）`]
+      : []),
     ...(comment ? ['', `【用户评语（出方案时必须遵从的指导意见）】\n${comment}`] : []),
     '',
-    '请输出：',
-    '一、最终方案（分点、可执行，作为后续实施依据）；',
-    '二、采纳说明（对照用户决策，说明保留/融入/舍弃了什么及原因）。',
+    '请输出三个部分（标题固定）：',
+    '一、最终方案：分点、可执行，作为后续实施依据；正文保持干净，不要混入来源标注；',
+    '二、设计溯源（表格）：| 设计点 | 来源 | 说明 |',
+    '   · 粒度为主要设计点（章节/步骤级），每个主要设计点都必须入表，不许遗漏；',
+    `   · 来源只能是：选手 X ／ 共识（多位选手一致或互相吸纳）／ 裁判补充；`,
+    '   · 「裁判补充」仅限融合所必需的粘合设计，必须在说明列解释为什么缺它不行；',
+    '三、取舍说明：对照用户决策，说明舍弃了哪些点及原因。',
     '',
     `【任务】\n${task}`,
     '',
-    `【选手 A 方案】\n${planA}`,
-    `【选手 A 的反驳/辩护】\n${rebuttalA}`,
-    '',
-    `【选手 B 方案】\n${planB}`,
-    `【选手 B 的反驳/辩护】\n${rebuttalB}`,
+    sections,
   ].join('\n');
 }
 
-/** ③b Judge revision: revise the current final plan per user annotation. */
+/** ③b Judge revision: revise the current final plan per user annotation.
+ *  修订后溯源表必须同步维护；因批注产生的改动来源标「用户批注」。 */
 export function judgeRevisePrompt(currentPlan: string, annotation: string): string {
   return [
     '用户对你上一版最终方案提出了批注。请据此**修订最终方案**，保留仍然有效的部分，只改动批注涉及处，并简要说明改了什么。',
+    '输出仍保持三段式（一、最终方案 / 二、设计溯源 / 三、取舍说明）：溯源表同步更新，',
+    '因本次批注新增或改动的设计点，来源标为「用户批注」；未变动的设计点保留原来源。',
     '',
     `【用户批注】\n${annotation}`,
     '',
@@ -165,6 +186,7 @@ export function roleSessionTitle(role: RaceRole, racePrompt: string): string {
   const tag: Record<RaceRole, string> = {
     racerA: '🏇A',
     racerB: '🏇B',
+    racerC: '🏇C',
     judge: '⚖裁判',
     builder: '🔨执行',
     auditor: '🛡审计',

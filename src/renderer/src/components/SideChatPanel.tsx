@@ -1,16 +1,17 @@
 /**
- * SideChatPanel — a read-only fork of the main conversation, opened
- * against the right rail (item 4). Model and reasoning-effort are
+ * SideChatPanel — a read-only fork of the main conversation, hosted as
+ * a tab in RightDock (item 4). Model and reasoning-effort are
  * switchable; the branch stays in plan (read-only) mode so it can
- * answer questions but never writes files or runs commands.
+ * answer questions but never writes files or runs commands. 只读提示
+ * 不再常驻——悬浮 dock 里的 sidechat tab 时以 tooltip 展示。
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUp, ChevronDown, MessagesSquare, Square, X } from 'lucide-react';
+import { ArrowUp, ChevronDown, Square } from 'lucide-react';
 
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
-import MessageItem from './MessageItem';
+import MessageList from './MessageList';
 import PermissionSheet from './PermissionSheet';
 import { EffortPicker } from './Composer';
 
@@ -19,36 +20,54 @@ const MIN_W = 300;
 const MAX_W = 720;
 const DEFAULT_W = 380;
 
+/** 读持久化的面板宽度（越界兑底默认值）；RightDock 的 pending 占位面板同步复用。 */
+export function readSidechatWidth(): number {
+  const saved = Number(localStorage.getItem('cs.sidechatWidth'));
+  return Number.isFinite(saved) && saved >= MIN_W && saved <= MAX_W ? saved : DEFAULT_W;
+}
+
 /** kimi 分支的只读护栏：kimi 没有 read-only sandbox，靠每条消息前置
  *  硬指令约束（codex 分支用 plan/read-only 模式，无需此护栏）。 */
 const SIDECHAT_GUARD =
   '【只读分支约束】本消息来自只读 sidechat：只允许阅读文件与回答问题，禁止一切写入/编辑/执行命令/创建计划文件等有副作用操作，也不要进入任何 Plan 工作流，直接用文字作答。';
 
-export default function SideChatPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }): JSX.Element {
+export default function SideChatPanel({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const sendKey = useChatStore((s) => s.settings?.sendKey ?? 'enter');
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   // 面板宽度：左缘拖拽调整，拖动中直接设 width（无过渡），松手持久化。
-  const [width, setWidth] = useState(() => {
-    const saved = Number(localStorage.getItem('cs.sidechatWidth'));
-    return Number.isFinite(saved) && saved >= MIN_W && saved <= MAX_W ? saved : DEFAULT_W;
-  });
+  const [width, setWidth] = useState(readSidechatWidth);
   const drag = useRef<{ startX: number; startW: number } | null>(null);
 
   const messages = ui?.messages ?? [];
-  const busy = meta?.status === 'running' || meta?.status === 'awaiting';
+  const sending = useChatStore((s) => !!s.sending[sessionId]);
+  const busy = meta?.status === 'running' || meta?.status === 'awaiting' || sending;
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  // 同 ChatView：折叠块 200ms 高度动画期间用 ResizeObserver 逐帧贴底。
+  useEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content) return;
+    const ro = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
+
   const send = (): void => {
     const value = text.trim();
+    // 启动中不拦 — 主进程 prompt 会等引擎就绪后投递（与主 Composer 一致）。
     if (!value || busy) return;
     setText('');
     // kimi/opencode 无 read-only 硬隔离（plan agent 会写计划文件），
@@ -73,7 +92,7 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
   };
 
   return (
-    <aside className="panel-in relative flex shrink-0 flex-col border-l border-line bg-bg-panel/50" style={{ width }}>
+    <aside className="relative flex shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
       {/* 左缘拖拽把手 — 悬停/拖动时高亮成细线 */}
       <div
         onPointerDown={(e) => {
@@ -92,16 +111,6 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
         }}
         className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize touch-none transition-colors duration-150 hover:bg-accent/40 active:bg-accent/60"
       />
-      <div className="flex shrink-0 items-center gap-2 px-3 pb-1.5 pt-2.5">
-        <MessagesSquare size={14} className="shrink-0 text-accent" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-ui font-medium">{t('sidechatTitle')}</div>
-          <div className="truncate text-[10.5px] text-ink-faint">{t('sidechatHint')}</div>
-        </div>
-        <button onClick={onClose} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
-          <X size={14} />
-        </button>
-      </div>
 
       <div
         ref={scrollRef}
@@ -111,10 +120,8 @@ export default function SideChatPanel({ sessionId, onClose }: { sessionId: strin
         }}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        <div className="flex flex-col gap-3 px-3 py-3 text-[13px]">
-          {messages.map((m) => (
-            <MessageItem key={m.id} msg={m} sessionId={sessionId} />
-          ))}
+        <div ref={contentRef} className="flex flex-col gap-3 px-3 py-3 text-[13px]">
+          <MessageList sessionId={sessionId} messages={messages} />
         </div>
       </div>
 

@@ -84,8 +84,9 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
             onAnswer={(optionId) => answer(current.requestId, optionId)}
             onDismiss={() => answer(current.requestId)}
             onNote={(text) => {
-              // 取消当前提问（模型收到 dismiss），补充说明排入队列，
-              // 回合结束后由 store 自动派发（chatStore turn.ended 分支）。
+              // 原文先以 Other: … 留档到消息记录，再取消当前提问（模型收到
+              // dismiss），补充说明排入队列，回合结束后由 store 自动派发。
+              useChatStore.getState().noteAskUserAnswer(sessionId, current.requestId, text);
               answer(current.requestId);
               useChatStore.getState().enqueueTo(sessionId, text);
             }}
@@ -228,11 +229,10 @@ function ApprovalCard({
             <button
               key={o.optionId}
               onClick={() => onAnswer(o.optionId)}
-              className={`rounded-lg border px-3.5 py-1.5 text-ui font-medium transition ${
-                rejecting
+              className={`rounded-lg border px-3.5 py-1.5 text-ui font-medium transition ${rejecting
                   ? 'border-line text-ink-soft hover:border-err/60 hover:text-err'
                   : 'border-accent/50 bg-accent text-white hover:opacity-90'
-              }`}
+                }`}
             >
               {o.name}
             </button>

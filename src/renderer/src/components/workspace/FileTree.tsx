@@ -13,6 +13,16 @@ interface Props {
   onOpenFile: (path: string) => void;
 }
 
+/** 树内拖拽节点的自定义 MIME — Composer 据此识别内部拖拽
+ *  （内部拖拽没有 File 对象，只能走 dataTransfer 自定义数据）。 */
+export const TREE_NODE_MIME = 'application/x-cyberslots-fsnode';
+
+/** 拖拽 ghost 用的内联图标（lucide Folder / FileText 同款路径）。 */
+const GHOST_ICONS = {
+  dir: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>',
+  file: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>',
+};
+
 const GIT_COLORS: Record<string, string> = {
   M: 'text-warn',
   A: 'text-ok',
@@ -66,10 +76,31 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
     });
   };
 
+  // 拖树节点到输入框 = 插入文件/文件夹引用。自绘 ghost 胶囊：默认
+  // ghost 是整行截图且锚点在按下位置，图块会相对光标下偏 — 这里把
+  // 锚点定在 ghost 垂直中心，与光标严格对齐。
+  const onNodeDragStart = (e: React.DragEvent, n: FsNode): void => {
+    e.dataTransfer.setData(TREE_NODE_MIME, JSON.stringify({ name: n.name, path: n.path, dir: n.dir }));
+    e.dataTransfer.setData('text/plain', n.path);
+    e.dataTransfer.effectAllowed = 'copy';
+    const ghost = document.createElement('div');
+    ghost.className = 'fs-drag-ghost';
+    ghost.innerHTML = n.dir ? GHOST_ICONS.dir : GHOST_ICONS.file;
+    const label = document.createElement('span');
+    label.textContent = n.name;
+    ghost.appendChild(label);
+    document.body.appendChild(ghost);
+    e.dataTransfer.setDragImage(ghost, 10, ghost.getBoundingClientRect().height / 2);
+    // 快照已取，下一帧即可移除。
+    setTimeout(() => ghost.remove());
+  };
+
   // 拖外部文件/文件夹进树 = 导入拷贝到工作区根目录，完成后刷新。
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragOver(false);
+    // 树内节点拖回树里 = 无意义，不触发导入。
+    if (e.dataTransfer.types.includes(TREE_NODE_MIME)) return;
     const paths: string[] = [];
     for (const file of Array.from(e.dataTransfer.files)) {
       const p = window.cyberslots.getPathForFile(file);
@@ -82,6 +113,8 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
     (children[dir] ?? []).map((n) => (
       <div key={n.path}>
         <button
+          draggable
+          onDragStart={(e) => onNodeDragStart(e, n)}
           onClick={() => (n.dir ? toggle(n.path) : onOpenFile(n.path))}
           onDoubleClick={() => !n.dir && onOpenFile(n.path)}
           className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[12.5px] text-ink-soft hover:bg-bg-hover"
@@ -112,13 +145,14 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
       className={`flex h-full flex-col ${dragOver ? 'outline outline-2 -outline-offset-2 outline-accent/60' : ''}`}
       onDragEnter={(e) => {
         e.preventDefault();
-        setDragOver(true);
+        // 内部节点拖拽不是导入场景，不亮导入描边。
+        if (!e.dataTransfer.types.includes(TREE_NODE_MIME)) setDragOver(true);
       }}
       onDragOver={(e) => {
         e.preventDefault();
         // 显式声明拷贝意图 — Windows Electron 下不设可能不触发 drop。
         e.dataTransfer.dropEffect = 'copy';
-        if (!dragOver) setDragOver(true);
+        if (!dragOver && !e.dataTransfer.types.includes(TREE_NODE_MIME)) setDragOver(true);
       }}
       onDragLeave={(e) => {
         // 仅当离开整个容器时取消高亮（避免子元素间移动闪烁）。

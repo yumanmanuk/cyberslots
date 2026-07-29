@@ -12,12 +12,16 @@ import type {
   EngineId,
   GoalControlAction,
   OpencodeCatalog,
+  OmpCatalog,
   PermissionMode,
+  ProviderQuotaInfo,
   SessionMeta,
   UnifiedMessage,
+  UsageStatsQuery,
+  UsageStatsResult,
   WindowAppearance,
 } from './types';
-import type { RaceAdoptStrategy, RaceCreateRequest, RaceEventEnvelope, RaceGroup } from './race';
+import type { RaceAdoptStrategy, RaceCreateRequest, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig } from './race';
 
 export const IPC = {
   // renderer → main (invoke/handle)
@@ -41,6 +45,8 @@ export const IPC = {
   sessionChangesDiff: 'session:changes-diff',
   sessionChangesRevert: 'session:changes-revert',
   sessionChangesAccept: 'session:changes-accept',
+  sessionUndoPreview: 'session:undo-preview',
+  sessionUndo: 'session:undo',
   sessionSteer: 'session:steer',
   sessionGoalSet: 'session:goal-set',
   sessionGoalControl: 'session:goal-control',
@@ -50,9 +56,13 @@ export const IPC = {
   workspaceAnnounce: 'workspace:announce',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  usageStats: 'usage:stats',
+  providerQuota: 'usage:provider-quota',
   engineConfigsGet: 'engine-configs:get',
   opencodeCatalogGet: 'opencode:catalog-get',
+  ompCatalogGet: 'omp:catalog-get',
   themeSync: 'window:theme-sync',
+  badgeSet: 'window:badge-set',
   cronList: 'cron:list',
   cronSave: 'cron:save',
   cronDelete: 'cron:delete',
@@ -64,8 +74,10 @@ export const IPC = {
   fsWrite: 'fs:write',
   fsGitStatus: 'fs:git-status',
   fsImport: 'fs:import',
+  fsIsDir: 'fs:is-dir',
   openIn: 'sys:open-in',
   attachmentSaveTemp: 'attachment:save-temp',
+  slashList: 'slash:list',
   // 面板内嵌终端
   terminalCreate: 'terminal:create',
   terminalInput: 'terminal:input',
@@ -76,8 +88,14 @@ export const IPC = {
   raceList: 'race:list',
   raceGet: 'race:get',
   raceAdopt: 'race:adopt',
+  raceRevokeAdopt: 'race:revoke-adopt',
   raceRevise: 'race:revise',
   raceFinalize: 'race:finalize',
+  raceResume: 'race:resume',
+  raceUpdateRole: 'race:update-role',
+  raceRetryRacer: 'race:retry-racer',
+  raceEliminate: 'race:eliminate',
+  raceRestartPlanning: 'race:restart-planning',
   raceCancel: 'race:cancel',
   // main → renderer (send/on)
   engineEvent: 'engine:event',
@@ -93,6 +111,8 @@ export interface SessionCreateRequest {
   title?: string;
   /** Bind the session to a named multi-folder workspace. */
   workspaceId?: string;
+  /** 赛马角色会话：所属 RaceGroup id（侧栏隐藏标记）。 */
+  raceId?: string;
 }
 
 export interface SessionPromptRequest {
@@ -102,6 +122,8 @@ export interface SessionPromptRequest {
   attachments?: string[];
   /** Reasoning effort override (codex turn/start). */
   effort?: string;
+  /** 对应的用户消息 id — 发送前拍逐提问快照（回退还原点）。 */
+  userMessageId?: string;
 }
 
 export interface AnswerPermissionRequest {
@@ -129,6 +151,27 @@ export interface FileContent {
 }
 
 export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt' | 'terminal';
+
+/** 斜线命令候选项（skill / command），来源：引擎全局目录或会话项目目录。 */
+export interface SlashItem {
+  /** 触发名（不含斜线），如 imagegen / codereview。 */
+  name: string;
+  /** 一句话描述（SKILL.md frontmatter description，或 md 首个有效行）。 */
+  description: string;
+  kind: 'skill' | 'command';
+  /** global = 引擎用户目录；project = 会话工作目录。 */
+  scope: 'global' | 'project';
+  /** 所属引擎生态；generic = 通用目录（.agents/skills，各引擎均可读）。 */
+  engine: EngineId | 'generic';
+  /** 来源文件绝对路径（tooltip / 排查用）。 */
+  path: string;
+}
+
+export interface SlashListRequest {
+  /** 会话工作目录（'' = 纯聊天模式，仅扫全局目录）。 */
+  cwd: string;
+  engine: EngineId;
+}
 
 /** 本会话被 AI 编辑的单个文件（含行级增删与变更类型），供「变更」面板接受/回退。 */
 export interface SessionChangeEntry {
@@ -175,6 +218,10 @@ export interface CyberSlotsApi {
   sessionChangesRevert(sessionId: string, path?: string): Promise<void>;
   /** 接受：保留改动并停止跟踪（不动磁盘）；path 省略 = 全部接受。 */
   sessionChangesAccept(sessionId: string, path?: string): Promise<void>;
+  /** 回退到某提问将撤销的文件清单；null = 该提问无快照（仅能移除消息）。 */
+  sessionUndoPreview(sessionId: string, messageId: string): Promise<SessionChangeEntry[] | null>;
+  /** 执行回退：还原文件 + 截断消息 + 重置引擎上下文；返回被移除的提问供回填。 */
+  sessionUndo(sessionId: string, messageId: string): Promise<{ text: string; attachments?: string[] }>;
   /** Steer the in-flight turn; resolves false when not steerable. */
   sessionSteer(sessionId: string, text: string): Promise<boolean>;
   /** Engine-native goal (codex thread/goal). */
@@ -189,12 +236,22 @@ export interface CyberSlotsApi {
   workspaceAnnounce(workspaceId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** 用量统计：主进程扫描各会话 turn_end 统计行按时间桶聚合。 */
+  usageStats(query: UsageStatsQuery): Promise<UsageStatsResult>;
+  /** 供应商余量/余额（kimi/minimax token plan、deepseek 余额）；只返回
+   *  本地配置里探到 key 的供应商，主进程代查带缓存（force = 跳过缓存）。 */
+  providerQuota(force?: boolean): Promise<ProviderQuotaInfo[]>;
   /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。 */
   engineConfigsGet(): Promise<EngineConfigsSnapshot>;
   /** opencode 模型目录（主进程代理 /config/providers，按需启动 server）。 */
   opencodeCatalogGet(force?: boolean): Promise<OpencodeCatalog>;
+  /** omp 模型目录（主进程代理 `omp models --json`，带缓存）。 */
+  ompCatalogGet(force?: boolean): Promise<OmpCatalog>;
   /** Push the resolved appearance to main so the native title bar matches. */
   themeSync(appearance: WindowAppearance): Promise<void>;
+  /** 任务栏角标（Windows overlay icon）：dataUrl = renderer 画好的角标图；
+   *  null = 清除。「等你处理」数量变化时由 App 侧推送。 */
+  badgeSet(dataUrl: string | null, description: string): Promise<void>;
   cronList(): Promise<CronTask[]>;
   cronSave(task: CronTask): Promise<CronTask[]>;
   cronDelete(id: string): Promise<CronTask[]>;
@@ -206,9 +263,13 @@ export interface CyberSlotsApi {
   fsGitStatus(root: string): Promise<Record<string, string>>;
   /** 将拖入的外部文件/文件夹拷贝进工作区根目录；返回成功个数。 */
   fsImport(root: string, srcPaths: string[]): Promise<number>;
+  /** 路径是否目录（拖放到输入框时区分文件夹/文件引用）。 */
+  fsIsDir(path: string): Promise<boolean>;
   openIn(target: OpenTarget, path: string): Promise<void>;
   /** 粘贴/拖拽的二进制写临时文件，返回绝对路径（图片附件）。 */
   attachmentSaveTemp(bytes: Uint8Array, ext: string): Promise<string>;
+  /** 斜线命令候选：扫描引擎全局 + 项目级 skills/commands（输入 / 唤起补全菜单）。 */
+  slashList(req: SlashListRequest): Promise<SlashItem[]>;
   /** 面板内嵌终端：确保会话 shell 存在（cwd = 会话目录）。 */
   terminalCreate(id: string, cwd: string): Promise<void>;
   /** renderer 键入 → shell stdin。 */
@@ -227,10 +288,22 @@ export interface CyberSlotsApi {
   raceGet(raceId: string): Promise<RaceGroup | null>;
   /** 裁判阶段第一步：用户选定采纳策略（4选1 + 可选评语）→ 裁判出最终方案。 */
   raceAdopt(raceId: string, strategy: RaceAdoptStrategy, comment?: string): Promise<void>;
+  /** ④a 反悔：撤回采纳决策（仅裁判尚未出方案时），回到选策略关口。 */
+  raceRevokeAdopt(raceId: string): Promise<void>;
   /** 裁判融合方案的批注修订循环。 */
   raceRevise(raceId: string, annotation: string): Promise<void>;
   /** 定稿裁判方案 → 交给 Builder 执行。 */
   raceFinalize(raceId: string): Promise<void>;
+  /** 重启后继续被打断的赛马（重跑当前阶段）。 */
+  raceResume(raceId: string): Promise<void>;
+  /** 重试前调整选手配置（仅 racerA/racerB；引擎/模型变更后重跑时重建会话）。 */
+  raceUpdateRole(raceId: string, role: RaceRole, cfg: RaceRoleConfig): Promise<void>;
+  /** 单选手重试：只补跑该选手当前阶段回合（另一侧不受影响）。 */
+  raceRetryRacer(raceId: string, role: RaceRole): Promise<void>;
+  /** ✂ 剔除选手（三人以上在场且裁判选策略前；剩余 ≥2；不可逆）。 */
+  raceEliminate(raceId: string, role: RaceRole): Promise<void>;
+  /** 裁判选策略前回退：清空产物重跑双规划。 */
+  raceRestartPlanning(raceId: string): Promise<void>;
   raceCancel(raceId: string): Promise<void>;
   /** 订阅赛马阶段/角色/融合方案/审计等编排事件（main → renderer）。 */
   onRaceEvent(listener: (e: RaceEventEnvelope) => void): () => void;

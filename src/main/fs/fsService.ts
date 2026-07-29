@@ -29,6 +29,11 @@ export function saveTempAttachment(bytes: Uint8Array, ext: string): string {
   return file;
 }
 
+/** 路径是否目录 — 拖放到输入框时区分文件夹/文件引用（不存在视为文件）。 */
+export async function isDirectory(path: string): Promise<boolean> {
+  return stat(path).then((s) => s.isDirectory()).catch(() => false);
+}
+
 /** List one directory level, dirs first then files, alpha-sorted. */
 export async function listTree(root: string, sub = ''): Promise<FsNode[]> {
   const dir = sub ? resolve(root, sub) : resolve(root);
@@ -90,9 +95,14 @@ export async function gitStatus(root: string): Promise<Record<string, string>> {
 export async function openIn(target: OpenTarget, path: string): Promise<void> {
   const quoted = path;
   switch (target) {
-    case 'explorer':
-      shell.showItemInFolder(path);
+    case 'explorer': {
+      // 目录直接打开其内容（workspace/project 菜单的“在文件管理器中打开”）；
+      // 文件则在父目录中定位选中。
+      const isDir = await stat(path).then((s) => s.isDirectory()).catch(() => false);
+      if (isDir) await shell.openPath(path);
+      else shell.showItemInFolder(path);
       return;
+    }
     case 'vscode':
       await spawnDetached(['code', quoted]);
       return;

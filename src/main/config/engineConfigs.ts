@@ -19,6 +19,7 @@ import type {
   KimiConfigSnapshot,
 } from '@shared/types';
 import { readOpencodeSnapshot } from '../engine/opencode/resolveOpencode';
+import { readOmpSnapshot } from '../engine/omp/resolveOmp';
 
 type Json = Record<string, unknown>;
 
@@ -163,6 +164,7 @@ export function readEngineConfigs(): EngineConfigsSnapshot {
     kimi,
     codex,
     opencode: readOpencodeSnapshot(),
+    omp: readOmpSnapshot(),
     routeSupport: {
       kimi: kimiRouteSupport(kimi),
       codex: codexRouteSupport(codex, kimi),

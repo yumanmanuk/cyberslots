@@ -14,6 +14,7 @@ export const ENGINE_LABELS: Record<EngineId, string> = {
   codex: 'Codex',
   kimi: 'Kimi Code',
   opencode: 'opencode',
+  omp: 'Oh My Pi',
 };
 
 const ENGINE_PATHS: Record<EngineId, string> = {
@@ -26,6 +27,9 @@ const ENGINE_PATHS: Record<EngineId, string> = {
   // 竖条字形天生光学面积小，故铺满视窗高度以对齐 codex/kimi 的视觉体量。
   opencode:
     'M5.5.5h13A1.5 1.5 0 0 1 20 2v20a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 22V2A1.5 1.5 0 0 1 5.5.5zM8 4.5v15h8v-15z',
+  // omp 品牌标识：⌥ Option 符号（omp.sh logo mark）。自绘实心笔画：
+  // 左上横线接斜线下行到右下横线 + 右上独立短横线，fill 绘制跟随 currentColor。
+  omp: 'M2 5h7.1l8.2 11H22v3h-6.2L7.6 8H2V5zm13 0h7v3h-7V5z',
 };
 
 /** opencode 品牌银色渐变（金属光泽）：上亮→中暗→下回光，不随主题变色。

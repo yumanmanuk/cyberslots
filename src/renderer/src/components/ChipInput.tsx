@@ -18,8 +18,10 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 
 export interface ChipInputHandle {
   focus(): void;
-  /** 在当前光标处插入一个文件引用胶囊（显示名，序列化为 `名(路径)`）。 */
-  insertFileChip(name: string, path: string): void;
+  /** 在当前光标处插入一个文件/文件夹引用胶囊（显示名，序列化为 `名(路径)`）。 */
+  insertFileChip(name: string, path: string, dir?: boolean): void;
+  /** 整体替换为纯文本并把光标移到末尾（斜线命令菜单插入触发词）。 */
+  setPlainText(v: string): void;
 }
 
 interface Props {
@@ -79,7 +81,7 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
 
   useImperativeHandle(ref, () => ({
     focus: () => elRef.current?.focus(),
-    insertFileChip: (name, path) => {
+    insertFileChip: (name, path, dir) => {
       const el = elRef.current;
       if (!el) return;
       el.focus();
@@ -97,6 +99,8 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
       chip.dataset.chip = '1';
       chip.dataset.name = name;
       chip.dataset.path = path;
+      // 文件夹引用 — 中性描边 + 文件夹图标（见 index.css [data-dir]）。
+      if (dir) chip.dataset.dir = '1';
       chip.contentEditable = 'false';
       chip.className = 'oc-file-chip';
       chip.textContent = name;
@@ -107,6 +111,20 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
       // 光标移到插入内容之后。
       range.setStartAfter(space);
       range.collapse(true);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      onChange(serialize(el));
+      syncEmpty();
+    },
+    setPlainText: (v) => {
+      const el = elRef.current;
+      if (!el) return;
+      el.textContent = v;
+      el.focus();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
       sel?.removeAllRanges();
       sel?.addRange(range);
       onChange(serialize(el));

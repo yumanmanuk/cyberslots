@@ -2,15 +2,21 @@ import { useEffect, useRef, useState } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 import { useChatStore } from './store/chatStore';
+import { useRaceStore } from './store/raceStore';
 import type { ResolvedMode, ThemeMode } from '@shared/types';
 import { useT } from './i18n';
 import Sidebar from './components/Sidebar';
+import { BrandMark } from './components/brand';
 import ChatView from './components/ChatView';
 import NewSessionView from './components/NewSessionView';
 import ErrorBoundary from './components/ErrorBoundary';
 import SettingsView from './components/SettingsView';
+import UsageView from './components/UsageView';
 import ScheduledView from './components/ScheduledView';
 import ArchivedView from './components/ArchivedView';
+import RaceView from './components/race/RaceView';
+import RaceSetup from './components/race/RaceSetup';
+import MissionControl from './components/mission/MissionControl';
 
 /** system 模式按 OS 明暗实时解析（监听 prefers-color-scheme 变化）。 */
 function useResolvedMode(mode: ThemeMode): ResolvedMode {
@@ -24,10 +30,42 @@ function useResolvedMode(mode: ThemeMode): ResolvedMode {
   return mode === 'system' ? (systemDark ? 'dark' : 'light') : mode;
 }
 
+/** 任务栏角标：待处理数（awaiting/error 会话 + 等决策赛马）画成红圈白字 overlay。 */
+function useTaskbarBadge(): void {
+  const sessions = useChatStore((s) => s.sessions);
+  const races = useRaceStore((s) => s.races);
+  useEffect(() => {
+    const count =
+      sessions.filter((m) => !m.archived && !m.raceId && (m.status === 'awaiting' || m.status === 'error')).length +
+      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt).length;
+    if (count === 0) {
+      void window.cyberslots.badgeSet(null, '');
+      return;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#e5484d';
+    ctx.beginPath();
+    ctx.arc(16, 16, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(count > 99 ? '99' : String(count), 16, 17);
+    void window.cyberslots.badgeSet(canvas.toDataURL('image/png'), `${count} pending`);
+  }, [sessions, races]);
+}
+
 export default function App(): JSX.Element {
   const t = useT();
   const init = useChatStore((s) => s.init);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const dashboardOpen = useChatStore((s) => s.dashboardOpen);
+  const activeRaceId = useRaceStore((s) => s.activeRaceId);
   const themeMode = useChatStore((s) => s.settings?.themeMode);
   const themePalette = useChatStore((s) => s.settings?.themePalette);
   const mode = useResolvedMode(themeMode ?? 'light');
@@ -36,9 +74,16 @@ export default function App(): JSX.Element {
   const [peek, setPeek] = useState(false);
   const peekTimer = useRef<ReturnType<typeof setTimeout>>();
 
+  useTaskbarBadge();
+
   useEffect(() => {
     void init();
   }, [init]);
+
+  // 赛马切片独立初始化（订阅 race:event + 拉取持久化赛马列表）。
+  useEffect(() => {
+    void useRaceStore.getState().init();
+  }, []);
 
   // 主题属性挂 <html>（而非根 div）：portal 到 body 的弹层（WorkspaceDialog 等）
   // 也能继承主题 CSS 变量；未加载完成前走 CSS :root 回退（notion 浅色），不闪烁。
@@ -69,7 +114,12 @@ export default function App(): JSX.Element {
     <div className="flex h-full flex-col bg-bg-canvas text-ink">
       {/* 40px 拖拽标题条 — 与侧栏同色融合（codex 桌面版风），无分隔线 */}
       <header className="drag flex h-10 shrink-0 items-center gap-2 px-3">
-        {/* 展开/折叠按钮固定在标题栏最左 — 两种状态下位置不变，图标交叉旋转淡入淡出 */}
+        {/* 品牌占标题栏最左（Windows 应用图标惯例位，品牌优先）；
+            折叠按钮紧随其后 — 品牌宽度恒定，按钮在两种状态下位置依然不变，图标交叉旋转淡入淡出 */}
+        <span className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-ink-soft">
+          <BrandMark size={15} className="text-accent" />
+          {t('appName')}
+        </span>
         <button
           title={sidebarCollapsed ? t('expandSidebar') : t('collapseSidebar')}
           onClick={toggleSidebar}
@@ -77,18 +127,15 @@ export default function App(): JSX.Element {
         >
           <PanelLeftClose
             size={15}
-            className={`absolute transition-all duration-200 ${
-              sidebarCollapsed ? 'rotate-90 scale-50 opacity-0' : 'rotate-0 scale-100 opacity-100'
-            }`}
+            className={`absolute transition-all duration-200 ${sidebarCollapsed ? 'rotate-90 scale-50 opacity-0' : 'rotate-0 scale-100 opacity-100'
+              }`}
           />
           <PanelLeftOpen
             size={15}
-            className={`absolute transition-all duration-200 ${
-              sidebarCollapsed ? 'rotate-0 scale-100 opacity-100' : '-rotate-90 scale-50 opacity-0'
-            }`}
+            className={`absolute transition-all duration-200 ${sidebarCollapsed ? 'rotate-0 scale-100 opacity-100' : '-rotate-90 scale-50 opacity-0'
+              }`}
           />
         </button>
-        <span className="text-[12px] font-semibold tracking-wide text-ink-soft">{t('appName')}</span>
       </header>
 
       <div className="relative flex min-h-0 flex-1">
@@ -96,9 +143,8 @@ export default function App(): JSX.Element {
             不用 overflow/transform 容器 — 它们会裁剪越界弹层（齿轮菜单子菜单）、
             劫持 fixed 定位（菜单点击关闭背景、工作区对话框）。 */}
         <div
-          className={`flex h-full shrink-0 transition-[margin-left] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
-            sidebarCollapsed ? '-ml-64' : 'ml-0'
-          }`}
+          className={`flex h-full shrink-0 transition-[margin-left] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${sidebarCollapsed ? '-ml-64' : 'ml-0'
+            }`}
         >
           <Sidebar />
         </div>
@@ -111,9 +157,8 @@ export default function App(): JSX.Element {
             <div
               onMouseEnter={peekEnter}
               onMouseLeave={peekLeave}
-              className={`absolute bottom-0 left-0 top-0 z-30 shadow-2xl transition-[margin-left,opacity] duration-300 ease-out ${
-                peek ? 'ml-0 opacity-100' : '-ml-64 opacity-0'
-              }`}
+              className={`absolute bottom-0 left-0 top-0 z-30 shadow-2xl transition-[margin-left,opacity] duration-300 ease-out ${peek ? 'ml-0 opacity-100' : '-ml-64 opacity-0'
+                }`}
             >
               <Sidebar overlay />
             </div>
@@ -123,14 +168,24 @@ export default function App(): JSX.Element {
         {/* 主内容「浮层」— 左上大圆角，靠色块与画布分层，不用分隔线 */}
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[20px] bg-bg shadow-sm">
           <ErrorBoundary>
-            {activeSessionId ? <ChatView key={activeSessionId} sessionId={activeSessionId} /> : <NewSessionView />}
+            {activeRaceId ? (
+              <RaceView raceId={activeRaceId} />
+            ) : activeSessionId ? (
+              <ChatView key={activeSessionId} sessionId={activeSessionId} />
+            ) : dashboardOpen ? (
+              <MissionControl />
+            ) : (
+              <NewSessionView />
+            )}
           </ErrorBoundary>
         </main>
         <SettingsView />
+        <UsageView />
       </div>
 
       <ScheduledView />
       <ArchivedView />
+      <RaceSetup />
     </div>
   );
 }

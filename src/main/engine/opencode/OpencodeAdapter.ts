@@ -17,10 +17,12 @@ import type {
   PermissionMode,
   PermissionOptionView,
   PlanEntry,
+  ToolCallContent,
   ToolCallStatus,
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { ThinkSplitter } from '../thinkSplitter';
 import type { OpencodeEventHub, OpencodeSseEvent } from './OpencodeEventHub';
 import type { OpencodeServerHost } from './OpencodeServerHost';
 
@@ -64,6 +66,10 @@ export class OpencodeAdapter implements EngineAdapter {
   private turnStartedAt = 0;
   /** partID → 已下发字符数（part.updated 全量快照 → 自算增量）。 */
   private readonly partSent = new Map<string, number>();
+  /** 已回填真实思考时长的 reasoning partID（time.end 只报一次）。 */
+  private readonly reasoningEndSent = new Set<string>();
+  /** MiniMax-M3 等模型把 `<think>` 内联在 text part 里（opencode 不拆），二次分流。 */
+  private readonly splitter = new ThinkSplitter();
   /** messageID → role（过滤用户消息 echo 的 part 事件）。 */
   private readonly messageRoles = new Map<string, string>();
   /** 本回合 assistant 消息的 token/cost 快照（message.updated 持续刷新）。 */
@@ -155,6 +161,7 @@ export class OpencodeAdapter implements EngineAdapter {
     await this.ensureLive();
     const turnId = ++this.turnId;
     this.turnHadError = false;
+    this.splitter.reset();
     this.turnTokens = undefined;
     this.turnCost = 0;
     this.turnStartedAt = Date.now();
@@ -378,34 +385,57 @@ export class OpencodeAdapter implements EngineAdapter {
         const sent = this.partSent.get(partID) ?? 0;
         if (full.length > sent) {
           this.partSent.set(partID, full.length);
-          this.emit({ type: 'text.delta', turnId, text: full.slice(sent) });
+          for (const p of this.splitter.push(full.slice(sent))) {
+            this.emit({ type: p.kind === 'thinking' ? 'thinking.delta' : 'text.delta', turnId, text: p.text });
+          }
         }
         return;
       }
       case 'reasoning': {
         const full = String(part.text ?? '');
         const sent = this.partSent.get(partID) ?? 0;
-        if (full.length > sent) {
-          this.partSent.set(partID, full.length);
-          this.emit({ type: 'thinking.delta', turnId, text: full.slice(sent) });
-        }
+        // 引擎报的真实思考起止时间（SSE 快照常整段突发送达，渲染端
+        // 墙钟会把几秒的思考算成几十毫秒 — 时长以 part.time 为准）。
+        const time = (part.time ?? {}) as Json;
+        const durationMs =
+          typeof time.start === 'number' && typeof time.end === 'number' && time.end > time.start
+            ? time.end - time.start
+            : undefined;
+        const delta = full.length > sent ? full.slice(sent) : '';
+        // 无新增量且无新时长可报 → 静默；纯时长回填用空 delta 携带。
+        if (!delta && (durationMs === undefined || this.reasoningEndSent.has(partID))) return;
+        this.partSent.set(partID, full.length);
+        if (durationMs !== undefined) this.reasoningEndSent.add(partID);
+        this.emit({ type: 'thinking.delta', turnId, text: delta, durationMs });
         return;
       }
       case 'tool': {
         const state = (part.state ?? {}) as Json;
         const input = (state.input ?? {}) as Json;
+        const meta = (state.metadata ?? {}) as Json;
         const tool = String(part.tool ?? 'tool');
         const status = String(state.status ?? 'pending');
-        const output = status === 'error' ? String(state.error ?? '') : state.output ? String(state.output) : '';
+        // 运行中 shell 把实时输出推在 metadata.output；完成后才有 state.output。
+        const output =
+          status === 'error'
+            ? String(state.error ?? '')
+            : state.output
+              ? String(state.output)
+              : meta.output
+                ? String(meta.output)
+                : '';
         const loc = firstString(input.filePath, input.path, input.file);
         this.emit({
           type: 'tool.upsert',
           turnId,
           toolCallId: String(part.callID ?? partID),
-          title: state.title ? String(state.title) : tool,
+          title:
+            firstString(state.title, input.command, input.pattern) ??
+            (loc ? String(loc).split(/[\\/]/).pop()! : tool),
           toolKind: mapToolKind(tool),
+          toolName: tool,
           status: mapToolStatus(status),
-          content: output ? { text: output.slice(0, 20_000) } : undefined,
+          content: buildToolContent(tool, output, input, meta),
           locations: loc ? [loc] : undefined,
         });
         return;
@@ -428,6 +458,9 @@ export class OpencodeAdapter implements EngineAdapter {
     const done = this.turnDone;
     if (!done) return;
     this.turnDone = undefined;
+    for (const p of this.splitter.flush()) {
+      this.emit({ type: p.kind === 'thinking' ? 'thinking.delta' : 'text.delta', turnId: this.turnId, text: p.text });
+    }
     const t = this.turnTokens;
     // opencode 的 tokens.input 不含缓存部分（cache.read/write 单列），这里归一成
     // codex 语义：inputTokens = 总输入（含缓存），cachedInputTokens 为其子集。
@@ -506,10 +539,40 @@ function mapToolKind(tool: string): string {
   const t = tool.toLowerCase();
   if (t.includes('bash') || t.includes('shell')) return 'execute';
   if (t.includes('edit') || t.includes('write') || t.includes('patch')) return 'edit';
-  if (t.includes('read') || t.includes('grep') || t.includes('glob') || t.includes('list')) return 'read';
+  if (t.includes('grep') || t.includes('glob')) return 'search';
+  if (t.includes('read') || t.includes('list')) return 'read';
   if (t.includes('fetch') || t.includes('search') || t.includes('web')) return 'fetch';
   if (t.includes('todo')) return 'think';
   return 'other';
+}
+
+/** 从工具 state.metadata / input 提炼 UI 徽章数据：行数变更、A/M 判定、
+ *  搜索命中数、shell 退出码（opencode edit 带 filediff，write 带 exists）。 */
+function buildToolContent(tool: string, output: string, input: Json, meta: Json): ToolCallContent | undefined {
+  const c: ToolCallContent = {};
+  if (output) c.text = output.slice(0, 20_000);
+  const fd = meta.filediff as Json | undefined;
+  if (fd && typeof fd === 'object') {
+    c.additions = num(fd.additions);
+    c.deletions = num(fd.deletions);
+    if (fd.patch) c.patch = String(fd.patch).slice(0, 40_000);
+  } else if (typeof meta.diff === 'string' && meta.diff) {
+    c.patch = meta.diff.slice(0, 40_000);
+  }
+  const t = tool.toLowerCase();
+  if (t.includes('write')) {
+    c.changeKind = meta.exists === false ? 'add' : 'modify';
+    // write 不返回行数统计 — 新建文件时用入参内容行数兑底。
+    if (c.additions == null && c.changeKind === 'add' && typeof input.content === 'string') {
+      c.additions = input.content.split('\n').length;
+    }
+  } else if (t.includes('edit') || t.includes('patch')) {
+    c.changeKind = String(input.oldString ?? ' ') === '' ? 'add' : 'modify';
+  }
+  if (meta.matches != null) c.matches = num(meta.matches);
+  else if (meta.count != null) c.matches = num(meta.count);
+  if (typeof meta.exit === 'number') c.exitCode = meta.exit;
+  return Object.keys(c).length > 0 ? c : undefined;
 }
 
 function mapToolStatus(s: string): ToolCallStatus {

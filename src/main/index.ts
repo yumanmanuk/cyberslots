@@ -53,12 +53,18 @@ let race: RaceManager | undefined;
 function createWindow(appSettings: AppSettings): void {
   const appearance: WindowAppearance = { palette: appSettings.themePalette, mode: resolveMode(appSettings.themeMode) };
   const chrome = chromeFor(appearance);
+  // 品牌图标（任务栏/Alt+Tab）：免安装包不跑 rcedit，靠运行时 icon 选项生效；
+  // 打包后随 extraResources 落在 resources/icon.png，dev 直接读仓库 resources 目录。
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(app.getAppPath(), 'resources', 'icon.png');
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 960,
     minHeight: 600,
     title: '赛博老虎机',
+    icon: iconPath,
     backgroundColor: chrome.bg,
     show: false,
     autoHideMenuBar: true,

@@ -10,7 +10,7 @@
 
 // ---------------------------------------------------------------- engines
 
-export type EngineId = 'kimi' | 'codex' | 'opencode';
+export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp';
 
 /** Session permission mode — union of both engines' surfaces (kimi: default/plan/auto/yolo). */
 export type PermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
@@ -52,6 +52,9 @@ export interface SessionMeta {
   pinned: boolean;
   /** Set when this session was forked off another one (sidechat). */
   parentId?: string;
+  /** 赛马角色会话标记：所属 RaceGroup id。侧栏隐藏，仅从宿主对话的
+   *  赛马菜单进入赛马视图查看（赛马寄生于发起它的对话）。 */
+  raceId?: string;
   /** Sidebar grouping: id of the WorkspaceInfo this session belongs to. */
   workspaceId?: string;
   /** Marks sessions that finished a turn while not being viewed. */
@@ -67,13 +70,48 @@ export interface SessionMeta {
 
 // ---------------------------------------------------------- message model
 
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'canceled';
+export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'canceled' | 'proposed';
 
 export interface ToolCallContent {
   /** Best-effort textual output/diff preview extracted from the engine. */
   text?: string;
   /** Structured diff, when the tool edited a file. */
   diff?: { path: string; oldText?: string; newText?: string };
+  /** Unified diff patch text (opencode edit/write metadata; omp hashline/ast_edit). */
+  patch?: string;
+  /** 编辑完成后的行数变更统计（+N / -N 徽章）。 */
+  additions?: number;
+  deletions?: number;
+  /** 文件变更性质 — A（新增）/ M（修改）/ D（删除）徽章。 */
+  changeKind?: 'add' | 'modify' | 'delete';
+  /** grep/glob 等搜索类工具的命中数（"N results"）。 */
+  matches?: number;
+  /** shell 退出码（非 0 显示 Exit N）。 */
+  exitCode?: number;
+  /** omp 子代理（task）进度流：最新进度行 + 尾部输出（卡内滚动）。 */
+  progress?: { line: string; tail?: string[] };
+  /** 工具输出图片（generate_image / inspect_image）：data URI 或文件路径。 */
+  images?: string[];
+}
+
+/**
+ * 文件选区引用 —— 「添加到对话」卡片背后真正的 payload。
+ * 卡片上只显示 `{EXT} 文件名#L起-止`；发送时把快照文本+出处
+ * 序列化成结构化块注入 prompt。
+ */
+export interface CodeSelection {
+  id: string;
+  /** 绝对路径 —— 模型可用工具继续读该文件拿上下文。 */
+  path: string;
+  fileName: string;
+  /** 扩展名（小写无点）→ 卡片徽标 + 代码块语言标识。 */
+  ext: string;
+  /** 1-based，含首尾。 */
+  startLine: number;
+  endLine: number;
+  /** 点击「添加到对话」那一刻的文本快照：AI/用户随后改动文件
+   *  都不影响这条引用（否则卡片行号会与发送内容错位）。 */
+  text: string;
 }
 
 /** One rendered item in the conversation stream. */
@@ -84,6 +122,9 @@ export type UnifiedMessage =
       turnId: number;
       text: string;
       attachments?: string[];
+      /** 随这条提问发送的代码选区引用（气泡里显示为卡片；
+       *  发送时已序列化进 prompt，此处仅供 UI 回显）。 */
+      selections?: CodeSelection[];
       createdAt: number;
       steer?: boolean;
       /** 该条提问是作为 Goal 发送的（气泡下方标注 Sent as goal）。 */
@@ -97,7 +138,9 @@ export type UnifiedMessage =
       turnId: number;
       toolCallId: string;
       title: string;
-      toolKind: string; // read | edit | execute | fetch | think | other (ACP tool kinds)
+      toolKind: string; // read | edit | search | execute | fetch | think | other (ACP tool kinds)
+      /** 引擎原始工具名（read/grep/glob/bash…），用于 Explored 明细行动词。 */
+      toolName?: string;
       status: ToolCallStatus;
       content?: ToolCallContent;
       locations?: string[];
@@ -124,6 +167,8 @@ export type UnifiedMessage =
       question: string;
       options: PermissionOptionView[];
       answeredOptionId?: string;
+      /** 用户在提问卡输入框里的自定义回答原文（Other: …），仅增不改。 */
+      answeredNote?: string;
       createdAt: number;
     }
   | { kind: 'error'; id: string; turnId: number; message: string; createdAt: number }
@@ -164,6 +209,66 @@ export interface UsageInfo {
   approx?: boolean;
 }
 
+// ---------------------------------------------------------- usage stats
+
+/** 用量统计查询（渲染层 → 主进程；时间为毫秒时间戳）。 */
+export interface UsageStatsQuery {
+  startTs: number;
+  endTs: number;
+  /** 省略 = 全部引擎。 */
+  engine?: EngineId;
+}
+
+/** 单个时间桶的用量聚合（跨度 ≤24h 按小时桶，否则按本地日历天）。 */
+export interface UsageBucket {
+  /** 桶起始时刻（ms）。 */
+  ts: number;
+  requests: number;
+  /** 上行 token 总量（含缓存命中部分，语义同 UsageInfo.inputTokens）。 */
+  inputTokens: number;
+  outputTokens: number;
+  /** 命中 provider 缓存的上行子集。 */
+  cachedTokens: number;
+}
+
+export interface UsageStatsResult {
+  bucketMs: number;
+  buckets: UsageBucket[];
+  totals: {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+    totalTokens: number;
+  };
+}
+
+// -------------------------------------------------------- provider quota
+
+export type QuotaProviderId = 'kimi' | 'minimax' | 'deepseek';
+
+/** Token Plan 单个时间窗（kimi / minimax coding plan）。 */
+export interface QuotaTierInfo {
+  name: 'five_hour' | 'weekly';
+  /** 已用百分比 0–100。 */
+  utilization: number;
+  /** 窗口重置时刻（ms）；缺省 = 接口未给。 */
+  resetsAt?: number;
+}
+
+/** 单个供应商的余量/余额查询结果。只返回本地引擎配置里探测到
+ *  apiKey 的供应商；key 本身只在主进程使用，从不跨进 renderer。 */
+export interface ProviderQuotaInfo {
+  provider: QuotaProviderId;
+  ok: boolean;
+  error?: string;
+  /** kimi/minimax token plan 时间窗。 */
+  tiers?: QuotaTierInfo[];
+  /** deepseek 账户余额（按币种）。 */
+  balances?: Array<{ currency: string; amount: number }>;
+  queriedAt: number;
+}
+
 /** Engine-native goal snapshot (codex thread/goal; kimi ACP has no goal surface). */
 export interface GoalInfo {
   objective: string;
@@ -185,13 +290,14 @@ export type EngineEvent =
   /** Echo of a user prompt injected outside the renderer (cron runs). */
   | { type: 'user.echo'; turnId: number; text: string }
   | { type: 'text.delta'; turnId: number; text: string }
-  | { type: 'thinking.delta'; turnId: number; text: string }
+  | { type: 'thinking.delta'; turnId: number; text: string; durationMs?: number }
   | {
       type: 'tool.upsert';
       turnId: number;
       toolCallId: string;
       title?: string;
       toolKind?: string;
+      toolName?: string;
       status?: ToolCallStatus;
       content?: ToolCallContent;
       locations?: string[];
@@ -355,6 +461,47 @@ export interface OpencodeConfigSnapshot {
   error?: string;
 }
 
+/** omp (oh-my-pi) `omp models --json` 归一化后的单个模型条目。
+ *  slug = `provider/modelID`（spawn --model 参数值）；ACP 面思考档只有
+ *  off/auto（probe-omp-findings §3），精细档经 spawn --thinking 承载。 */
+export interface OmpModelEntry {
+  slug: string;
+  provider: string;
+  /** provider 展示名（选择器分组标题）。 */
+  providerName?: string;
+  modelID: string;
+  displayName?: string;
+  contextWindow?: number;
+  /** 思考能力标记（reasoning 模型 → effort 选项给 off/auto）。 */
+  reasoning?: boolean;
+  /** 思考档位（目录 thinking[] 实报，如 minimal/low/medium/high 或 high/max）；
+   *  带模型 spawn 后 ACP configOptions 会动态扩展出这些档。 */
+  efforts?: string[];
+  /** 订阅/套餐类 provider（coding plan）标记，选择器角标。 */
+  subscription?: boolean;
+  /** 单价 $/1M tokens（0/0 = 免费模型）。 */
+  costInput?: number;
+  costOutput?: number;
+}
+
+/** omp 模型目录拉取结果（ompCatalogGet IPC 返回体）。
+ *  无凭据时 models 为空（引擎默认兑底）— probe-omp-findings §4。 */
+export interface OmpCatalog {
+  models: OmpModelEntry[];
+  error?: string;
+}
+
+/** omp CLI 只读快照（静态探测，不进会话）。永不写入 ~/.omp。 */
+export interface OmpConfigSnapshot {
+  installed: boolean;
+  version?: string;
+  cliPath?: string;
+  /** ~/.omp/agent 存在性（已初始化/登录过的痕迹）— 仅展示。 */
+  configPath?: string;
+  configExists?: boolean;
+  error?: string;
+}
+
 export interface RouteSupport {
   ok: boolean;
   /** 不可路由时的人话原因（已 i18n 化的中文，renderer 直接展示）。 */
@@ -365,6 +512,7 @@ export interface EngineConfigsSnapshot {
   kimi: KimiConfigSnapshot;
   codex: CodexConfigSnapshot;
   opencode: OpencodeConfigSnapshot;
+  omp: OmpConfigSnapshot;
   routeSupport: { kimi: RouteSupport; codex: RouteSupport };
 }
 
@@ -386,6 +534,21 @@ export interface NotificationSettings {
   error: boolean;
 }
 
+/** 赛马单角色默认（设置页配置，发起面板预填）：modelId/effort 空串 =
+ *  跟随引擎默认模型 / 最大思考档。 */
+export interface RaceRoleDefaultSetting {
+  engine: EngineId;
+  modelId: string;
+  effort?: string;
+}
+
+/** 赛马默认配置：roles 键为角色 id（racerA/racerB/racerC/judge/builder/auditor）。 */
+export interface RaceSettings {
+  /** 默认启用第三选手（发起面板可临时开关；A/B 必选）。 */
+  enableRacerC: boolean;
+  roles: Record<string, RaceRoleDefaultSetting>;
+}
+
 export type AppLanguage = 'zh' | 'en';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -399,6 +562,16 @@ export interface WindowAppearance {
   mode: ResolvedMode;
 }
 
+/** 满窗降切规则：「同能力不同上下文窗口」模型对（如 k3 256k → k3）。
+ *  两侧均为词元串：按非字母数字分词、忽略大小写与分隔符后做包含匹配，
+ *  兼容 "Kimi k3 256k" / "kimi-k3-256K" 等任意写法。 */
+export interface ContextFallbackRule {
+  /** 命中当前模型的词元串，如 "k3 256k"。 */
+  match: string;
+  /** 降切目标的词元串，如 "k3"（在可用模型列表里找命中者）。 */
+  to: string;
+}
+
 export interface AppSettings {
   /** 明暗模式：浅色 / 深色 / 跟随系统。 */
   themeMode: ThemeMode;
@@ -409,10 +582,18 @@ export interface AppSettings {
   sendKey: 'enter' | 'ctrl-enter';
   /** 上下文占用达该百分比时，在回合边界自动压缩；0 = 关闭。默认 90。 */
   autoCompactRatio: number;
+  /** 满窗降切规则表：达自动压缩阈值且当前模型命中 match 时，
+   *  不压缩而是热切到命中 to 的可用模型继续任务。默认内置 k3 256k → k3。 */
+  contextFallbackRules: ContextFallbackRule[];
   notifications: NotificationSettings;
   workspaces: WorkspaceInfo[];
+  /** 赛马默认配置（各角色引擎/模型/思考档 + 第三选手开关）。 */
+  race: RaceSettings;
   /** 协议路由开关（仅影响本程序内 spawn 的 CLI，不碰用户配置文件）。 */
   routing: EngineRoutingSettings;
+  /** opencode 隐藏模型黑名单（slug = providerID/modelID）。默认全显示，
+   *  只影响本程序内的选择器/赛马配置展示 — 不写 opencode 配置文件。 */
+  opencodeHiddenModels: string[];
 }
 
 // ------------------------------------------------------------ cron tasks

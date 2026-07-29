@@ -3,11 +3,14 @@
  * style): 变更 tab aggregates per-file diffs from the tool stream with
  * +/- counts; 文件 tab is the lazy project tree. Clicking a file opens
  * a separate preview panel to the LEFT of the tree (item 9) so the
- * tree stays visible while reading code.
+ * tree stays visible while reading code. Tab 栏已上移到 RightDock 的
+ * 统一标签栏（与终端/sidechat 并列），本组件只渲染内容区。
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Bot, Check, FileDiff, FolderTree, Loader2, RotateCcw } from 'lucide-react';
+import { Bot, Check, RotateCcw } from 'lucide-react';
+
+import { BrandSpinner } from '../brand';
 
 import type { UnifiedMessage } from '@shared/types';
 import type { SessionChangeEntry } from '@shared/ipc';
@@ -19,21 +22,22 @@ import DiffView from './DiffView';
 interface Props {
   sessionId: string;
   root: string;
-  /** Controlled tab — owned by ChatView's right icon rail. */
+  /** Controlled tab — owned by RightDock's unified tab bar. */
   tab: PanelTab;
-  onTabChange: (tab: PanelTab) => void;
+  changes: SessionChangeEntry[];
+  changesNonce: number;
+  agents: AgentEntry[];
+  /** 接受/回退后触发变更清单重取（nonce+1，由 RightDock 持有）。 */
+  onRefreshChanges: () => void;
 }
 
 export type PanelTab = 'files' | 'changes' | 'agents';
 
 // 变更清单改由主进程台账（ChangeTracker）驱动，条目类型 = SessionChangeEntry。
 
-export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Props): JSX.Element {
+export default function WorkspacePanel({ sessionId, root, tab, changes, changesNonce, agents, onRefreshChanges }: Props): JSX.Element {
   const [openFile, setOpenFile] = useState<string | null>(null);
   const [openDiff, setOpenDiff] = useState<string | null>(null);
-  const [changesNonce, setChangesNonce] = useState(0);
-  const changes = useChangedFiles(sessionId, changesNonce);
-  const agents = useAgentActivity(sessionId);
 
   // 文件被回退/接受后从清单消失 → 关掉其 diff 视图。
   useEffect(() => {
@@ -54,7 +58,7 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
     <>
       {/* 左侧详情面板：变更行 → diff 对照；文件树 → 只读预览（树保持可见） */}
       {(openDiff || openFile) && (
-        <aside className="flex w-[440px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-l border-line bg-bg-panel/30">
+        <aside className="flex w-[440px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-r border-line bg-bg-panel/30">
           {openDiff ? (
             <DiffView
               sessionId={sessionId}
@@ -63,34 +67,18 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
               onClose={() => setOpenDiff(null)}
               onRevert={() =>
                 void window.cyberslots.sessionChangesRevert(sessionId, openDiff).then(() => {
-                  setChangesNonce((n) => n + 1);
+                  onRefreshChanges();
                   setOpenDiff(null);
                 })
               }
             />
           ) : (
-            <FilePreview path={openFile!} root={root} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
+            <FilePreview path={openFile!} root={root} sessionId={sessionId} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
           )}
         </aside>
       )}
 
-      <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-bg-panel/60">
-        <div className="flex shrink-0 items-center gap-1 px-2 py-2">
-          <TabButton active={tab === 'files'} onClick={() => onTabChange('files')} icon={<FolderTree size={13} />} label="文件" />
-          <TabButton
-            active={tab === 'changes'}
-            onClick={() => onTabChange('changes')}
-            icon={<FileDiff size={13} />}
-            label={changes.length > 0 ? `变更 ${changes.length}` : '变更'}
-          />
-          <TabButton
-            active={tab === 'agents'}
-            onClick={() => onTabChange('agents')}
-            icon={<Bot size={13} />}
-            label={agents.length > 0 ? `Agents ${agents.length}` : 'Agents'}
-          />
-        </div>
-
+      <aside className="flex w-[300px] shrink-0 flex-col bg-bg-panel/60">
         <div className="min-h-0 flex-1">
           {tab === 'files' ? (
             <FileTree root={root} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
@@ -102,7 +90,7 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
                 setOpenFile(null);
                 setOpenDiff(p);
               }}
-              onRefresh={() => setChangesNonce((n) => n + 1)}
+              onRefresh={onRefreshChanges}
             />
           ) : (
             <AgentsList agents={agents} />
@@ -113,22 +101,10 @@ export default function WorkspacePanel({ sessionId, root, tab, onTabChange }: Pr
   );
 }
 
-function TabButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-ui ${active ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
-        }`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
 /** 变更清单来自主进程台账（ChangeTracker）：真实基线 diff + 可回退。
- *  编辑类工具调用数变化时自动刷新；接受/回退后由 onRefresh 触发重取。 */
-function useChangedFiles(sessionId: string, nonce: number): SessionChangeEntry[] {
+ *  编辑类工具调用数变化时自动刷新；接受/回退后由 onRefresh 触发重取。
+ *  由 RightDock 调用（tab 栏徽标 + 本面板共用一份数据）。 */
+export function useChangedFiles(sessionId: string, nonce: number): SessionChangeEntry[] {
   const editTick = useChatStore((s) => {
     let n = 0;
     for (const m of s.ui[sessionId]?.messages ?? []) {
@@ -282,10 +258,12 @@ interface AgentEntry {
   startedAt: number;
 }
 
+export type { AgentEntry };
+
 /** Surface subagent / swarm activity from the tool-call stream.
  *  Match only the leading verb/tool-name — matching anywhere hits
  *  workspace paths like "D:/ai-agent/…" (found in Work-mode e2e). */
-function useAgentActivity(sessionId: string): AgentEntry[] {
+export function useAgentActivity(sessionId: string): AgentEntry[] {
   const messages = useChatStore((s) => s.ui[sessionId]?.messages);
   return useMemo(() => {
     const out: AgentEntry[] = [];
@@ -324,7 +302,7 @@ function AgentsList({ agents }: { agents: AgentEntry[] }): JSX.Element {
         <div key={a.id} className="rounded-lg border border-line bg-bg px-3 py-2">
           <div className="flex items-center gap-2">
             {a.status === 'in_progress' || a.status === 'pending' ? (
-              <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
+              <BrandSpinner size={12} className="shrink-0 text-accent" />
             ) : (
               <Bot size={12} className={`shrink-0 ${a.status === 'failed' ? 'text-err' : 'text-ok'}`} />
             )}

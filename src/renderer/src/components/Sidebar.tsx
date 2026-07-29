@@ -20,7 +20,7 @@ import {
   FolderOpen,
   FolderPlus,
   Languages,
-  Loader2,
+  LayoutDashboard,
   Moon,
   MoreHorizontal,
   Pencil,
@@ -31,10 +31,13 @@ import {
 } from 'lucide-react';
 
 import { DEFAULT_FILTER, useChatStore, type SidebarFilter } from '../store/chatStore';
+import { useRaceStore } from '../store/raceStore';
 import type { AppLanguage, AppSettings, EngineId, SessionMeta, WorkspaceInfo } from '@shared/types';
 import { useT, type MsgKey } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import { UsageQuickButton } from './UsageQuota';
+import { BrandMark, BrandSpinner } from './brand';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
@@ -61,9 +64,19 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   const selectSession = useChatStore((s) => s.selectSession);
   const [wsDialog, setWsDialog] = useState<{ open: boolean; editing: WorkspaceInfo | null }>({ open: false, editing: null });
 
-  const visible = useMemo(() => applyFilter(sessions, filter), [sessions, filter]);
+  // 赛马角色会话（raceId 标记）不入侧栏 —— 赛马寄生于宿主对话，
+  // 只能从宿主对话的 ⚔ 入口进赛马视图查看。
+  const visible = useMemo(() => applyFilter(sessions.filter((m) => !m.raceId), filter), [sessions, filter]);
   const groups = useMemo(() => groupSessions(visible, workspaces), [visible, workspaces]);
   const archivedCount = useMemo(() => sessions.filter((s) => s.archived).length, [sessions]);
+  // 总控制台入口角标：等你处理的会话数（awaiting/error）+ 等决策的赛马。
+  const races = useRaceStore((s) => s.races);
+  const inboxCount = useMemo(
+    () =>
+      sessions.filter((m) => !m.archived && !m.raceId && (m.status === 'awaiting' || m.status === 'error')).length +
+      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt).length,
+    [sessions, races],
+  );
 
   // 分组头“+”快捷创建 — 先选引擎再建会话，避免进会话后切引擎产生分支
   const createSession = useChatStore((s) => s.createSession);
@@ -78,13 +91,30 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
       className={`flex w-64 shrink-0 flex-col ${overlay ? 'h-full rounded-r-2xl bg-bg-canvas' : 'bg-transparent'
         }`}
     >
-      {/* 新会话 + 小节工具条 */}
+      {/* 新会话 + 总控制台 + 小节工具条 */}
       <div className="flex items-center gap-1.5 px-3 pb-1 pt-3">
         <button
-          onClick={() => useChatStore.setState({ activeSessionId: null })}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-input px-3 py-2 text-ui text-ink-soft shadow-sm transition hover:border-ink-faint hover:text-ink"
+          onClick={() => {
+            // 新建对话落地页也是导航 —— 退出赛马全屏视图（赛马后台继续）。
+            useRaceStore.getState().closeRace();
+            useChatStore.setState({ activeSessionId: null, dashboardOpen: false });
+          }}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-input px-3 py-2 text-ui text-ink-soft shadow-sm transition hover:bg-bg-hover hover:text-ink"
         >
           <Plus size={14} /> {t('newSession')}
+        </button>
+        {/* 总控制台入口 — 待办数角标常驻可见 */}
+        <button
+          title={t('mcTitle')}
+          onClick={() => useChatStore.getState().openDashboard()}
+          className="relative flex shrink-0 items-center justify-center rounded-xl border border-line bg-bg-input p-2 text-ink-soft shadow-sm transition hover:bg-bg-hover hover:text-ink"
+        >
+          <LayoutDashboard size={15} />
+          {inboxCount > 0 && (
+            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-warn px-1 text-[9.5px] font-semibold leading-none text-white">
+              {inboxCount > 9 ? '9+' : inboxCount}
+            </span>
+          )}
         </button>
       </div>
       <div className="flex items-center justify-between px-4 pb-1 pt-2.5">
@@ -140,8 +170,15 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
           </button>
         )}
         <div className="mt-1 flex items-center justify-between px-2.5 pt-1">
-          <span className="text-[11px] text-ink-faint">{t('appName')}</span>
-          <GearMenu />
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-faint">
+            <BrandMark size={13} />
+            {t('appName')}
+          </span>
+          <div className="flex items-center gap-0.5">
+            {/* 用量入口在设置齿轮左侧 — 悬浮弹今日用量小窗，点击开大窗 */}
+            <UsageQuickButton />
+            <GearMenu />
+          </div>
         </div>
       </div>
 
@@ -266,7 +303,7 @@ function GroupHeader({
 }
 
 /** 快捷创建的引擎选择 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。 */
-const ENGINE_OPTIONS: EngineId[] = ['codex', 'kimi', 'opencode'];
+const ENGINE_OPTIONS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp'];
 
 function EnginePick({
   title,
@@ -281,13 +318,22 @@ function EnginePick({
 }): JSX.Element {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const availability = useChatStore((s) => s.engineAvailability);
   useEscClose(open, () => setOpen(false));
   return (
     <div className="relative">
       <button
+        ref={btnRef}
         title={title}
         onClick={(e) => {
           e.stopPropagation();
+          if (!open) {
+            // 靠近视口底部时向上弹出，避免菜单被窗口下缘遮挡（chats 分组靠底时）。
+            const rect = btnRef.current?.getBoundingClientRect();
+            setDropUp(!!rect && window.innerHeight - rect.bottom < 170);
+          }
           setOpen(!open);
         }}
         className={btnClass}
@@ -297,22 +343,31 @@ function EnginePick({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-6 z-20 w-36 rounded-xl border border-line bg-bg-input py-1 shadow-lg">
+          <div
+            className={`absolute right-0 z-20 w-36 rounded-xl border border-line bg-bg-input py-1 shadow-lg ${dropUp ? 'bottom-6' : 'top-6'}`}
+          >
             <MenuSection label={t('pickEngine')} />
-            {ENGINE_OPTIONS.map((id) => (
-              <button
-                key={id}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  setOpen(false);
-                  onPick(id);
-                }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover"
-              >
-                <EngineIcon engine={id} size={13} />
-                {ENGINE_LABELS[id]}
-              </button>
-            ))}
+            {ENGINE_OPTIONS.map((id) => {
+              // 未安装置灰展示（可见不可选）；尚未探测（null）时不置灰。
+              const unavailable = availability ? !availability[id] : false;
+              return (
+                <button
+                  key={id}
+                  disabled={unavailable}
+                  title={unavailable ? '未检测到本机安装，详见设置-模型页' : undefined}
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    setOpen(false);
+                    onPick(id);
+                  }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition ${unavailable ? 'cursor-not-allowed text-ink-faint opacity-40' : 'text-ink hover:bg-bg-hover'
+                    }`}
+                >
+                  <EngineIcon engine={id} size={13} />
+                  {ENGINE_LABELS[id]}
+                </button>
+              );
+            })}
           </div>
         </>
       )}
@@ -341,9 +396,16 @@ function WorkspaceGroup({
   const t = useT();
   const removeWorkspace = useChatStore((s) => s.removeWorkspace);
   const createSession = useChatStore((s) => s.createSession);
+  const archiveSession = useChatStore((s) => s.archiveSession);
   // 组内还有对话时禁止移除（查全量列表，不受侧栏筛选器影响；已归档的不算）。
   const hasSessions = useChatStore((s) => s.sessions.some((x) => x.workspaceId === workspace.id && !x.archived));
   const [expanded, setExpanded] = useState(true);
+
+  /** 归档本工作区全部未归档会话（取全量列表，不受侧栏筛选影响）。 */
+  const archiveAll = async (): Promise<void> => {
+    const list = useChatStore.getState().sessions.filter((x) => x.workspaceId === workspace.id && !x.archived);
+    for (const s of list) await archiveSession(s.id, true);
+  };
 
   return (
     <div>
@@ -370,6 +432,18 @@ function WorkspaceGroup({
               icon: <Folder size={13} />,
               label: t('openInEditor'),
               onClick: () => void window.cyberslots.openIn('vscode', workspace.folders[0] ?? ''),
+            },
+            {
+              icon: <FolderOpen size={13} />,
+              label: t('openInExplorer'),
+              onClick: () => void window.cyberslots.openIn('explorer', workspace.folders[0] ?? ''),
+            },
+            {
+              icon: <Archive size={13} />,
+              label: t('archiveAllChats'),
+              confirmLabel: t('confirmArchive'),
+              disabled: !hasSessions,
+              onClick: () => void archiveAll(),
             },
             {
               icon: <Trash2 size={13} />,
@@ -412,7 +486,19 @@ function ProjectGroup({
   const t = useT();
   const convertProjectToWorkspace = useChatStore((s) => s.convertProjectToWorkspace);
   const createSession = useChatStore((s) => s.createSession);
+  const archiveSession = useChatStore((s) => s.archiveSession);
   const [expanded, setExpanded] = useState(true);
+
+  /** 归档本项目全部未归档会话 — 谓词与 groupSessions 的分组规则一致，
+   *  取全量列表避免遭侧栏筛选器遮蔽。 */
+  const archiveAll = async (): Promise<void> => {
+    const { sessions, settings } = useChatStore.getState();
+    const wsIds = new Set((settings?.workspaces ?? []).map((w) => w.id));
+    const list = sessions.filter(
+      (x) => !x.archived && x.cwd === cwd && x.chatMode === 'work' && (!x.workspaceId || !wsIds.has(x.workspaceId)),
+    );
+    for (const s of list) await archiveSession(s.id, true);
+  };
 
   /** Project → Workspace：选一个新目录，和现有 cwd 合并成多目录工作区，
    *  本组会话整体迁入新工作区（引擎下一条消息前获知新目录）。 */
@@ -439,6 +525,8 @@ function ProjectGroup({
             { icon: <FolderPlus size={13} />, label: t('convertToWorkspace'), onClick: () => void convert() },
             { icon: <SquareTerminal size={13} />, label: t('openTerminal'), onClick: () => void window.cyberslots.openIn('terminal', cwd) },
             { icon: <Folder size={13} />, label: t('openInEditor'), onClick: () => void window.cyberslots.openIn('vscode', cwd) },
+            { icon: <FolderOpen size={13} />, label: t('openInExplorer'), onClick: () => void window.cyberslots.openIn('explorer', cwd) },
+            { icon: <Archive size={13} />, label: t('archiveAllChats'), confirmLabel: t('confirmArchive'), onClick: () => void archiveAll() },
           ]}
         />
         <EnginePick
@@ -458,25 +546,20 @@ function ProjectGroup({
 
 function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void }): JSX.Element {
   const t = useT();
-  const deleteSession = useChatStore((s) => s.deleteSession);
   const archiveSession = useChatStore((s) => s.archiveSession);
   const [confirming, setConfirming] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
-  const onDelete = (e: React.MouseEvent): void => {
+  // 侧栏不提供删除 — 只能归档；彻底删除去「已归档」页操作。
+  const onArchive = (e: React.MouseEvent): void => {
     e.stopPropagation();
     if (!confirming) {
-      // 二段确认：第一次点击进入确认态，3 秒内再点才真正删除。
+      // 二段确认：第一次点击进入确认态（3 秒内再点才真正归档）。
       setConfirming(true);
       timer.current = setTimeout(() => setConfirming(false), 3000);
       return;
     }
     clearTimeout(timer.current);
-    void deleteSession(meta.id);
-  };
-
-  const onArchive = (e: React.MouseEvent): void => {
-    e.stopPropagation();
     void archiveSession(meta.id, true);
   };
 
@@ -494,23 +577,16 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
         <RowIndicator meta={meta} />
       </span>
       <button
-        title={t('archive')}
+        title={confirming ? t('confirmArchive') : t('archive')}
         onClick={onArchive}
-        className="hidden rounded-md p-0.5 text-ink-faint transition hover:text-ink group-hover:block"
-      >
-        <Archive size={13} />
-      </button>
-      <button
-        title={confirming ? t('confirmDelete') : t('remove')}
-        onClick={onDelete}
         onMouseLeave={() => {
           clearTimeout(timer.current);
           setConfirming(false);
         }}
-        className={`hidden rounded-md p-0.5 transition group-hover:block ${confirming ? 'block bg-err/15 text-err' : 'text-ink-faint hover:text-err'
+        className={`hidden rounded-md p-0.5 transition group-hover:block ${confirming ? 'block bg-warn/15 text-warn' : 'text-ink-faint hover:text-ink'
           }`}
       >
-        {confirming ? <Check size={13} /> : <Trash2 size={13} />}
+        {confirming ? <Check size={13} /> : <Archive size={13} />}
       </button>
     </div>
   );
@@ -522,7 +598,7 @@ function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
   switch (meta.status) {
     case 'running':
     case 'starting':
-      return <Loader2 size={13} className="shrink-0 animate-spin text-ink-soft" />;
+      return <BrandSpinner size={13} className="shrink-0 text-ink-soft" />;
     case 'awaiting':
       // 黄色醒目 — 需要用户行动（授权/回答），不能淹没在灰色里。
       return <CircleHelp size={14} className="shrink-0 animate-pulse text-warn" />;
@@ -735,18 +811,27 @@ interface DotMenuItem {
   danger?: boolean;
   disabled?: boolean;
   title?: string;
+  /** 需二次确认：首次点击变确认态（图标换勾 + 换文案），再点才执行。 */
+  confirmLabel?: string;
   onClick: () => void;
 }
 
 function DotMenu({ items }: { items: DotMenuItem[] }): JSX.Element {
   const [open, setOpen] = useState(false);
+  // 记录当前处于确认态的项（按 label 区分）；关菜单即重置。
+  const [confirming, setConfirming] = useState<string | null>(null);
   useEscClose(open, () => setOpen(false));
+  const close = (): void => {
+    setOpen(false);
+    setConfirming(null);
+  };
   return (
     <div className="relative">
       <button
         onClick={(e) => {
           e.stopPropagation();
-          setOpen(!open);
+          if (open) close();
+          else setOpen(true);
         }}
         className="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ink group-hover:opacity-100"
       >
@@ -754,26 +839,38 @@ function DotMenu({ items }: { items: DotMenuItem[] }): JSX.Element {
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-10" onClick={close} />
           <div className="absolute right-0 top-7 z-20 w-44 rounded-xl border border-line bg-bg-input py-1 shadow-lg">
-            {items.map((item) => (
-              <button
-                key={item.label}
-                disabled={item.disabled}
-                title={item.title}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOpen(false);
-                  item.onClick();
-                }}
-                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition ${item.disabled
-                  ? 'cursor-not-allowed text-ink-faint/50'
-                  : `hover:bg-bg-hover ${item.danger ? 'text-err' : 'text-ink'}`
-                  }`}
-              >
-                {item.icon} {item.label}
-              </button>
-            ))}
+            {items.map((item) => {
+              const inConfirm = item.confirmLabel != null && confirming === item.label;
+              return (
+                <button
+                  key={item.label}
+                  disabled={item.disabled}
+                  title={item.title}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (item.confirmLabel && !inConfirm) {
+                      setConfirming(item.label);
+                      return;
+                    }
+                    close();
+                    item.onClick();
+                  }}
+                  onMouseLeave={() => {
+                    if (inConfirm) setConfirming(null);
+                  }}
+                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition ${item.disabled
+                    ? 'cursor-not-allowed text-ink-faint/50'
+                    : inConfirm
+                      ? 'bg-warn/15 text-warn'
+                      : `hover:bg-bg-hover ${item.danger ? 'text-err' : 'text-ink'}`
+                    }`}
+                >
+                  {inConfirm ? <Check size={13} /> : item.icon} {inConfirm ? item.confirmLabel : item.label}
+                </button>
+              );
+            })}
           </div>
         </>
       )}

@@ -8,7 +8,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
-import { Code2, Eye, ExternalLink, FolderGit2, FolderOpen, Monitor, Pencil, Save, Terminal, X } from 'lucide-react';
+import { Code2, Eye, ExternalLink, FolderGit2, FolderOpen, MessageSquarePlus, Monitor, Pencil, Save, Terminal, X } from 'lucide-react';
+
+import { useChatStore } from '../../store/chatStore';
+import { BrandSpinner } from '../brand';
+import { useT } from '../../i18n';
 
 import type { OpenTarget } from '@shared/ipc';
 
@@ -37,6 +41,8 @@ const LANG_BY_EXT: Record<string, string> = {
 interface Props {
   path: string;
   root: string;
+  /** 所属会话 —— 「添加到对话」把选区卡片投递到该会话的输入框。 */
+  sessionId: string;
   /** 变化时重新读盘刷新（AI 编辑/回退后实时同步）。 */
   reloadKey?: string;
   onClose: () => void;
@@ -44,7 +50,7 @@ interface Props {
 
 type Mode = 'preview' | 'source' | 'edit';
 
-export default function FilePreview({ path, root, reloadKey, onClose }: Props): JSX.Element {
+export default function FilePreview({ path, root, sessionId, reloadKey, onClose }: Props): JSX.Element {
   const [text, setText] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [truncated, setTruncated] = useState(false);
@@ -131,7 +137,7 @@ export default function FilePreview({ path, root, reloadKey, onClose }: Props): 
           </IconBtn>
         ) : (
           <IconBtn title={saving ? '保存中…' : '保存 (Ctrl+S)'} onClick={() => void save()}>
-            <Save size={13} className={saving ? 'animate-pulse' : ''} />
+            {saving ? <BrandSpinner size={13} /> : <Save size={13} />}
           </IconBtn>
         )}
         <OpenInMenu path={path} />
@@ -163,7 +169,9 @@ export default function FilePreview({ path, root, reloadKey, onClose }: Props): 
 
       <div className="min-h-0 flex-1 overflow-auto">
         {text === null && !error ? (
-          <div className="p-4 text-ui text-ink-faint">加载中…</div>
+          <div className="flex items-center gap-2 p-4 text-ui text-ink-faint">
+            <BrandSpinner size={12} /> 加载中…
+          </div>
         ) : mode === 'edit' ? (
           <textarea
             value={draft}
@@ -182,7 +190,7 @@ export default function FilePreview({ path, root, reloadKey, onClose }: Props): 
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{text ?? ''}</ReactMarkdown>
           </div>
         ) : (
-          <NumberedSource text={text ?? ''} ext={ext} />
+          <NumberedSource text={text ?? ''} ext={ext} path={path} fileName={fileName} sessionId={sessionId} />
         )}
       </div>
     </div>
@@ -191,8 +199,27 @@ export default function FilePreview({ path, root, reloadKey, onClose }: Props): 
 
 /** 带行号的代码视图 — highlight.js 整块着色（token 可跨行），
  *  行号列与代码共享行高，滚动同步。 */
-function NumberedSource({ text, ext }: { text: string; ext: string }): JSX.Element {
+function NumberedSource({
+  text,
+  ext,
+  path,
+  fileName,
+  sessionId,
+}: {
+  text: string;
+  ext: string;
+  path: string;
+  fileName: string;
+  sessionId: string;
+}): JSX.Element {
+  const t = useT();
+  const addSelection = useChatStore((s) => s.addSelection);
   const lines = useMemo(() => text.split('\n'), [text]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const preRef = useRef<HTMLPreElement>(null);
+  /** 非 null = 选区浮动按钮（位置 + 已解析的行号/文本快照）。 */
+  const [selBtn, setSelBtn] = useState<{ top: number; left: number; startLine: number; endLine: number; text: string } | null>(null);
+
   const html = useMemo(() => {
     const lang = LANG_BY_EXT[ext] ?? ext;
     try {
@@ -205,17 +232,113 @@ function NumberedSource({ text, ext }: { text: string; ext: string }): JSX.Eleme
     return undefined;
   }, [text, ext]);
 
+  // 文件内容刷新（AI 改动/切文件）后旧选区快照作废 → 收起按钮。
+  useEffect(() => setSelBtn(null), [text]);
+
+  /** 把 DOM 选区钳制到 <pre> 内，换算成 1-based 行号 + 文本快照并定位浮动按钮。 */
+  const evalSelection = (): void => {
+    const pre = preRef.current;
+    const root = rootRef.current;
+    const sel = window.getSelection();
+    if (!pre || !root || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setSelBtn(null);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    if (!range.intersectsNode(pre)) {
+      setSelBtn(null);
+      return;
+    }
+    // 选区可能拖出代码区（截断提示条等）：首尾钳到 pre 内。
+    const r = range.cloneRange();
+    if (!pre.contains(r.startContainer)) r.setStart(pre, 0);
+    if (!pre.contains(r.endContainer)) r.setEnd(pre, pre.childNodes.length);
+    // 快照与行号永远自洽：截掉末尾多选的换行，终点行号由快照推出。
+    const snapshot = r.toString().replace(/\r\n/g, '\n').replace(/\n+$/, '');
+    if (!snapshot.trim()) {
+      setSelBtn(null);
+      return;
+    }
+    // 起始行号 = 起点前文本的换行数 + 1（跨 token 的 span 不影响 textContent 偏移）。
+    const probe = document.createRange();
+    probe.selectNodeContents(pre);
+    probe.setEnd(r.startContainer, r.startOffset);
+    const startLine = probe.toString().split('\n').length;
+    const endLine = startLine + snapshot.split('\n').length - 1;
+    // 按钮定位到选区末端右下角（相对 root，随内容一起滚动）。
+    const rects = r.getClientRects();
+    if (rects.length === 0) {
+      setSelBtn(null);
+      return;
+    }
+    const last = rects[rects.length - 1]!;
+    const rootRect = root.getBoundingClientRect();
+    setSelBtn({
+      top: last.bottom - rootRect.top + 6,
+      left: Math.max(8, Math.min(last.right - rootRect.left, rootRect.width - 120)),
+      startLine,
+      endLine,
+      text: snapshot,
+    });
+  };
+
+  // 选区在代码区外折叠/转移时收起按钮（点击空白、选到别的面板等）。
+  useEffect(() => {
+    const onSelChange = (): void => {
+      const pre = preRef.current;
+      const sel = window.getSelection();
+      if (!pre || !sel || sel.isCollapsed || sel.rangeCount === 0 || !sel.getRangeAt(0).intersectsNode(pre)) setSelBtn(null);
+    };
+    document.addEventListener('selectionchange', onSelChange);
+    return () => document.removeEventListener('selectionchange', onSelChange);
+  }, []);
+
+  const addToChat = (): void => {
+    if (!selBtn) return;
+    addSelection(sessionId, {
+      id: crypto.randomUUID(),
+      path,
+      fileName,
+      ext,
+      startLine: selBtn.startLine,
+      endLine: selBtn.endLine,
+      text: selBtn.text,
+    });
+    window.getSelection()?.removeAllRanges();
+    setSelBtn(null);
+  };
+
   return (
-    <div className="flex font-mono text-[12px] leading-5">
+    <div
+      ref={rootRef}
+      className="relative flex font-mono text-[12px] leading-5"
+      onMouseUp={evalSelection}
+      onKeyUp={(e) => {
+        // 键盘 Shift+方向键选择也能触发。
+        if (e.shiftKey) evalSelection();
+      }}
+    >
       <div className="select-none px-2 py-2 text-right text-ink-faint/70">
         {lines.map((_, i) => (
           <div key={i}>{i + 1}</div>
         ))}
       </div>
       {html !== undefined ? (
-        <pre className="hljs flex-1 overflow-x-auto whitespace-pre bg-transparent px-3 py-2" dangerouslySetInnerHTML={{ __html: html }} />
+        <pre ref={preRef} className="hljs flex-1 overflow-x-auto whitespace-pre bg-transparent px-3 py-2" dangerouslySetInnerHTML={{ __html: html }} />
       ) : (
-        <pre className="flex-1 overflow-x-auto whitespace-pre px-3 py-2">{text}</pre>
+        <pre ref={preRef} className="flex-1 overflow-x-auto whitespace-pre px-3 py-2">{text}</pre>
+      )}
+      {selBtn && (
+        <button
+          style={{ top: selBtn.top, left: selBtn.left }}
+          // mousedown 阻止默认：保住 DOM 选区，click 才能拿到完整快照。
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={addToChat}
+          className="absolute z-20 flex items-center gap-1.5 rounded-lg bg-ink px-2.5 py-1 text-[11px] font-medium text-bg shadow-lg transition hover:opacity-85"
+        >
+          <MessageSquarePlus size={12} />
+          {t('addToChat')}
+        </button>
       )}
     </div>
   );

@@ -210,6 +210,10 @@ function normalizeCatalog(body: Json): OpencodeCatalog {
   for (const p of providers) {
     const providerID = String(p.id ?? '');
     const providerName = String(p.name ?? providerID);
+    // 自定义 provider（opencode.json 里手写的）不在 models.dev 定价库里，
+    // opencode 会把 cost 默认填 0（provider.ts 的 ?? 0 兑底）—— 那不是
+    // 真免费而是「未定价」，抹成 undefined 免得渲染层误打免费标。
+    const custom = p.source === 'custom';
     const modelMap = (p.models ?? {}) as Record<string, Json>;
     for (const [modelID, m] of Object.entries(modelMap)) {
       const caps = (m.capabilities ?? {}) as Json;
@@ -219,6 +223,9 @@ function normalizeCatalog(body: Json): OpencodeCatalog {
       const efforts = Object.keys(variants);
       const input = (caps.input ?? {}) as Record<string, unknown>;
       const output = (caps.output ?? {}) as Record<string, unknown>;
+      const costInput = numOr(cost.input);
+      const costOutput = numOr(cost.output);
+      const unpriced = custom && costInput === 0 && costOutput === 0;
       models.push({
         slug: `${providerID}/${modelID}`,
         providerID,
@@ -232,8 +239,8 @@ function normalizeCatalog(body: Json): OpencodeCatalog {
         toolCall: boolOr(caps.toolcall),
         reasoning: boolOr(caps.reasoning),
         attachment: boolOr(caps.attachment),
-        costInput: numOr(cost.input),
-        costOutput: numOr(cost.output),
+        costInput: unpriced ? undefined : costInput,
+        costOutput: unpriced ? undefined : costOutput,
       });
     }
   }

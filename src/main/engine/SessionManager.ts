@@ -7,11 +7,11 @@
 import { app } from 'electron';
 import { BrowserWindow, Notification } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { WebContents } from 'electron';
 
-import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, SessionMeta, UnifiedMessage } from '@shared/types';
+import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
 import type { SessionChangeDiff, SessionChangeEntry } from '@shared/ipc';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
@@ -20,6 +20,7 @@ import { KimiAdapter } from './kimi/KimiAdapter';
 import { CodexAdapter } from './codex/CodexAdapter';
 import { ChangeTracker } from './changeTracker';
 import { OpencodeAdapter } from './opencode/OpencodeAdapter';
+import { OmpAdapter } from './omp/OmpAdapter';
 import type { OpencodeServerHost } from './opencode/OpencodeServerHost';
 import type { OpencodeEventHub } from './opencode/OpencodeEventHub';
 import {
@@ -40,6 +41,14 @@ interface LiveSession {
   starting?: Promise<void>;
 }
 
+/** 从消息文件抽取的单回合用量行（turn_end 折叠）。 */
+interface UsageRow {
+  ts: number;
+  input: number;
+  output: number;
+  cached: number;
+}
+
 export class SessionManager {
   private readonly sessions = new Map<string, LiveSession>();
   private target: WebContents | undefined;
@@ -51,6 +60,10 @@ export class SessionManager {
    *  持久化有防抖延迟，主进程不能依赖磁盘文件的即时性）。 */
   private readonly turnText = new Map<string, string>();
   private readonly turnOpen = new Set<string>();
+    /** 懒重置标记：新回合开始时不立刻清空上回合产物，等本回合真正
+     *  产出新内容（正文/工具活动）才清 —— 防无产出的自发回合（auto-
+     *  compact 等）把赛马刚拿到的 transcript 产物摧毁成空串。 */
+  private readonly turnFresh = new Set<string>();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -87,6 +100,7 @@ export class SessionManager {
       cwd: cwd || this.makeScratchDir(id),
       chatMode: cwd ? 'work' : 'chat',
       workspaceId: workspace?.id,
+      raceId: req.raceId,
       contextSeed:
         workspace && workspace.folders.length > 1
           ? `本会话绑定多根工作区「${workspace.name}」，包含以下根目录（当前工作目录是第一个，其余目录也属于本项目范围，可用绝对路径访问）：\n${workspace.folders.join('\n')}`
@@ -108,9 +122,15 @@ export class SessionManager {
     return meta;
   }
 
-  async prompt(sessionId: string, text: string, attachments?: string[], effort?: string): Promise<void> {
+  async prompt(sessionId: string, text: string, attachments?: string[], effort?: string, userMessageId?: string): Promise<void> {
     const s = this.require(sessionId);
+    // 逐提问快照（AI 未动手，race-free）——「回退到此提问」的还原点；
+    // 与引擎启动并行，不拖慢首条消息的投递。
+    const marking = userMessageId && s.meta.cwd
+      ? this.changes.markPrompt(sessionId, s.meta.cwd, userMessageId).catch(() => undefined)
+      : undefined;
     await this.ensureRuntime(s);
+    await marking;
     this.touch(s.meta);
     // Fallback-fork branches carry the parent history as a one-shot prefix.
     let engineText = text;
@@ -127,7 +147,11 @@ export class SessionManager {
   private async ensureRuntime(s: LiveSession): Promise<void> {
     if (s.starting) await s.starting; // 后台启动进行中 — 汇合而非重复 spawn
     if (s.adapter) return;
-    await this.startRuntime(s);
+    // 登记 in-flight — 并发调用（如快速连点的 warmUp 与 prompt）汇合到
+    // 同一次启动，否则会并行 spawn 两个引擎，adapter 互覆 → 孤儿进程
+    // + 两路状态事件打架（会话卡在 starting 转圈）。
+    s.starting = this.startRuntime(s);
+    await s.starting;
   }
 
   /** Spawn + 握手；create（后台）与 ensureRuntime（懒唤醒）共用。
@@ -135,19 +159,21 @@ export class SessionManager {
   private async startRuntime(s: LiveSession): Promise<void> {
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
+    // 预热/唤醒的状态过渡只持久化，不刷 updatedAt — 否则选中即预热
+    // 会把会话顶到侧栏顶部，快速连点时列表顺序乱跳。
     s.meta.status = 'starting';
-    this.touch(s.meta);
+    this.persistMetas();
     this.forward(s.meta.id, { type: 'session.status', status: 'starting' });
     try {
       const { engineSessionId } = await adapter.start();
       s.meta.engineSessionId = engineSessionId;
       s.meta.status = 'idle';
-      this.touch(s.meta);
+      this.persistMetas();
       this.forward(s.meta.id, { type: 'session.status', status: 'idle' });
     } catch (err) {
       s.adapter = undefined;
       s.meta.status = 'error';
-      this.touch(s.meta);
+      this.persistMetas();
       this.forward(s.meta.id, { type: 'session.status', status: 'error' });
       this.forward(s.meta.id, {
         type: 'error',
@@ -261,6 +287,49 @@ export class SessionManager {
   /** 接受（保留改动、停止跟踪）；path 省略 = 全部。 */
   changesAccept(sessionId: string, path?: string): void {
     this.changes.accept(sessionId, path);
+  }
+
+  /** 回退到某提问将撤销的文件清单；null = 该提问无快照（旧消息/cron 注入）。 */
+  undoPreview(sessionId: string, messageId: string): Promise<SessionChangeEntry[] | null> {
+    const s = this.sessions.get(sessionId);
+    return s ? this.changes.undoPreview(sessionId, s.meta.cwd, messageId) : Promise.resolve(null);
+  }
+
+  /**
+   * 回退到某个提问：还原文件 → 截断消息（先全量备份）→ 重置引擎
+   * 上下文（下次 prompt 以截断后历史作 contextSeed 新建引擎会话）。
+   * 返回被移除的提问内容供输入框回填。
+   */
+  async undoToMessage(sessionId: string, messageId: string): Promise<{ text: string; attachments?: string[] }> {
+    const s = this.require(sessionId);
+    if (s.meta.status === 'running' || s.meta.status === 'awaiting') {
+      throw new Error('会话进行中，无法回退');
+    }
+    const messages = this.getMessages(sessionId);
+    const idx = messages.findIndex((m) => m.kind === 'user' && m.id === messageId);
+    if (idx < 0) throw new Error('未找到该提问');
+    const target = messages[idx] as Extract<UnifiedMessage, { kind: 'user' }>;
+
+    // 1. 磁盘文件还原到该提问发送前的快照（无快照 = 仅移除消息）。
+    await this.changes.undoRevert(sessionId, s.meta.cwd, messageId);
+
+    // 2. 截断消息；先全量备份（数据安全底线：保留最近一次回退前的历史）。
+    try {
+      writeFileSync(this.messagesFile(sessionId).replace(/\.json$/, '.undo-bak.json'), JSON.stringify(messages), 'utf8');
+    } catch {
+      /* best effort */
+    }
+    const truncated = messages.slice(0, idx);
+    this.saveMessages(sessionId, truncated);
+
+    // 3. 重置引擎绑定 — 引擎侧历史无法截断（codex/kimi 无 rollback API），
+    //    统一换新会话 + contextSeed 重播，三引擎行为一致。
+    await this.close(sessionId);
+    s.meta.engineSessionId = undefined;
+    s.meta.contextSeed = truncated.length > 0 ? serializeHistory(truncated) : undefined;
+    this.persistMetas();
+
+    return { text: target.text, attachments: target.attachments };
   }
 
   /** Steer the running turn; false = not supported / not steerable (re-queue). */
@@ -411,6 +480,107 @@ export class SessionManager {
     return join(app.getPath('userData'), 'messages', `${sessionId}.json`);
   }
 
+  // -------------------------------------------------------- usage stats
+
+  /** turn_end 抽取行缓存 — mtime 命中直接复用，避免每次查询重析全部消息文件。 */
+  private readonly usageRowCache = new Map<string, { mtimeMs: number; rows: UsageRow[] }>();
+
+  /** 聚合各会话消息文件里的 turn_end 用量（不含费用）：
+   *  跨度 ≤24h 按小时桶（起点对齐），否则按本地日历天分桶，空桶补零。
+   *  kimi 会话一律不参与统计（无可靠的真实 token 上报，只有字符数估算）。 */
+  usageStats(query: UsageStatsQuery): UsageStatsResult {
+    const HOUR = 3_600_000;
+    const DAY = 24 * HOUR;
+    const endTs = query.endTs;
+    const startTs = Math.min(query.startTs, endTs);
+    const hourly = endTs - startTs <= DAY;
+
+    const bucketStarts: number[] = [];
+    if (hourly) {
+      const count = Math.max(1, Math.ceil((endTs - startTs) / HOUR));
+      for (let i = 0; i < count; i++) bucketStarts.push(startTs + i * HOUR);
+    } else {
+      const first = new Date(startTs);
+      first.setHours(0, 0, 0, 0);
+      for (const d = new Date(first); d.getTime() <= endTs; d.setDate(d.getDate() + 1)) {
+        bucketStarts.push(d.getTime());
+      }
+    }
+    const buckets: UsageBucket[] = bucketStarts.map((ts) => ({
+      ts,
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+    }));
+    // 天桶索引表：按本地午夜时刻反查（不用除法 — 避开 DST 时差）。
+    const dayIndex = new Map<number, number>();
+    if (!hourly) bucketStarts.forEach((ts, i) => dayIndex.set(ts, i));
+
+    const totals = { requests: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0 };
+    for (const s of this.sessions.values()) {
+      if (s.meta.engine === 'kimi') continue;
+      if (query.engine && s.meta.engine !== query.engine) continue;
+      for (const r of this.usageRows(s.meta.id)) {
+        if (r.ts < startTs || r.ts > endTs) continue;
+        let idx: number;
+        if (hourly) {
+          idx = Math.min(buckets.length - 1, Math.floor((r.ts - startTs) / HOUR));
+        } else {
+          const d = new Date(r.ts);
+          d.setHours(0, 0, 0, 0);
+          const found = dayIndex.get(d.getTime());
+          if (found === undefined) continue;
+          idx = found;
+        }
+        const b = buckets[idx];
+        if (!b) continue;
+        b.requests += 1;
+        b.inputTokens += r.input;
+        b.outputTokens += r.output;
+        b.cachedTokens += r.cached;
+        totals.requests += 1;
+        totals.inputTokens += r.input;
+        totals.outputTokens += r.output;
+        totals.cachedTokens += r.cached;
+      }
+    }
+    totals.totalTokens = totals.inputTokens + totals.outputTokens;
+    return { bucketMs: hourly ? HOUR : DAY, buckets, totals };
+  }
+
+  private usageRows(sessionId: string): UsageRow[] {
+    const f = this.messagesFile(sessionId);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(f).mtimeMs;
+    } catch {
+      return [];
+    }
+    const hit = this.usageRowCache.get(sessionId);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.rows;
+    let rows: UsageRow[] = [];
+    try {
+      const raw = JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
+      rows = raw.flatMap((m) =>
+        m.kind === 'turn_end'
+          ? [
+              {
+                ts: m.createdAt,
+                input: m.usage?.inputTokens ?? 0,
+                output: m.usage?.outputTokens ?? 0,
+                cached: m.usage?.cachedInputTokens ?? 0,
+              },
+            ]
+          : [],
+      );
+    } catch {
+      rows = [];
+    }
+    this.usageRowCache.set(sessionId, { mtimeMs, rows });
+    return rows;
+  }
+
   /** Kill every child process — called on app quit (anti-orphan). */
   async disposeAll(): Promise<void> {
     await Promise.allSettled([...this.sessions.values()].map((s) => s.adapter?.dispose()));
@@ -500,6 +670,21 @@ export class SessionManager {
         (event) => this.onEngineEvent(meta.id, event),
       );
     }
+    if (meta.engine === 'omp') {
+      // 每会话一个 `omp acp` 子进程（ACP，同 kimi 基建）。approval 与
+      // 精细思考档走 spawn flag（probe-omp-findings §3）；模型/凭据完全
+      // 委托 omp 自身（~/.omp），无协议路由。
+      return new OmpAdapter(
+        {
+          cwd: meta.cwd,
+          modelId: meta.modelId,
+          permissionMode: meta.permissionMode,
+          resumeSessionId,
+          quietResumeFallback,
+        },
+        (event) => this.onEngineEvent(meta.id, event),
+      );
+    }
     throw new Error(`未知引擎: ${meta.engine}`);
   }
 
@@ -508,7 +693,9 @@ export class SessionManager {
     if (s) {
       if (event.type === 'session.status') {
         s.meta.status = event.status;
-        s.meta.updatedAt = Date.now();
+        // 仅真正开跑才刷 updatedAt — 预热/唤醒的状态过渡不该改变
+        // 侧栏排序（与 renderer 侧同规则）。
+        if (event.status === 'running') s.meta.updatedAt = Date.now();
         // 持久化运行态：崩溃/重启后 loadPersistedMetas 才能据此识别
         // 「上次仍在执行/待回答」并标记未读（否则中断的任务无痕）。
         this.persistMetas();
@@ -518,6 +705,7 @@ export class SessionManager {
         s.meta.permissionMode = event.current;
       } else if (event.type === 'turn.ended') {
         s.meta.unread = true;
+        s.meta.updatedAt = Date.now(); // 真实活动 — 回合完成刷新排序时间
         this.persistMetas();
         // shell 命令产生的文件改动没有 fileChange 事件 → 回合结束快照 diff 扫尾登记。
         void this.changes.scanTurnEnd(s.meta.id, s.meta.cwd);
@@ -533,7 +721,12 @@ export class SessionManager {
         if (editish) {
           const paths = new Set<string>(event.locations ?? []);
           if (event.content?.diff?.path) paths.add(event.content.diff.path);
-          for (const p of paths) this.changes.noteEdit(s.meta.id, p, s.meta.cwd);
+          for (const p of paths) {
+            // omp 等引擎的内部 URL scheme（agent:// / pr:// / conflict:// …）
+            // 不是磁盘文件，不进变更台账。
+            if (/^[a-z][a-z0-9+.-]*:\/\//i.test(p)) continue;
+            this.changes.noteEdit(s.meta.id, p, s.meta.cwd);
+          }
         }
       }
       this.maybeNotify(s.meta, event);
@@ -549,8 +742,15 @@ export class SessionManager {
     if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
     if (event.type === 'turn.ended' && prefs.taskComplete && !meta.title.startsWith('⏰')) {
       // 只在真正正常完成时提醒 — 出错/手动停止的回合不算「任务完成」，
-      // 否则关了报错通知的用户还会收到伪装成完成的弹窗。
-      if (event.stopReason === 'error' || event.stopReason === 'cancelled' || event.stopReason === 'interrupted') return;
+      // 否则关了报错通知的用户还会收到伪装成完成的弹窗。引擎自发回合
+      // （goal continuation / compact）也不算：goal 有自己的完成通知。
+      if (
+        event.stopReason === 'error' ||
+        event.stopReason === 'cancelled' ||
+        event.stopReason === 'interrupted' ||
+        event.stopReason === 'background'
+      )
+        return;
       new Notification({ title: `任务完成：${meta.title}`, body: '回到窗口查看结果' }).show();
     } else if (event.type === 'goal.update' && event.goal?.status === 'complete' && prefs.taskComplete) {
       new Notification({
@@ -602,16 +802,32 @@ export class SessionManager {
 
   private trackTurnText(sessionId: string, event: EngineEvent): void {
     if (event.type === 'turn.started') {
-      this.turnText.set(sessionId, '');
+      // 懒重置：先只打标记，等本回合真产出内容时才清空上回合正文，
+      // 防无产出的自发回合把刚拿到的产物摧毁成空串。
+      this.turnFresh.add(sessionId);
       this.turnOpen.add(sessionId);
     } else if (event.type === 'text.delta') {
+      if (this.turnFresh.delete(sessionId)) this.turnText.set(sessionId, '');
       if (!this.turnOpen.has(sessionId)) {
         this.turnText.set(sessionId, '');
         this.turnOpen.add(sessionId);
       }
       this.turnText.set(sessionId, (this.turnText.get(sessionId) ?? '') + event.text);
+    } else if (event.type === 'tool.upsert') {
+      // 新工具活动开始 → 之前的正文只是过程叙述（“我先看一下…”），
+      // 非最终产物；清空使 transcript 收敛为「最后一段连续正文」
+      // （plan/答案主体），赛马产物交接不再被探索独白稀释。
+      // 仅在回合进行中且新工具启动时重置（completed 等尾部状态更新不重置）。
+      if (
+        this.turnOpen.has(sessionId) &&
+        (event.status === 'pending' || event.status === 'in_progress')
+      ) {
+        this.turnFresh.delete(sessionId); // 真干活了 → 懒重置作废
+        this.turnText.set(sessionId, '');
+      }
     } else if (event.type === 'turn.ended') {
       this.turnOpen.delete(sessionId);
+      this.turnFresh.delete(sessionId);
     }
   }
 
@@ -687,9 +903,10 @@ export class SessionManager {
 function reconcilePersistedMessages(messages: UnifiedMessage[]): UnifiedMessage[] {
   let changed = false;
   const out = messages.map((m) => {
-    if (m.kind === 'tool_call' && (m.status === 'pending' || m.status === 'in_progress')) {
+    if (m.kind === 'tool_call' && (m.status === 'pending' || m.status === 'in_progress' || m.status === 'proposed')) {
       changed = true;
       // 被重启打断 ≠ 工具真的报错：用 canceled 与 failed 区分（灰色而非红色）。
+      // proposed（omp 两阶段编辑预览待确认）重启后同样永无后续 → 收敛。
       return { ...m, status: 'canceled' as const };
     }
     if ((m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined) {

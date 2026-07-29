@@ -10,6 +10,7 @@ import { CalendarClock, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
 
 import type { CronTask } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { BrandHero } from './brand';
 
 const EMPTY: CronTask = {
   id: '',
@@ -84,10 +85,13 @@ export default function ScheduledView(): JSX.Element | null {
           {editing ? (
             <TaskForm task={editing} onChange={setEditing} onSubmit={() => void submit()} onCancel={() => setEditing(null)} error={error} />
           ) : tasks.length === 0 ? (
-            <div className="py-14 text-center text-ui leading-7 text-ink-faint">
-              还没有定时任务
-              <br />
-              新建一个：按 cron 计划自动向引擎发送 prompt，结果落到新会话并系统通知
+            <div className="flex flex-col items-center gap-3 py-14 text-center text-ui leading-7 text-ink-faint">
+              <BrandHero size={56} />
+              <div>
+                还没有定时任务
+                <br />
+                新建一个：按 cron 计划自动向引擎发送 prompt，结果落到新会话并系统通知
+              </div>
             </div>
           ) : (
             <div className="space-y-2">

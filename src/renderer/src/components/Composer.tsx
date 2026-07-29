@@ -6,7 +6,7 @@
  * status line, and click-to-compact context ring.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
   ChevronDown,
@@ -21,21 +21,30 @@ import {
   Pencil,
   Play,
   ShieldCheck,
-  Sparkles,
   Square,
+  Swords,
   Target,
   Trash2,
   X,
   Zap,
 } from 'lucide-react';
 
-import type { CodexCatalogModel, EngineId, PermissionMode } from '@shared/types';
+import type { SlashItem } from '@shared/ipc';
+import type { CodeSelection, CodexCatalogModel, EngineId, PermissionMode } from '@shared/types';
 import { useChatStore, type QueuedMessage } from '../store/chatStore';
+import { useRaceStore } from '../store/raceStore';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import { BrandSpinner } from './brand';
 import OpencodeModelPicker from './OpencodeModelPicker';
 import ChipInput, { type ChipInputHandle } from './ChipInput';
+import SlashMenu from './SlashMenu';
+import SelectionChip from './SelectionChip';
+import { TREE_NODE_MIME } from './workspace/FileTree';
 import PlanWidget from './PlanWidget';
+
+/** zustand selector 稳定引用（避免 `?? []` 每次新建导致多余重渲染）。 */
+const NO_SELECTIONS: CodeSelection[] = [];
 
 const PERM_LABEL_KEYS: Record<string, MsgKey> = {
   default: 'permManual',
@@ -49,9 +58,17 @@ const EFFORT_LABEL_KEYS: Record<string, MsgKey> = {
   medium: 'effortMedium',
   high: 'effortHigh',
   xhigh: 'effortXhigh',
+  off: 'effortOff',
+  auto: 'effortAuto',
 };
 
+/** omp 的 ACP 思考值域＝off/auto + 模型目录 thinking[] 精细档（动态扩展）。 */
+const OMP_BASE_EFFORTS = ['off', 'auto'];
+
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/** omp 魔法关键词（独立小写词触发，代码块/路径内不算 — 这里只做宽松提示）。 */
+const MAGIC_KEYWORD_RE = /(^|\s)(ultrathink|orchestrate|workflowz)(\s|$)/;
 
 interface Attachment {
   path: string;
@@ -94,9 +111,16 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const goalActive = useChatStore((s) => !!s.goals[sessionId]);
   const sendKey = useChatStore((s) => s.settings?.sendKey ?? 'enter');
   const sendPrompt = useChatStore((s) => s.sendPrompt);
+  const selections = useChatStore((s) => s.selections[sessionId] ?? NO_SELECTIONS);
+  const removeSelection = useChatStore((s) => s.removeSelection);
   const cancel = useChatStore((s) => s.cancel);
+  const sending = useChatStore((s) => !!s.sending[sessionId]);
 
-  const busy = meta?.status === 'running' || meta?.status === 'awaiting';
+  // 在途发送（含启动期等待投递）也算忙 — 后续消息走排队，避免并发 prompt。
+  const busy = meta?.status === 'running' || meta?.status === 'awaiting' || sending;
+  // 引擎启动中：不再拦发送 — 主进程 prompt 会等启动完成后自动投递
+  //（AionUi 同款体验：输入永不禁用，首条消息后台补投）。
+  const starting = meta?.status === 'starting';
   const isPlan = ui?.modes.current === 'plan';
   const usage = ui?.usage;
   const ctxFull = !!usage && usage.size > 0 && usage.used / usage.size >= 1;
@@ -112,9 +136,18 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     return () => ro.disconnect();
   }, []);
 
+  // 回退后把被移除的提问回填输入框（nonce 驱动，消费即清）。
+  const undoDraft = useChatStore((s) => s.composerDrafts[sessionId]);
+  useEffect(() => {
+    if (!undoDraft) return;
+    setText(undoDraft.text);
+    chipRef.current?.focus();
+    useChatStore.setState((s) => ({ composerDrafts: { ...s.composerDrafts, [sessionId]: undefined } }));
+  }, [undoDraft, sessionId]);
+
   const send = (opts?: { force?: boolean }): void => {
     const value = text.trim();
-    if (!value && attachments.length === 0) return;
+    if (!value && attachments.length === 0 && selections.length === 0) return;
     // Goal 模式：发送 = 把输入作为 objective 提交（codex thread/goal/set），
     // 与 codex `/goal <objective>` 的提交语义一致，不产出普通对话回合。
     if (goalMode) {
@@ -131,14 +164,16 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       return;
     }
     const paths = attachments.length ? attachments.map((a) => a.path) : undefined;
+    const sels = selections.length ? selections : undefined;
     setText('');
     for (const a of attachments) if (a.preview) URL.revokeObjectURL(a.preview);
     setAttachments([]);
+    if (sels) useChatStore.getState().clearSelections(sessionId);
     if (busy) {
       // 忙碌时入队，回合结束后自动依次发送
-      useChatStore.getState().enqueue(value, paths);
+      useChatStore.getState().enqueue(value, paths, sels);
     } else {
-      void sendPrompt(value, paths);
+      void sendPrompt(value, paths, sels);
     }
     chipRef.current?.focus();
   };
@@ -177,8 +212,87 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   // 切换会话时重置目标编辑模式（Composer 不随会话 remount）。
   useEffect(() => setGoalMode(false), [sessionId]);
 
+  // ---------------------------------------------------------- 斜线命令菜单
+  // 触发：输入仅为 `/token`（/ 开头、无空格无换行）— 与各引擎「/name 须在
+  // 消息起始处生效」的语义一致；goal 模式（输入是 objective）不触发。
+  const [slashItems, setSlashItems] = useState<SlashItem[]>([]);
+  const [slashActive, setSlashActive] = useState(0);
+  // Esc 关闭 = 记住关闭时的文本，文本不变不再弹出（继续输入即恢复）。
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+  const slashQuery = !goalMode && /^\/[^\s]*$/.test(text) ? text.slice(1) : null;
+  const slashOpen = slashQuery !== null && slashDismissed !== text;
+
+  // 每次唤起都重新扫描（目录扫描很轻；用户可能刚装了新 skill/command）。
+  useEffect(() => {
+    if (!slashOpen) return;
+    let live = true;
+    void window.cyberslots
+      .slashList({ cwd: meta?.cwd ?? '', engine: meta?.engine ?? 'codex' })
+      .then((items) => live && setSlashItems(items))
+      .catch(() => live && setSlashItems([]));
+    return () => {
+      live = false;
+    };
+    // 只依赖真正影响扫描范围/时机的字段（meta 引用每轮渲染都变）。
+  }, [slashOpen, meta?.cwd, meta?.engine]);
+
+  // 实时过滤：名称精确 > 前缀 > 子串 > 描述命中；组内相关度+字母序，
+  // 展示顺序 命令组 → 技能组。
+  const slashMatches = useMemo(() => {
+    if (slashQuery === null) return [];
+    const q = slashQuery.toLowerCase();
+    const rank = (it: SlashItem): number => {
+      if (!q) return 0;
+      const name = it.name.toLowerCase();
+      if (name === q) return 0;
+      if (name.startsWith(q)) return 1;
+      if (name.includes(q)) return 2;
+      return it.description.toLowerCase().includes(q) ? 3 : -1;
+    };
+    const hit = slashItems.filter((it) => rank(it) >= 0);
+    hit.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    return [...hit.filter((i) => i.kind === 'command'), ...hit.filter((i) => i.kind === 'skill')];
+  }, [slashItems, slashQuery]);
+
+  // 查询串变化时回到第一项。
+  useEffect(() => setSlashActive(0), [slashQuery]);
+
+  const slashActiveClamped = slashMatches.length ? Math.min(slashActive, slashMatches.length - 1) : 0;
+
+  /** 选中候选：把输入整体替换为触发词 `/name `（尾部空格使触发条件失效，菜单自然关闭）。 */
+  const acceptSlash = (item: SlashItem): void => {
+    chipRef.current?.setPlainText(`/${item.name} `);
+    setSlashDismissed(null);
+  };
+
+  // 新选区卡片到达 → 聚焦输入框（Copilot 同款：点完「添加到对话」直接提问）。
+  const prevSelCount = useRef(0);
+  useEffect(() => {
+    if (selections.length > prevSelCount.current) chipRef.current?.focus();
+    prevSelCount.current = selections.length;
+  }, [selections.length]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
     // Shift+Tab 由上面的 window 监听统一处理（避免双重触发）。
+    // 斜线菜单打开时优先接管导航/确认/关闭键（IME 组合中不拦截，让输入法先用键）。
+    if (slashOpen && !e.nativeEvent.isComposing) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = slashMatches.length;
+        if (n > 0) setSlashActive((i) => (i + (e.key === 'ArrowDown' ? 1 : n - 1)) % n);
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === 'Tab') && slashMatches.length > 0) {
+        e.preventDefault();
+        acceptSlash(slashMatches[slashActiveClamped]!);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSlashDismissed(text);
+        return;
+      }
+    }
     if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
     // 发送键可配：Enter 发送（Shift+Enter 换行） / Ctrl+Enter 发送（Enter 换行）
     if (sendKey === 'ctrl-enter') {
@@ -196,6 +310,24 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
 
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
+    // 右侧文件树内部拖拽 — 没有 File 对象，读自定义 MIME（自带目录标记）。
+    const rawNode = e.dataTransfer.getData(TREE_NODE_MIME);
+    if (rawNode) {
+      try {
+        const node = JSON.parse(rawNode) as { name: string; path: string; dir: boolean };
+        if (!node.dir && IMAGE_RE.test(node.path)) {
+          // 工作区图片 → 图片附件（无 File 对象，缩略图用图标占位）。
+          setAttachments((prev) =>
+            prev.some((a) => a.path === node.path) ? prev : [...prev, { path: node.path, name: node.name, isImage: true }],
+          );
+        } else {
+          chipRef.current?.insertFileChip(node.name, node.path, node.dir);
+        }
+      } catch {
+        // 损坏的拖拽数据 — 忽略。
+      }
+      return;
+    }
     const imgs: Attachment[] = [];
     const refs: Array<{ name: string; path: string }> = [];
     for (const file of Array.from(e.dataTransfer.files)) {
@@ -212,9 +344,15 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     }
     if (imgs.length) setAttachments((prev) => [...prev, ...imgs]);
     if (refs.length) {
-      // 非图片：逐个在光标处插入文件引用 chip（显示彩色胶囊，
-      // 复制/发送时序列化为 `名(路径)` 纯文本）。
-      for (const r of refs) chipRef.current?.insertFileChip(r.name, r.path);
+      // 非图片：逐个在光标处插入引用 chip（显示胶囊，复制/发送时
+      // 序列化为 `名(路径)` 纯文本）。外部拖入的 File 不携带目录信息，
+      // 需问主进程 stat 后再插（文件夹 chip 图标/样式不同）。
+      void (async () => {
+        for (const r of refs) {
+          const dir = await window.cyberslots.fsIsDir(r.path);
+          chipRef.current?.insertFileChip(r.name, r.path, dir);
+        }
+      })();
     }
   };
 
@@ -264,6 +402,10 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           }}
           onEditItem={(item) => {
             setText(item.text);
+            // 队列项携带的选区引用一并回填为输入框卡片（addSelection 自带去重）。
+            if (item.selections?.length) {
+              for (const sel of item.selections) useChatStore.getState().addSelection(sessionId, sel);
+            }
             useChatStore.getState().removeQueued(sessionId, item.id);
             chipRef.current?.focus();
           }}
@@ -274,8 +416,17 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             e.preventDefault();
             e.dataTransfer.dropEffect = 'copy';
           }}
-          className="rounded-2xl border border-line bg-bg-input shadow-sm"
+          className="relative rounded-2xl border border-line bg-bg-input shadow-sm"
         >
+          {/* 斜线命令菜单 — 悬浮于输入卡片正上方（输入 / 唤起） */}
+          {slashOpen && (
+            <SlashMenu
+              items={slashMatches}
+              active={slashActiveClamped}
+              onActiveChange={setSlashActive}
+              onPick={acceptSlash}
+            />
+          )}
           {/* 图片附件 — 输入框内顶部缩略图（点击放大，悬停右上角 × 移除） */}
           {images.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3 pb-1 pt-3">
@@ -290,15 +441,32 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           )}
 
+          {/* 代码选区引用卡片 —— 文件预览里「添加到对话」投递过来的 */}
+          {selections.length > 0 && (
+            <div className={`flex flex-wrap gap-1.5 px-3 pb-1.5 ${images.length === 0 ? 'pt-3' : ''}`}>
+              {selections.map((sel) => (
+                <SelectionChip key={sel.id} sel={sel} onRemove={() => removeSelection(sessionId, sel.id)} />
+              ))}
+            </div>
+          )}
+
           <ChipInput
             ref={chipRef}
             value={text}
             onChange={setText}
             onKeyDown={onKeyDown}
             onImagePaste={handleImagePaste}
-            placeholder={goalMode ? t('goalPlaceholder') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
+            placeholder={goalMode ? t('goalPlaceholder') : starting && !busy ? t('inputStarting') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
             className="no-scrollbar max-h-32 min-h-[3.25rem] overflow-y-auto px-4 pb-1 pt-3 text-body"
           />
+
+          {/* omp 魔法关键词提示 — 正文里的 ultrathink/orchestrate/workflowz
+              会静默触发特殊行为（深度思考/并行编排），此处提醒不拦截。 */}
+          {meta?.engine === 'omp' && MAGIC_KEYWORD_RE.test(text) && (
+            <div className="mx-3 mb-1 rounded-md bg-amber-500/10 px-2.5 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+              检测到 omp 魔法关键词（ultrathink / orchestrate / workflowz）— 发送后会触发深度思考或并行子代理编排。
+            </div>
+          )}
 
           {/* 非图片文件附件 — 中性色小块 */}
           {files.length > 0 && (
@@ -314,6 +482,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             {level < 5 && <ModeSwitch isPlan={isPlan} onCycle={cycleMode} compact={level >= 1} />}
             {!isPlan && level < 4 && <PermissionPicker sessionId={sessionId} compact={level >= 1} />}
             <SwarmToggle />
+            <RaceToggle sessionId={sessionId} />
             {meta?.engine === 'codex' && (
               <button
                 title={t('goalToggle')}
@@ -333,7 +502,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
               ) : (
                 <ModelPicker sessionId={sessionId} />
               ))}
-            {level < 2 && (meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} />}
+            {level < 2 && (meta?.engine === 'codex' || meta?.engine === 'opencode' || meta?.engine === 'omp') && <EffortPicker sessionId={sessionId} />}
             <ContextRing sessionId={sessionId} />
             <button
               title={t('expandInput')}
@@ -343,7 +512,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
               <Maximize2 size={13} />
             </button>
             {busy ? (
-              text.trim() || attachments.length > 0 ? (
+              text.trim() || attachments.length > 0 || selections.length > 0 ? (
                 // 有输入 → 与发送按钮合并为「加入等待队列」（时钟），本轮结束后自动发送
                 <button
                   onClick={() => send()}
@@ -365,7 +534,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             ) : (
               <button
                 onClick={() => send()}
-                disabled={!text.trim() && attachments.length === 0}
+                disabled={!text.trim() && attachments.length === 0 && selections.length === 0}
                 title={goalMode ? t('goalSet') : t('send')}
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90 disabled:opacity-30"
               >
@@ -565,8 +734,17 @@ function QueuePanel({
               <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={item.text}>
                 {item.text}
               </span>
-              <span className="flex shrink-0 animate-pulse items-center gap-1 text-[11px] text-ink-faint">
-                <Sparkles size={11} />
+              {item.selections && item.selections.length > 0 && (
+                <span
+                  title={item.selections.map((s) => s.fileName).join(', ')}
+                  className="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent"
+                >
+                  +{item.selections.length} {t('selRefs')}
+                </span>
+              )}
+              {/* 排队等待 = 进行中语义 → 品牌星芒轮闪 */}
+              <span className="flex shrink-0 items-center gap-1 text-[11px] text-ink-faint">
+                <BrandSpinner size={11} />
                 {t('queueItemWaiting')}
               </span>
               <button
@@ -664,10 +842,11 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const forkToEngine = useChatStore((s) => s.forkToEngine);
+  const availability = useChatStore((s) => s.engineAvailability);
   const [open, setOpen] = useState(false);
   if (!meta) return null;
-  // 三引擎：列出除当前引擎外的全部选项（二元切换已成历史）。
-  const others = (['codex', 'kimi', 'opencode'] as EngineId[]).filter((e) => e !== meta.engine);
+  // 四引擎：列出除当前引擎外的全部选项（二元切换已成历史）。
+  const others = (['codex', 'opencode', 'kimi', 'omp'] as EngineId[]).filter((e) => e !== meta.engine);
 
   return (
     <div className="relative">
@@ -681,21 +860,29 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
           <div className="px-3 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">{t('continueWith')}</div>
-          {others.map((other) => (
-            <DropdownItem
-              key={other}
-              active={false}
-              onClick={() => {
-                setOpen(false);
-                void forkToEngine(sessionId, other);
-              }}
-            >
-              <span className="flex items-center gap-2">
-                <EngineIcon engine={other} size={13} />
-                {ENGINE_LABELS[other]}
-              </span>
-            </DropdownItem>
-          ))}
+          {others.map((other) => {
+            // 未安装置灰展示（可见不可选）；尚未探测（null）时不置灰。
+            const unavailable = availability ? !availability[other] : false;
+            return (
+              <DropdownItem
+                key={other}
+                active={false}
+                onClick={() => {
+                  if (unavailable) return;
+                  setOpen(false);
+                  void forkToEngine(sessionId, other);
+                }}
+              >
+                <span
+                  className={`flex items-center gap-2 ${unavailable ? 'cursor-not-allowed text-ink-faint opacity-40' : ''}`}
+                  title={unavailable ? '未检测到本机安装，详见设置-模型页' : undefined}
+                >
+                  <EngineIcon engine={other} size={13} />
+                  {ENGINE_LABELS[other]}
+                </span>
+              </DropdownItem>
+            );
+          })}
         </Dropdown>
       )}
     </div>
@@ -757,6 +944,77 @@ function SwarmToggle(): JSX.Element {
   );
 }
 
+/** 🏇 赛马入口 —— 赛马寄生于宿主对话，严格按当前会话过滤：
+ *  · 本对话有未完成赛马 → 高亮（进行中=accent，待继续=警示色），点击直入赛马视图；
+ *  · 只有已完成的 → 下拉（回看 + 发起新赛马）；
+ *  · 什么都没有 → 直接打开发起配置。其它对话的赛马一律不可见。 */
+function RaceToggle({ sessionId }: { sessionId: string }): JSX.Element {
+  const openSetup = useRaceStore((s) => s.openSetup);
+  const openRace = useRaceStore((s) => s.openRace);
+  const races = useRaceStore((s) => s.races);
+  const [open, setOpen] = useState(false);
+  // 归属判定：宿主对话本身，或身处该赛马的某个角色会话内。
+  const mine = Object.values(races)
+    .filter((r) => r.parentSessionId === sessionId || Object.values(r.sessions).includes(sessionId))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const unfinished = mine.filter((r) => r.stage !== 'done');
+  const doneOnes = mine.filter((r) => r.stage === 'done');
+  const running = unfinished.some((r) => !r.interrupted);
+  const tint = running
+    ? 'bg-accent-soft font-medium text-accent'
+    : unfinished.length
+      ? 'font-medium text-warn hover:bg-bg-hover'
+      : 'text-ink-faint hover:bg-bg-hover hover:text-ink';
+  return (
+    <div className="relative">
+      <button
+        title={
+          unfinished.length
+            ? `本对话的赛马：${unfinished[0]!.interrupted ? '待继续' : '进行中'}（点击进入）`
+            : doneOnes.length
+              ? '本对话的赛马（回看/发起）'
+              : '发起赛马（竞争式规划）'
+        }
+        onClick={() =>
+          unfinished.length ? openRace(unfinished[0]!.id) : doneOnes.length ? setOpen(!open) : openSetup()
+        }
+        className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition ${tint}`}
+      >
+        <Swords size={13} />
+      </button>
+      {open && (
+        <Dropdown onClose={() => setOpen(false)}>
+          <div className="px-3 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">本对话的赛马</div>
+          {doneOnes.map((r) => (
+            <DropdownItem
+              key={r.id}
+              active={false}
+              onClick={() => {
+                setOpen(false);
+                openRace(r.id);
+              }}
+            >
+              <span className="flex min-w-0 max-w-60 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate">🏇 {r.prompt}</span>
+                <span className="shrink-0 text-[10px] text-ink-faint">已完成</span>
+              </span>
+            </DropdownItem>
+          ))}
+          <DropdownItem
+            active={false}
+            onClick={() => {
+              setOpen(false);
+              openSetup();
+            }}
+          >
+            ＋ 发起新赛马
+          </DropdownItem>
+        </Dropdown>
+      )}
+    </div>
+  );
+}
+
 // -------------------------------------------------------- model & effort
 
 function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
@@ -764,6 +1022,7 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   const uiModels = useChatStore((s) => s.ui[sessionId]?.models);
   const setModel = useChatStore((s) => s.setModel);
   const catalog = useChatStore((s) => s.codexCatalog);
+  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
 
   // 引擎未运行（会话恢复/懒启动）时不会有 models.update 事件，
   // 此时用持久化的 meta.modelId + catalog 兑底，避免选择器消失。
@@ -805,7 +1064,11 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   return (
     <div className="relative min-w-0">
       <button
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          // 展开时后台重读配置目录 — 改 catalog 后无需重启应用即可看到新模型。
+          if (!open) void refreshEngineConfigs();
+          setOpen(!open);
+        }}
         title={entryOf(activeId)?.displayName ?? activeId}
         className="flex w-full min-w-0 items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
@@ -876,16 +1139,63 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   const t = useT();
   const override = useChatStore((s) => s.efforts[sessionId]);
   const cfgDefault = useChatStore((s) => s.codexDefaultEffort);
+  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
   const models = useChatStore((s) => s.ui[sessionId]?.models);
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const catalog = useChatStore((s) => s.codexCatalog);
   const ocCatalog = useChatStore((s) => s.opencodeCatalog);
+  const ompCatalog = useChatStore((s) => s.ompCatalog);
   const [open, setOpen] = useState(false);
   useEscClose(open, () => setOpen(false));
   const isOpencode = meta?.engine === 'opencode';
+  const isOmp = meta?.engine === 'omp';
   // 档位列表优先取 catalog 里当前模型声明的档位；
   // 引擎未运行时回退到持久化的 meta.modelId。
   const activeModel = models?.current || models?.available[0] || meta?.modelId;
+  // omp：值域 = off/auto + 目录 thinking[] 精细档；非 reasoning 模型隐控件。
+  if (isOmp) {
+    const ompEntry = ompCatalog?.models.find((c) => c.slug === activeModel);
+    if (ompEntry && ompEntry.reasoning === false) return null;
+    const ompEfforts = ompEntry?.efforts?.length ? [...OMP_BASE_EFFORTS, ...ompEntry.efforts] : OMP_BASE_EFFORTS;
+    const ompEffort = override && ompEfforts.includes(override) ? override : ompEfforts[0]!;
+    const ompIdx = Math.max(0, ompEfforts.indexOf(ompEffort));
+    const ompLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
+    const ompSelect = (i: number): void => {
+      const value = ompEfforts[Math.max(0, Math.min(ompEfforts.length - 1, i))]!;
+      useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+    };
+    return (
+      <div className="relative">
+        <button
+          title={t('effort')}
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
+        >
+          <span>{ompLabel(ompEffort)}</span>
+          <ChevronDown size={11} />
+        </button>
+        {open && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+            <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-ui font-medium">{ompLabel(ompEffort)}</span>
+                <ChevronRight size={12} className="text-ink-faint" />
+              </div>
+              <EffortSlider index={ompIdx} count={ompEfforts.length} onSelect={ompSelect} />
+              <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
+                {ompEfforts.map((e) => (
+                  <span key={e}>{ompLabel(e)}</span>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+  // 档位列表优先取 catalog 里当前模型声明的档位；
+  // 引擎未运行时回退到持久化的 meta.modelId。
   const entry: Pick<CodexCatalogModel, 'efforts' | 'defaultEffort'> | undefined = isOpencode
     ? ocCatalog?.models.find((c) => c.slug === activeModel)
     : catalog.find((c) => c.slug === activeModel);
@@ -909,7 +1219,11 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
     <div className="relative">
       <button
         title={t('effort')}
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          // 同 ModelPicker：展开时后台刷新（档位元数据同源于 catalog）。
+          if (!open) void refreshEngineConfigs();
+          setOpen(!open);
+        }}
         className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
         <span className={effort === 'xhigh' ? 'effort-max-label' : ''}>{label(effort)}</span>
@@ -1132,6 +1446,12 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
   const isPlan = useChatStore((s) => s.ui[sessionId]?.modes.current === 'plan');
   const controlGoal = useChatStore((s) => s.controlGoal);
   const [, tick] = useState(0);
+  // 引擎只在结算点（回合边界/goal 工具调用）推 timeUsedSeconds，两次
+  // 推送间本地外推秒针，否则计时长时间冻结再跳变；shownRef 单调保护，
+  // 快照到达时不回跳。
+  const baseRef = useRef({ src: -1, at: 0 });
+  const shownRef = useRef(0);
+  const keyRef = useRef('');
 
   // Local ticker so the elapsed display moves between engine pushes.
   useEffect(() => {
@@ -1142,6 +1462,21 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
 
   // codex 同款：plan 模式激活时隐藏 goal 状态（二者互斥）。
   if (!goal || isPlan) return null;
+
+  // 换了目标 = 新 goal → 单调保护归零；快照值变化 → 重置外推基线。
+  if (keyRef.current !== goal.objective) {
+    keyRef.current = goal.objective;
+    shownRef.current = 0;
+    baseRef.current = { src: goal.timeUsedSeconds, at: Date.now() };
+  } else if (baseRef.current.src !== goal.timeUsedSeconds) {
+    baseRef.current = { src: goal.timeUsedSeconds, at: Date.now() };
+  }
+  const extrapolated =
+    goal.status === 'active'
+      ? baseRef.current.src + Math.floor((Date.now() - baseRef.current.at) / 1000)
+      : goal.timeUsedSeconds;
+  const displaySeconds = Math.max(shownRef.current, extrapolated);
+  shownRef.current = displaySeconds;
 
   const paused = goal.status !== 'active';
   const statusLabel =
@@ -1163,7 +1498,7 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
           className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint"
           title={`已用 ${goal.tokensUsed.toLocaleString()} tokens${goal.tokenBudget ? ` / 预算 ${goal.tokenBudget.toLocaleString()}` : ''}`}
         >
-          {formatElapsed(goal.timeUsedSeconds * 1000)}
+          {formatElapsed(displaySeconds * 1000)}
         </span>
         {paused ? (
           <IconBtn title={t('goalResume')} onClick={() => void controlGoal('resume')}>

@@ -10,6 +10,7 @@ import { ChevronDown, Image as ImageIcon, RefreshCw, Search, Star } from 'lucide
 
 import type { OpencodeModelEntry } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { BrandSpinner } from './brand';
 
 const RECENT_KEY = 'cs.opencodeRecentModels';
 const FAV_KEY = 'cs.opencodeFavModels';
@@ -34,6 +35,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
   const catalog = useChatStore((s) => s.opencodeCatalog);
   const loadCatalog = useChatStore((s) => s.loadOpencodeCatalog);
   const setModel = useChatStore((s) => s.setModel);
+  const hiddenList = useChatStore((s) => s.settings?.opencodeHiddenModels);
 
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -46,8 +48,11 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
     void loadCatalog();
   }, [loadCatalog]);
 
-  const models = useMemo(() => catalog?.models ?? [], [catalog]);
-  const bySlug = useMemo(() => new Map(models.map((m) => [m.slug, m])), [models]);
+  const hidden = useMemo(() => new Set(hiddenList ?? []), [hiddenList]);
+  // bySlug 用全量目录 — 当前模型即使被隐藏，触发钮/详情卡仍能解析展示名。
+  const bySlug = useMemo(() => new Map((catalog?.models ?? []).map((m) => [m.slug, m])), [catalog]);
+  // 列表只展示未隐藏的模型（设置 → 模型 → opencode 卡片可管理黑名单）。
+  const models = useMemo(() => (catalog?.models ?? []).filter((m) => !hidden.has(m.slug)), [catalog, hidden]);
   // 恢复态兜底：models.update 未到时用持久化的 meta.modelId。
   const current = uiModels?.current || meta?.modelId || '';
 
@@ -75,11 +80,12 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
     return out;
   }, [filtered]);
 
-  if (!current && !models.length && !catalog?.error) {
+  if (!current && !bySlug.size && !catalog?.error) {
     // 目录还没加载且无持久化模型 — 显示占位（保持控件条布局稳定）。
     return (
-      <button className="flex items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-faint" disabled>
-        <span className="animate-pulse">模型加载中…</span>
+      <button className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-ui text-ink-faint" disabled>
+        <BrandSpinner size={12} />
+        模型加载中…
       </button>
     );
   }
@@ -125,9 +131,6 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
       <span className="flex shrink-0 items-center gap-1 text-[10px] text-ink-faint">
         {m.contextWindow ? fmtCtx(m.contextWindow) : ''}
         {m.inputModalities?.includes('image') && <ImageIcon size={10} />}
-        {(m.costInput ?? 1) === 0 && (m.costOutput ?? 1) === 0 && (
-          <span className="rounded bg-ok/15 px-1 py-px text-[9px] font-medium text-ok">免费</span>
-        )}
       </span>
       <button
         title={favs.includes(m.slug) ? '取消收藏' : '收藏'}
@@ -168,15 +171,13 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
               <div className="absolute bottom-0 left-full ml-2 w-60 rounded-xl border border-line bg-bg-input p-3 shadow-lg">
                 <div className="mb-1.5 flex items-center justify-between gap-2">
                   <span className="min-w-0 truncate text-ui font-semibold text-ink">{detail.displayName ?? detail.modelID}</span>
-                  {(detail.costInput ?? 1) === 0 && (detail.costOutput ?? 1) === 0 && (
-                    <span className="shrink-0 rounded bg-ok/15 px-1 py-px text-[9px] font-medium text-ok">免费</span>
-                  )}
                 </div>
                 <div className="mb-2 truncate font-mono text-[10px] text-ink-faint">{detail.slug}</div>
                 <div className="space-y-1 text-[10.5px] leading-4 text-ink-soft">
                   <DetailRow k="能力" v={[detail.toolCall && 'Tool calling', detail.reasoning && 'Reasoning', detail.attachment && '附件'].filter(Boolean).join(' · ') || '—'} />
                   <DetailRow k="输入/输出" v={`${(detail.inputModalities ?? ['text']).join(',')} → ${(detail.outputModalities ?? ['text']).join(',')}`} />
-                  <DetailRow k="价格 $/1M" v={detail.costInput === 0 && detail.costOutput === 0 ? '免费' : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
+                  {/* 不做「免费」判定 — 自定义 provider 的 0/0 只是未定价兑底，只陈述价格事实。 */}
+                  <DetailRow k="价格 $/1M" v={detail.costInput == null && detail.costOutput == null ? '未定价' : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
                   {detail.contextWindow ? <DetailRow k="上下文" v={fmtCtx(detail.contextWindow)} /> : null}
                   {detail.efforts?.length ? <DetailRow k="思考档位" v={detail.efforts.join(' / ')} /> : null}
                 </div>
@@ -208,7 +209,11 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                     模型目录加载失败：{catalog.error}
                   </div>
                 )}
-                {!catalog && <div className="animate-pulse px-3 py-2 text-[11px] text-ink-faint">加载中…</div>}
+                {!catalog && (
+                  <div className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-ink-faint">
+                    <BrandSpinner size={11} /> 加载中…
+                  </div>
+                )}
                 {favModels.length > 0 && !q && (
                   <>
                     <GroupTitle label="收藏" />
@@ -231,9 +236,23 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                   <div className="px-3 py-2 text-[11px] text-ink-faint">无匹配模型</div>
                 )}
               </div>
-              {/* provider 引导（不做连接管理 — 委托 opencode 自身） */}
-              <div className="border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
-                连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
+              {/* provider 引导 + 隐藏模型管理入口（不做连接管理 — 委托 opencode 自身） */}
+              <div className="flex items-center gap-2 border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
+                <span className="min-w-0 flex-1 truncate">
+                  连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
+                </span>
+                {hidden.size > 0 && (
+                  <button
+                    title="在设置 → 模型 中管理展示哪些模型"
+                    onClick={() => {
+                      setOpen(false);
+                      useChatStore.setState({ settingsOpen: true });
+                    }}
+                    className="shrink-0 rounded px-1 py-px transition hover:bg-bg-hover hover:text-ink"
+                  >
+                    已隐藏 {hidden.size} 个
+                  </button>
+                )}
               </div>
             </div>
           </div>

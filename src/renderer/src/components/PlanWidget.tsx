@@ -1,13 +1,14 @@
 /**
  * PlanWidget — “待办”行条，内嵌输入框顶部（与 Goal / 等待发送行条一体）：
- * 默认收起显示当前步骤 + 进度，点击展开完整列表。
+ * 默认收起仅显示进度，点击展开完整列表。
  */
 
 import { useState } from 'react';
-import { Check, ChevronRight, Loader2 } from 'lucide-react';
+import { Check, ChevronRight } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { BrandSpinner } from './brand';
 
 type PlanMsg = Extract<UnifiedMessage, { kind: 'plan' }>;
 
@@ -31,8 +32,6 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
   // Hide once everything is finished and the turn is over.
   if (!running && done === plan.entries.length) return null;
 
-  const current = plan.entries.find((e) => e.status === 'in_progress') ?? plan.entries.find((e) => e.status === 'pending');
-
   return (
     <div className="border-b border-line bg-bg-panel/70">
       <button
@@ -41,7 +40,8 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
       >
         <ChevronRight size={12} className={`shrink-0 text-ink-faint transition-transform ${open ? 'rotate-90' : ''}`} />
         <span className="shrink-0 font-medium text-ink">待办</span>
-        <span className="min-w-0 flex-1 truncate text-left text-ink-soft">{current?.content ?? ''}</span>
+        {/* 收起态不展示当前任务文本 — 只留进度，详情点开看。 */}
+        <span className="flex-1" />
         <span className="shrink-0 tabular-nums text-ink-faint">
           {done}/{plan.entries.length}
         </span>
@@ -54,11 +54,11 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
                 {e.status === 'completed' ? (
                   <Check size={13} className="text-ok" />
                 ) : e.status === 'in_progress' ? (
-                  // 会话不在运行态（停止/暂停/重启恢复/error）时静态淡化显示，避免一直转圈误导
+                  // 会话不在运行态（停止/暂停/重启恢复/error）时转轮定格淡化显示，避免一直滚动误导
                   running ? (
-                    <Loader2 size={13} className="animate-spin text-accent" />
+                    <BrandSpinner size={13} className="text-accent" />
                   ) : (
-                    <Loader2 size={13} className="text-ink-faint" />
+                    <BrandSpinner size={13} spinning={false} className="text-ink-faint" />
                   )
                 ) : (
                   <span className="block h-3 w-3 rounded-full border border-ink-faint/50" />

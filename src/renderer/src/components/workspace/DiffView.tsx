@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { RotateCcw, X } from 'lucide-react';
 
 import type { SessionChangeDiff } from '@shared/ipc';
+import { BrandHero } from '../brand';
 
 type Row = { t: 'ctx' | 'add' | 'del'; text: string; oldN?: number; newN?: number };
 
@@ -63,7 +64,11 @@ export default function DiffView({
       </div>
       <div className="min-h-0 flex-1 overflow-auto font-mono text-[11.5px] leading-5">
         {rows === null ? (
-          <div className="px-3 py-8 text-center text-ink-faint">加载中…</div>
+          <div className="flex flex-col items-center justify-center gap-2 px-3 py-8 text-ink-faint">
+            {/* 面板内容区级等待按规范用 BrandHero */}
+            <BrandHero size={48} />
+            加载中…
+          </div>
         ) : rows.length === 0 ? (
           <div className="px-3 py-8 text-center text-ink-faint">无差异</div>
         ) : (

@@ -34,7 +34,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           </pre>
           <button
             onClick={() => this.setState({ error: null })}
-            className="rounded-lg border border-line bg-bg-input px-4 py-1.5 text-ui hover:border-accent hover:text-accent"
+            className="rounded-lg border border-line bg-bg-input px-4 py-1.5 text-ui hover:bg-bg-hover hover:text-ink"
           >
             重试渲染
           </button>

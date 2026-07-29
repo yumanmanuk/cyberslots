@@ -9,7 +9,7 @@ import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { AppSettings } from '@shared/types';
+import type { AppSettings, ContextFallbackRule } from '@shared/types';
 
 const DEFAULTS: AppSettings = {
   themeMode: 'light',
@@ -18,9 +18,22 @@ const DEFAULTS: AppSettings = {
   defaultPermissionMode: 'default',
   sendKey: 'enter',
   autoCompactRatio: 90,
+  contextFallbackRules: [{ match: 'k3 256k', to: 'k3' }],
   notifications: { taskComplete: true, question: true, error: true },
   workspaces: [],
   routing: { kimi: false, codex: false },
+  opencodeHiddenModels: [],
+  race: {
+    enableRacerC: false,
+    roles: {
+      racerA: { engine: 'codex', modelId: '', effort: '' },
+      racerB: { engine: 'kimi', modelId: '', effort: '' },
+      racerC: { engine: 'opencode', modelId: '', effort: '' },
+      judge: { engine: 'codex', modelId: '', effort: '' },
+      builder: { engine: 'codex', modelId: '', effort: '' },
+      auditor: { engine: 'codex', modelId: '', effort: '' },
+    },
+  },
 };
 
 /** Backfill fields added over time; silently drop the legacy provider
@@ -35,9 +48,24 @@ function migrate(stored: Record<string, unknown>): AppSettings {
     sendKey: s.sendKey ?? DEFAULTS.sendKey,
     autoCompactRatio:
       typeof s.autoCompactRatio === 'number' ? Math.max(0, Math.min(100, s.autoCompactRatio)) : DEFAULTS.autoCompactRatio,
+    // 存过则以用户的为准（含故意清空），仅剔除缺字段/空白的脏行；
+    // 老版本没存过才回填内置 k3 规则。
+    contextFallbackRules: Array.isArray(s.contextFallbackRules)
+      ? s.contextFallbackRules
+          .filter((r): r is ContextFallbackRule => !!r && typeof r.match === 'string' && typeof r.to === 'string')
+          .map((r) => ({ match: r.match.trim(), to: r.to.trim() }))
+          .filter((r) => r.match && r.to)
+      : DEFAULTS.contextFallbackRules,
     notifications: { ...DEFAULTS.notifications, ...(s.notifications ?? {}) },
     workspaces: s.workspaces ?? [],
     routing: { ...DEFAULTS.routing, ...(s.routing ?? {}) },
+    opencodeHiddenModels: Array.isArray(s.opencodeHiddenModels)
+      ? s.opencodeHiddenModels.filter((x): x is string => typeof x === 'string')
+      : [],
+    race: {
+      enableRacerC: s.race?.enableRacerC ?? DEFAULTS.race.enableRacerC,
+      roles: { ...DEFAULTS.race.roles, ...(s.race?.roles ?? {}) },
+    },
   };
 }
 

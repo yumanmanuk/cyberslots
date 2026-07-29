@@ -2,6 +2,9 @@ import { resolve } from 'node:path';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
 
+// HMR_OFF=1 时冻结渲染进程热更新（配合 dev:frozen 使用）
+const hmrOff = process.env.HMR_OFF === '1';
+
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
@@ -26,6 +29,9 @@ export default defineConfig({
     },
   },
   renderer: {
+    server: {
+      hmr: !hmrOff,
+    },
     resolve: {
       alias: {
         '@': resolve('src/renderer/src'),

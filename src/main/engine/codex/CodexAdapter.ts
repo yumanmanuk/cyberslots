@@ -70,6 +70,11 @@ export class CodexAdapter implements EngineAdapter {
   private modelId: string;
   private mode: PermissionMode;
   private turnDone: (() => void) | undefined;
+  /** 引擎自发回合（goal continuation / compact / review）进行中标记 —
+   *  这类回合不经 prompt() 发起，此前完全隐身：状态不推进、结束事件被吞，
+   *  UI 会卡在「执行中/等待授权」且中止看似无效。 */
+  private backgroundTurnActive = false;
+  private backgroundCodexTurnId = '';
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly stderrTail: string[] = [];
   /** 最近一次补全的 token 明细（thread/tokenUsage `last`）— 仅用于
@@ -152,6 +157,8 @@ export class CodexAdapter implements EngineAdapter {
     await withTimeout(
       this.rpc.request('initialize', {
         clientInfo: { name: 'cyberslots', title: 'CyberSlots', version: '0.1.0' },
+        // thread/settings/update（setMode 热同步线程策略）属实验面 API，需显式 opt-in。
+        capabilities: { experimentalApi: true },
       }),
       INIT_TIMEOUT_MS,
       'codex initialize',
@@ -276,6 +283,19 @@ export class CodexAdapter implements EngineAdapter {
 
   async setMode(mode: PermissionMode): Promise<void> {
     this.mode = mode;
+    // 热同步线程级策略：goal continuation 等引擎自发回合不走 turn/start
+    // 传参，只认线程存量设置 — 不同步的话，切到 YOLO 后续跑回合仍会按
+    // 旧策略弹授权（沙箱受限命令）。失败静默：prompt 回合有 turn/start 兜底。
+    const modeCfg = MODE_MAP[mode];
+    try {
+      await this.requireRpc().request('thread/settings/update', {
+        threadId: this.threadId,
+        approvalPolicy: modeCfg.approvalPolicy,
+        sandboxPolicy: { type: modeCfg.sandbox },
+      });
+    } catch {
+      /* 旧版 codex 无此实验方法 — 忽略 */
+    }
     this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
   }
 
@@ -285,7 +305,13 @@ export class CodexAdapter implements EngineAdapter {
     this.pendingApprovals.delete(requestId);
     pending.resolve(optionId ?? 'cancel');
     this.emit({ type: 'permission.resolved', requestId, optionId });
-    if (this.turnDone) this.emit({ type: 'session.status', status: 'running' });
+    // 无论哪类回合都要把状态从 awaiting 拉回来 — 此前只认 prompt 回合
+    // （turnDone），goal continuation 里答完授权后右上角永远卡「等待授权」。
+    if (this.turnDone || this.backgroundTurnActive) {
+      this.emit({ type: 'session.status', status: 'running' });
+    } else if (!this.disposed) {
+      this.emit({ type: 'session.status', status: 'idle' });
+    }
   }
 
   /** Native sidechat: codex thread/fork copies stored history engine-side. */
@@ -390,6 +416,14 @@ export class CodexAdapter implements EngineAdapter {
         // 只靠响应会让 activeCodexTurnId 短暂为空 → cancel/steer 变哑弹。
         const startedTurn = params.turn as Json | undefined;
         if (startedTurn?.id) this.activeCodexTurnId = String(startedTurn.id);
+        // 引擎自发回合补全生命周期：推进 running（否则输入框/心跳全程装死），
+        // 并发 turn.started 让主进程拍变更基线快照。
+        if (!this.turnDone && !this.backgroundTurnActive) {
+          this.backgroundTurnActive = true;
+          this.backgroundCodexTurnId = String(startedTurn?.id ?? '');
+          this.emit({ type: 'turn.started', turnId: ++this.turnId });
+          this.emit({ type: 'session.status', status: 'running' });
+        }
         return;
       }
       case 'item/agentMessage/delta':
@@ -482,10 +516,20 @@ export class CodexAdapter implements EngineAdapter {
         return;
       }
       case 'turn/completed': {
-        // 引擎自发回合（compact/review 等，非 prompt 发起）不产出统计行，
-        // 否则压缩等开销会被算进上一回合，还会误触未读/「任务完成」通知。
-        if (!this.turnDone) return;
         const turn = params.turn as Json | undefined;
+        // 引擎自发回合（goal continuation / compact / review，非 prompt 发起）
+        // 不产出统计行（usage 基线是 prompt 回合口径，算了也是错的），但必须
+        // 收尾状态机 — 此前直接吞事件导致 UI 永远停在「执行中/等待授权」。
+        if (!this.turnDone) {
+          if (this.backgroundTurnActive) this.endBackgroundTurn(turn);
+          return;
+        }
+        // prompt 回合等待期间冒出的自发回合结束（理论竞态）：按 id 区分，
+        // 不能让它误结算 prompt 回合。
+        if (this.backgroundTurnActive && this.backgroundCodexTurnId && String(turn?.id ?? '') === this.backgroundCodexTurnId) {
+          this.endBackgroundTurn(turn);
+          return;
+        }
         const status = String(turn?.status ?? 'completed');
         const err = turn?.error as Json | undefined;
         if (status === 'failed' && err) {
@@ -525,6 +569,22 @@ export class CodexAdapter implements EngineAdapter {
       default:
         return; // thread/started, item deltas we don't render yet, etc.
     }
+  }
+
+  /** 引擎自发回合收尾：发 stopReason='background' 的结束事件（关闭流式
+   *  caret、清残留授权卡）并恢复 idle；不产统计行，消费方（通知/赛马/
+   *  自动压缩）按 stopReason 过滤。 */
+  private endBackgroundTurn(turn: Json | undefined): void {
+    this.backgroundTurnActive = false;
+    this.backgroundCodexTurnId = '';
+    this.activeCodexTurnId = '';
+    const status = String(turn?.status ?? 'completed');
+    const err = turn?.error as Json | undefined;
+    if (status === 'failed' && err) {
+      this.emit({ type: 'error', turnId: this.turnId, source: 'provider', message: String(err.message ?? 'turn failed') });
+    }
+    this.emit({ type: 'turn.ended', turnId: this.turnId, stopReason: 'background' });
+    if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
   }
 
   /** Map codex ThreadItem lifecycle into tool.upsert / message events. */

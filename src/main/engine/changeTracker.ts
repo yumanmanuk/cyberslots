@@ -23,7 +23,20 @@ interface SessionState {
   baselineHash: string | null;
   /** 本会话编辑过的绝对路径（供变更清单过滤到「本对话」范围）。 */
   touched: Set<string>;
+  /** 逐提问快照（发送前拍）——「回退到某个提问」的还原点。 */
+  marks: PromptMark[];
 }
+
+interface PromptMark {
+  /** 用户消息 id（renderer 侧 UnifiedMessage.id）。 */
+  messageId: string;
+  /** 该提问发送前的影子快照 tree hash。 */
+  hash: string;
+  ts: number;
+}
+
+/** marks 滚动上限 — 超出丢最旧（快照对象本身在影子仓库里，无需清理）。 */
+const MAX_MARKS = 100;
 
 export class ChangeTracker {
   private readonly shadow = new ShadowGit();
@@ -109,6 +122,46 @@ export class ChangeTracker {
     this.persist(sessionId);
   }
 
+  /** 提问发送前拍快照 — 记录「回退到此提问」的还原点（AI 未动手，race-free）。 */
+  async markPrompt(sessionId: string, root: string, messageId: string): Promise<void> {
+    this.ensureLoaded(sessionId);
+    const hash = await this.shadow.snapshot(root);
+    if (!hash) return;
+    const s = this.state(sessionId);
+    s.marks.push({ messageId, hash, ts: Date.now() });
+    if (s.marks.length > MAX_MARKS) s.marks.splice(0, s.marks.length - MAX_MARKS);
+    this.persist(sessionId);
+  }
+
+  /** 回退到该提问将撤销的文件清单（快照 vs 当前磁盘）；null = 无快照（旧消息/cron）。 */
+  async undoPreview(sessionId: string, root: string, messageId: string): Promise<SessionChangeEntry[] | null> {
+    this.ensureLoaded(sessionId);
+    const mark = this.state(sessionId).marks.find((m) => m.messageId === messageId);
+    if (!mark) return null;
+    const stat = await this.shadow.diffStat(root, mark.hash);
+    const out: SessionChangeEntry[] = [];
+    for (const [rel, st] of stat) {
+      const abs = join(root, rel);
+      out.push({ path: abs, name: basename(abs), adds: st.adds, dels: st.dels, status: st.status, sessions: this.sessionCount(abs) });
+    }
+    return out;
+  }
+
+  /** 执行回退：把与快照有差异的文件全部还原（不在快照 = 删除），并丢弃该时点及之后的 marks。 */
+  async undoRevert(sessionId: string, root: string, messageId: string): Promise<void> {
+    this.ensureLoaded(sessionId);
+    const s = this.state(sessionId);
+    const mark = s.marks.find((m) => m.messageId === messageId);
+    if (!mark) return;
+    const stat = await this.shadow.diffStat(root, mark.hash);
+    for (const rel of stat.keys()) {
+      await this.shadow.revertFile(root, mark.hash, join(root, rel));
+    }
+    // 该提问及其后的消息已被移除 — 对应还原点一并作废。
+    s.marks = s.marks.filter((m) => m.ts < mark.ts);
+    this.persist(sessionId);
+  }
+
   /** 接受（保留改动、停止跟踪，不动磁盘）；path 省略 = 全部。 */
   accept(sessionId: string, path?: string): void {
     this.ensureLoaded(sessionId);
@@ -134,7 +187,7 @@ export class ChangeTracker {
   private state(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (!s) {
-      s = { baselineHash: null, touched: new Set() };
+      s = { baselineHash: null, touched: new Set(), marks: [] };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -157,11 +210,18 @@ export class ChangeTracker {
     try {
       const f = this.file(sessionId);
       if (!existsSync(f)) return;
-      const raw = JSON.parse(readFileSync(f, 'utf8')) as { baselineHash?: unknown; touched?: unknown };
+      const raw = JSON.parse(readFileSync(f, 'utf8')) as { baselineHash?: unknown; touched?: unknown; marks?: unknown };
       if (raw && typeof raw === 'object' && Array.isArray(raw.touched)) {
+        const marks = Array.isArray(raw.marks)
+          ? raw.marks.filter(
+              (m): m is PromptMark =>
+                !!m && typeof m === 'object' && typeof (m as PromptMark).messageId === 'string' && typeof (m as PromptMark).hash === 'string' && typeof (m as PromptMark).ts === 'number',
+            )
+          : [];
         this.sessions.set(sessionId, {
           baselineHash: typeof raw.baselineHash === 'string' ? raw.baselineHash : null,
           touched: new Set(raw.touched.filter((x): x is string => typeof x === 'string')),
+          marks,
         });
       }
     } catch {
@@ -172,12 +232,12 @@ export class ChangeTracker {
   private persist(sessionId: string): void {
     try {
       const s = this.sessions.get(sessionId);
-      if (!s || (!s.baselineHash && s.touched.size === 0)) {
+      if (!s || (!s.baselineHash && s.touched.size === 0 && s.marks.length === 0)) {
         rmSync(this.file(sessionId), { force: true });
         return;
       }
       mkdirSync(this.dir, { recursive: true });
-      writeFileSync(this.file(sessionId), JSON.stringify({ baselineHash: s.baselineHash, touched: [...s.touched] }), 'utf8');
+      writeFileSync(this.file(sessionId), JSON.stringify({ baselineHash: s.baselineHash, touched: [...s.touched], marks: s.marks }), 'utf8');
     } catch {
       /* best effort */
     }
