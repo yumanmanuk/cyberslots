@@ -10,7 +10,7 @@ import { CalendarClock, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
 
 import type { CronTask } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
-import { BrandHero } from './brand';
+import { BrandHero, BrandSpinner } from './brand';
 
 const EMPTY: CronTask = {
   id: '',
@@ -32,12 +32,16 @@ export default function ScheduledView(): JSX.Element | null {
   const runCronNow = useChatStore((s) => s.runCronNow);
   const [editing, setEditing] = useState<CronTask | null>(null);
   const [error, setError] = useState('');
+  /* 列表未到达前 cronTasks 是初始 []，与真正的空态不可分 — 用本地标志区分三态 */
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
       setEditing(null);
       setError('');
-      void loadCron();
+      setLoaded(false);
+      void loadCron().finally(() => setLoaded(true));
     }
   }, [open, loadCron]);
 
@@ -46,12 +50,15 @@ export default function ScheduledView(): JSX.Element | null {
   const close = (): void => useChatStore.setState({ cronOpen: false });
   const submit = async (): Promise<void> => {
     if (!editing) return;
+    setSaving(true);
     try {
       await saveCron(editing);
       setEditing(null);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -83,7 +90,13 @@ export default function ScheduledView(): JSX.Element | null {
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
           {editing ? (
-            <TaskForm task={editing} onChange={setEditing} onSubmit={() => void submit()} onCancel={() => setEditing(null)} error={error} />
+            <TaskForm task={editing} onChange={setEditing} onSubmit={() => void submit()} onCancel={() => setEditing(null)} error={error} saving={saving} />
+          ) : !loaded ? (
+            <div className="flex flex-col items-center gap-2 py-14 text-ui text-ink-faint">
+              {/* 面板内容区级等待按规范用 BrandHero */}
+              <BrandHero size={48} />
+              读取定时任务…
+            </div>
           ) : tasks.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-14 text-center text-ui leading-7 text-ink-faint">
               <BrandHero size={56} />
@@ -104,7 +117,7 @@ export default function ScheduledView(): JSX.Element | null {
                     setEditing(t);
                     setError('');
                   }}
-                  onRun={() => void runCronNow(t.id)}
+                  onRun={() => runCronNow(t.id)}
                   onDelete={() => void deleteCron(t.id)}
                 />
               ))}
@@ -126,9 +139,11 @@ function TaskRow({
   task: CronTask;
   onToggle: () => void;
   onEdit: () => void;
-  onRun: () => void;
+  onRun: () => Promise<void>;
   onDelete: () => void;
 }): JSX.Element {
+  /* 立即运行会真正拉起引擎会话 — 进行中态用品牌 spinner 替换图标（同 MissionControl） */
+  const [running, setRunning] = useState(false);
   return (
     <div className={`rounded-xl border border-line px-4 py-3 ${task.enabled ? 'bg-bg' : 'bg-bg-panel/50 opacity-70'}`}>
       <div className="flex items-center gap-2">
@@ -141,8 +156,16 @@ function TaskRow({
         </button>
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{task.name}</span>
         <code className="rounded-md bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-ink-soft">{task.cron}</code>
-        <button title="立即运行" onClick={onRun} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-accent">
-          <Play size={13} />
+        <button
+          title="立即运行"
+          disabled={running}
+          onClick={() => {
+            setRunning(true);
+            void onRun().finally(() => setTimeout(() => setRunning(false), 1500));
+          }}
+          className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-accent disabled:opacity-50"
+        >
+          {running ? <BrandSpinner size={13} /> : <Play size={13} />}
         </button>
         <button title="编辑" onClick={onEdit} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <Pencil size={13} />
@@ -168,12 +191,14 @@ function TaskForm({
   onSubmit,
   onCancel,
   error,
+  saving,
 }: {
   task: CronTask;
   onChange: (t: CronTask) => void;
   onSubmit: () => void;
   onCancel: () => void;
   error: string;
+  saving: boolean;
 }): JSX.Element {
   const pickFolder = async (): Promise<void> => {
     const dir = await window.cyberslots.dialogPickFolder();
@@ -226,7 +251,12 @@ function TaskForm({
         <button onClick={onCancel} className="rounded-lg border border-line px-4 py-1.5 text-ui text-ink-soft hover:bg-bg-hover">
           取消
         </button>
-        <button onClick={onSubmit} className="rounded-lg bg-accent px-4 py-1.5 text-ui font-medium text-white hover:opacity-90">
+        <button
+          onClick={onSubmit}
+          disabled={saving}
+          className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-1.5 text-ui font-medium text-white hover:opacity-90 disabled:opacity-60"
+        >
+          {saving && <BrandSpinner size={12} />}
           保存任务
         </button>
       </div>

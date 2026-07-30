@@ -4,6 +4,7 @@
  * switchable; the branch stays in plan (read-only) mode so it can
  * answer questions but never writes files or runs commands. 只读提示
  * 不再常驻——悬浮 dock 里的 sidechat tab 时以 tooltip 展示。
+ * 面板宽度由 RightDock 统一管理（dock 左缘把手拖拽），此处只受控渲染。
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -15,23 +16,12 @@ import MessageList from './MessageList';
 import PermissionSheet from './PermissionSheet';
 import { EffortPicker } from './Composer';
 
-/** 可拖拽宽度范围 + localStorage 持久。 */
-const MIN_W = 300;
-const MAX_W = 720;
-const DEFAULT_W = 380;
-
-/** 读持久化的面板宽度（越界兑底默认值）；RightDock 的 pending 占位面板同步复用。 */
-export function readSidechatWidth(): number {
-  const saved = Number(localStorage.getItem('cs.sidechatWidth'));
-  return Number.isFinite(saved) && saved >= MIN_W && saved <= MAX_W ? saved : DEFAULT_W;
-}
-
 /** kimi 分支的只读护栏：kimi 没有 read-only sandbox，靠每条消息前置
  *  硬指令约束（codex 分支用 plan/read-only 模式，无需此护栏）。 */
 const SIDECHAT_GUARD =
   '【只读分支约束】本消息来自只读 sidechat：只允许阅读文件与回答问题，禁止一切写入/编辑/执行命令/创建计划文件等有副作用操作，也不要进入任何 Plan 工作流，直接用文字作答。';
 
-export default function SideChatPanel({ sessionId }: { sessionId: string }): JSX.Element {
+export default function SideChatPanel({ sessionId, width }: { sessionId: string; width: number }): JSX.Element {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
@@ -40,9 +30,6 @@ export default function SideChatPanel({ sessionId }: { sessionId: string }): JSX
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  // 面板宽度：左缘拖拽调整，拖动中直接设 width（无过渡），松手持久化。
-  const [width, setWidth] = useState(readSidechatWidth);
-  const drag = useRef<{ startX: number; startW: number } | null>(null);
 
   const messages = ui?.messages ?? [];
   const sending = useChatStore((s) => !!s.sending[sessionId]);
@@ -92,26 +79,7 @@ export default function SideChatPanel({ sessionId }: { sessionId: string }): JSX
   };
 
   return (
-    <aside className="relative flex shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
-      {/* 左缘拖拽把手 — 悬停/拖动时高亮成细线 */}
-      <div
-        onPointerDown={(e) => {
-          drag.current = { startX: e.clientX, startW: width };
-          (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        }}
-        onPointerMove={(e) => {
-          const d = drag.current;
-          if (!d) return;
-          setWidth(Math.min(MAX_W, Math.max(MIN_W, d.startW + (d.startX - e.clientX))));
-        }}
-        onPointerUp={() => {
-          if (!drag.current) return;
-          drag.current = null;
-          localStorage.setItem('cs.sidechatWidth', String(width));
-        }}
-        className="absolute inset-y-0 left-0 z-10 w-1 cursor-col-resize touch-none transition-colors duration-150 hover:bg-accent/40 active:bg-accent/60"
-      />
-
+    <aside className="flex shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
       <div
         ref={scrollRef}
         onScroll={() => {

@@ -15,18 +15,17 @@ import {
   Play,
   Power,
   Search,
-  Swords,
   Zap,
 } from 'lucide-react';
 
 import type { CronTask, SessionMeta, WorkspaceInfo } from '@shared/types';
 import type { RaceGroup, RaceStage } from '@shared/race';
-import { RACE_STAGE_LABELS, RACE_STAGE_ORDER } from '@shared/race';
+import { RACE_STAGE_LABELS, RACE_STAGE_ORDER, raceHostArchived } from '@shared/race';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
 import { useT } from '../../i18n';
 import SessionCard, { defaultAllowOption, findPendingRequest } from './SessionCard';
-import { BrandHero } from '../brand';
+import { BrandHero, BrandSpinner } from '../brand';
 import { fmtEta, nextRunAt } from './cronNext';
 
 type ChipId = 'all' | 'projects' | 'chats' | string;
@@ -60,6 +59,9 @@ export default function MissionControl(): JSX.Element {
   // ------------------------------------------------------------ grouping
 
   const visible = useMemo(() => sessions.filter((s) => !s.archived && !s.raceId), [sessions]);
+
+  // 宿主对话已归档的赛马一并收纳（不进泳道/待办），还原宿主后自动回来。
+  const archivedIds = useMemo(() => new Set(sessions.filter((s) => s.archived).map((s) => s.id)), [sessions]);
 
   const chipFiltered = useMemo(() => {
     if (chip === 'all') return visible;
@@ -99,17 +101,17 @@ export default function MissionControl(): JSX.Element {
   const decisionRaces = useMemo(
     () =>
       Object.values(races)
-        .filter((g) => g.stage === 'judging' && !g.adopt)
+        .filter((g) => g.stage === 'judging' && !g.adopt && !raceHostArchived(g, archivedIds))
         .sort((a, b) => b.updatedAt - a.updatedAt),
-    [races],
+    [races, archivedIds],
   );
   /** 进行中的赛马（非终态）→ 泳道条。 */
   const liveRaces = useMemo(
     () =>
       Object.values(races)
-        .filter((g) => g.stage !== 'done' && g.stage !== 'config')
+        .filter((g) => g.stage !== 'done' && g.stage !== 'config' && !raceHostArchived(g, archivedIds))
         .sort((a, b) => b.updatedAt - a.updatedAt),
-    [races],
+    [races, archivedIds],
   );
 
   // ---------------------------------------------------------- 键盘流
@@ -353,7 +355,7 @@ function RaceStrip({ races }: { races: RaceGroup[] }): JSX.Element {
   return (
     <div className="rounded-xl border border-line bg-bg-panel px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-soft">
-        <Swords size={12} className="text-accent" />
+        <span className="text-[12px] leading-none">🏇</span>
         {t('mcRaceLane')}
       </div>
       <div className="flex flex-col gap-1.5">
@@ -411,7 +413,7 @@ function RaceDecisionCard({ race, selected }: { race: RaceGroup; selected: boole
         }`}
     >
       <div className="flex items-center gap-2">
-        <Swords size={13} className="shrink-0 text-warn" />
+        <span className="shrink-0 text-[13px] leading-none">🏇</span>
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{race.prompt}</span>
       </div>
       <div className="mt-1.5 text-[12px] text-ink-soft">{t('mcRaceDecisionDesc')}</div>
@@ -501,7 +503,8 @@ function CronRow({ task, now }: { task: CronTask; now: number }): JSX.Element {
           }}
           className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-accent disabled:opacity-50"
         >
-          <Play size={11} className={running ? 'animate-pulse text-accent' : ''} />
+          {/* 进行中态用品牌 spinner 替换图标，不用 animate-pulse 表达 loading */}
+          {running ? <BrandSpinner size={11} /> : <Play size={11} />}
         </button>
         <button
           title={task.enabled ? t('mcCronPause') : t('mcCronResume')}
@@ -537,7 +540,7 @@ function EmptyHero(): JSX.Element {
           onClick={() => useRaceStore.getState().openSetup()}
           className="flex items-center gap-1.5 rounded-xl border border-line px-4 py-2 text-[13px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
         >
-          <Swords size={13} />
+          <span className="text-[13px] leading-none">🏇</span>
           {t('mcStartRace')}
         </button>
       </div>

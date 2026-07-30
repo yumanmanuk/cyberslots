@@ -14,7 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { IPC } from '@shared/ipc';
-import type { EngineEvent } from '@shared/types';
+import type { EngineEvent, UsageInfo } from '@shared/types';
 import type { RaceAdoptStrategy, RaceCreateRequest, RaceEvent, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from '../engine/SessionManager';
 import { RaceOrchestrator, type RaceSessionHost, type RaceSpawnSpec } from './RaceOrchestrator';
@@ -140,9 +140,18 @@ export class RaceManager implements RaceSessionHost {
    *  正常收束后自发续跑出真正产物），故不能拿第一个 turn.ended 当
    *  交卷：收束后等一段静默期，期间引擎又开新回合就继续等；真安静
    *  了才交卷（此时 transcript 才是最终产物）。异常收束（error/
-   *  cancelled/interrupted）不等静默，立即上报。 */
-  onTurnEnded(sessionId: string, cb: (stopReason: string) => void): () => void {
+   *  cancelled/interrupted）不等静默，立即上报。
+   *  附带记账：逐内部回合累计 usage，交卷时一并上报（供赛马阶段
+   *  统计）；含 approx 估算则整体标 approx，由编排器拒记（kimi 不计）。 */
+  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo) => void): () => void {
     let settle: NodeJS.Timeout | undefined;
+    const acc: UsageInfo = { inputTokens: 0, outputTokens: 0 };
+    const fold = (usage?: UsageInfo): void => {
+      if (!usage) return;
+      acc.inputTokens = (acc.inputTokens ?? 0) + (usage.inputTokens ?? 0);
+      acc.outputTokens = (acc.outputTokens ?? 0) + (usage.outputTokens ?? 0);
+      if (usage.approx) acc.approx = true;
+    };
     const off = this.sessions.subscribe(sessionId, (event: EngineEvent) => {
       if (event.type === 'turn.started') {
         // 引擎续跑（自发回合/内部第二回合）→ 撤回待定的交卷。
@@ -151,16 +160,17 @@ export class RaceManager implements RaceSessionHost {
         return;
       }
       if (event.type !== 'turn.ended') return;
+      fold(event.usage);
       const reason = event.stopReason;
       if (reason === 'error' || reason === 'cancelled' || reason === 'interrupted') {
         if (settle) clearTimeout(settle);
-        cb(reason);
+        cb(reason, acc);
         return;
       }
       // 正常/background 收束：静默 2s 后才算交卷（background 收束同样
       // 可能是最终产物所在回合 —— 不再一律忽略）。
       if (settle) clearTimeout(settle);
-      settle = setTimeout(() => cb('end_turn'), 2000);
+      settle = setTimeout(() => cb('end_turn', acc), 2000);
     });
     return () => {
       if (settle) clearTimeout(settle);

@@ -13,8 +13,8 @@
     "url": "git+https://github.com/yumanmanuk/cyberslots.git"
   },
   "scripts": {
-    "dev": "electron-vite dev --watch",
-    "dev:frozen": "set HMR_OFF=1&& electron-vite dev",
+    "dev": "chcp 65001>nul&& electron-vite dev --watch",
+    "dev:frozen": "chcp 65001>nul&& set HMR_OFF=1&& electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",

@@ -5,7 +5,7 @@
  * 由编排器冻结并推送）。
  */
 
-import { ChevronRight, Download } from 'lucide-react';
+import { ChevronRight, Download, Maximize2 } from 'lucide-react';
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -14,6 +14,7 @@ import type { RaceGroup, RacerRole } from '@shared/race';
 import { RACE_ROLE_LABELS } from '@shared/race';
 import { downloadMarkdown } from '../../planDoc';
 import { useRaceStore } from '../../store/raceStore';
+import ArtifactZoom from './ArtifactZoom';
 import EliminateButton from './EliminateButton';
 
 export default function ArtifactsPreview({ race, fill = false }: { race: RaceGroup; fill?: boolean }): JSX.Element {
@@ -75,6 +76,8 @@ function RacerArtifact({
 }): JSX.Element {
   const [planOpen, setPlanOpen] = useState(true);
   const [rebutOpen, setRebutOpen] = useState(false);
+  /** 放大查看中的产物（null = 未放大）。 */
+  const [zoom, setZoom] = useState<'plan' | 'rebuttal' | null>(null);
   const toneText = tone === 'a' ? 'text-accent' : tone === 'b' ? 'text-warn' : 'text-ink-soft';
   const toneBorder = tone === 'a' ? 'border-accent' : tone === 'b' ? 'border-warn' : 'border-line';
 
@@ -103,13 +106,22 @@ function RacerArtifact({
             📋 方案文档
           </button>
           {plan && (
-            <button
-              title="下载 md"
-              onClick={() => downloadMarkdown(`选手${letter}方案`, plan)}
-              className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
-            >
-              <Download size={12} />
-            </button>
+            <>
+              <button
+                title="放大查看"
+                onClick={() => setZoom('plan')}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                <Maximize2 size={12} />
+              </button>
+              <button
+                title="下载 md"
+                onClick={() => downloadMarkdown(`选手${letter}方案`, plan)}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                <Download size={12} />
+              </button>
+            </>
           )}
         </div>
         {planOpen && (
@@ -127,13 +139,24 @@ function RacerArtifact({
 
       {/* ⚔ 反驳 / 🤝 吸纳 / 🛡 辩护（同一回合产物，默认收起） */}
       <div className="rounded-xl border border-line bg-bg-panel/70">
-        <button
-          onClick={() => setRebutOpen(!rebutOpen)}
-          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-ink transition hover:text-accent"
-        >
-          <ChevronRight size={12} className={`shrink-0 transition-transform ${rebutOpen ? 'rotate-90' : ''}`} />
-          ⚔ 反驳 · 🤝 吸纳 · 🛡 辩护
-        </button>
+        <div className="flex items-center gap-1.5 px-3 py-1.5">
+          <button
+            onClick={() => setRebutOpen(!rebutOpen)}
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-ink transition hover:text-accent"
+          >
+            <ChevronRight size={12} className={`shrink-0 transition-transform ${rebutOpen ? 'rotate-90' : ''}`} />
+            ⚔ 反驳 · 🤝 吸纳 · 🛡 辩护
+          </button>
+          {rebuttal && (
+            <button
+              title="放大查看"
+              onClick={() => setZoom('rebuttal')}
+              className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+            >
+              <Maximize2 size={12} />
+            </button>
+          )}
+        </div>
         {rebutOpen && (
           <div className="max-h-[36vh] overflow-y-auto border-t border-line px-3.5 py-2.5">
             {rebuttal ? (
@@ -146,6 +169,14 @@ function RacerArtifact({
           </div>
         )}
       </div>
+
+      {/* 放大查看：标题标明归属，避免多栏对比时看串 */}
+      {zoom === 'plan' && plan && (
+        <ArtifactZoom title={`📋 选手 ${letter} · 方案`} text={plan} onClose={() => setZoom(null)} />
+      )}
+      {zoom === 'rebuttal' && rebuttal && (
+        <ArtifactZoom title={`⚔ 选手 ${letter} · 反驳·吸纳·辩护`} text={rebuttal} onClose={() => setZoom(null)} />
+      )}
     </div>
   );
 }

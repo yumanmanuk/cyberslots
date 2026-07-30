@@ -20,6 +20,7 @@ import type {
 } from '@shared/types';
 import { readOpencodeSnapshot } from '../engine/opencode/resolveOpencode';
 import { readOmpSnapshot } from '../engine/omp/resolveOmp';
+import { readAntigravitySnapshot } from '../engine/antigravity/resolveAntigravity';
 
 type Json = Record<string, unknown>;
 
@@ -165,6 +166,7 @@ export function readEngineConfigs(): EngineConfigsSnapshot {
     codex,
     opencode: readOpencodeSnapshot(),
     omp: readOmpSnapshot(),
+    antigravity: readAntigravitySnapshot(),
     routeSupport: {
       kimi: kimiRouteSupport(kimi),
       codex: codexRouteSupport(codex, kimi),

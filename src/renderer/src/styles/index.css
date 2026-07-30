@@ -143,6 +143,23 @@ body {
   font-size: 14px;
 }
 
+/* 原生控件跟随主题明暗 —— color-scheme 告知 Chromium 按当前模式渲染
+   UA 控件（数字框上下钮/复选框/下拉箭头等），否则暗色下会露出浅色
+   原生控件（如阈值输入框的 spinner）；由 <html> 的 data-mode 驱动。
+   复选框/单选框的选中色另用 accent-color 对齐主题强调色。 */
+:root {
+  color-scheme: light;
+  accent-color: var(--accent);
+}
+[data-mode='dark'] {
+  color-scheme: dark;
+}
+
+/* 文本选区跟随主题色 — 浏览器默认蓝色选区与暖色系配色违和 */
+::selection {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
 /* Slim scrollbars, Notion style */
 *::-webkit-scrollbar {
   width: 8px;
@@ -179,6 +196,21 @@ body {
 /* 无滚动条 — 输入框用：内容超高时靠自动扩行承载，永不显滚动条。 */
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* tab 条溢出渐隐 — 被截断的 tab 以渐隐淡出而非硬切边（硬切会留
+   1–3px 残影竖线），同时暗示这一侧还有更多 tab。宽度与 RightDock 的
+   STRIP_FADE 常量保持一致（激活 tab 对齐时会避开渐隐区）。 */
+.strip-fade-r {
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 16px), transparent 100%);
+}
+
+.strip-fade-l {
+  mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 100%);
+}
+
+.strip-fade-lr {
+  mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
 }
 
 /* ChipInput（contenteditable 输入框）的文件/文件夹引用胶囊 — 行内显示，
@@ -220,6 +252,15 @@ body {
   opacity: 0.8;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* 代码选区引用胶囊 — 文件胶囊基础上附行号徽标（accent 微高亮，
+   与普通文件引用区分）；序列化为 `名#L起-止(路径)`（见 ChipInput）。 */
+.oc-sel-chip .oc-sel-range {
+  font-family: Iosevka, 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  color: var(--accent);
+  opacity: 0.9;
 }
 
 /* 文件树拖拽 ghost — dragstart 瞬时挂到视口外供 setDragImage 快照，
@@ -393,6 +434,56 @@ body {
   animation: shimmer-slide 1.6s linear infinite;
 }
 
+/* 工具活动窗的 1px 扫描线（科技感来源，替代整卡扫光）：一道 accent
+   光点沿状态行下缘往复扫过，暗示后台在持续推进。 */
+.tool-scan {
+  height: 1px;
+  background: linear-gradient(90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--accent) 55%, transparent) 50%,
+      transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer-slide 1.6s linear infinite;
+}
+
+/* 工具行左侧 3px 状态刻度的呼吸（状态指示呼吸灯，属规范豁免项，
+   非 loading 动效——组级 loading 由 BrandSpinner 承担）。 */
+@keyframes tick-breathe {
+
+  0%,
+  100% {
+    opacity: .45;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.tool-tick-run {
+  animation: tick-breathe 1.2s ease-in-out infinite;
+}
+
+/* 代码选区「添加到对话」浮动按钮弹出 */
+@keyframes sel-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(.94);
+  }
+}
+
+/* 顶部钉住的提问胶囊：浮现/换字时从上缘轻滑入（key=消息 id 触发重播） */
+.question-pin {
+  animation: question-pin-in 180ms ease-out;
+}
+
+@keyframes question-pin-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
 /* Bottom-sheet slide-up (permission / ask-user) */
 @keyframes sheet-in {
   from {
@@ -420,6 +511,30 @@ body {
   to {
     opacity: 1;
     transform: translateX(0);
+  }
+}
+
+/* 赛马阶段切换飘字：滑入 → 停留 → 淡出（总时长与 raceStore
+   STAGE_FLASH_MS 同步，动画走完 store 才清掉，不会中途硬卸） */
+.race-stage-toast {
+  animation: race-stage-toast 2.6s ease forwards;
+}
+
+@keyframes race-stage-toast {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px) scale(.96);
+  }
+
+  9%,
+  84% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-8px) scale(.98);
   }
 }
 

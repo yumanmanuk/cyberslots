@@ -15,8 +15,8 @@ import type { RacerRole } from '@shared/race';
 import { RACER_ROLES, RACE_ROLE_LABELS } from '@shared/race';
 import { useRaceStore } from '../../store/raceStore';
 import { useChatStore } from '../../store/chatStore';
-import { ENGINE_LABELS } from '../EngineIcon';
-import { EFFORT_LABELS, RACE_ENGINES, maxEffort, useRoleCatalogs } from './modelCatalogs';
+import { ENGINE_LABELS, useEngineOrder } from '../EngineIcon';
+import { EFFORT_LABELS, maxEffort, useRoleCatalogs } from './modelCatalogs';
 
 type TuneRole = RacerRole;
 
@@ -32,6 +32,7 @@ export default function RoleTuneDialog(): JSX.Element | null {
   const updateRole = useRaceStore((s) => s.updateRole);
   const race = useRaceStore((s) => (s.activeRaceId ? s.races[s.activeRaceId] : undefined));
   const availability = useChatStore((s) => s.engineAvailability);
+  const engineOrder = useEngineOrder();
   const { modelOptions, defaultModel, effortOptions } = useRoleCatalogs(open);
   const [drafts, setDrafts] = useState<Partial<Record<TuneRole, RoleDraft>> | null>(null);
   const [saving, setSaving] = useState(false);
@@ -117,7 +118,7 @@ export default function RoleTuneDialog(): JSX.Element | null {
                 onChange={(e) => onEngine(role, e.target.value as EngineId)}
                 className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-soft outline-none transition focus:border-accent"
               >
-                {RACE_ENGINES.map((eng) => (
+                {engineOrder.map((eng) => (
                   <option key={eng} value={eng} disabled={availability ? !availability[eng] : false}>
                     {ENGINE_LABELS[eng]}
                     {availability && !availability[eng] ? '（未安装）' : ''}

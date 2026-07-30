@@ -13,6 +13,7 @@ import { Folder, FolderPlus, X } from 'lucide-react';
 
 import type { WorkspaceInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { BrandSpinner } from './brand';
 import { useT } from '../i18n';
 
 interface Props {
@@ -30,6 +31,8 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
   const updateWorkspace = useChatStore((s) => s.updateWorkspace);
   const [name, setName] = useState('');
   const [folders, setFolders] = useState<string[]>([]);
+  /* 创建/保存走 IPC 异步 — 进行中态给品牌 spinner，顺便防连点重复创建 */
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -50,14 +53,19 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
 
   const submit = async (): Promise<void> => {
     const finalName = name.trim() || folders[0]?.split(/[\\/]/).pop() || 'workspace';
-    if (folders.length === 0) return;
-    if (editing) {
-      await updateWorkspace({ ...editing, name: finalName, folders });
-    } else {
-      const ws = await addWorkspace(finalName, folders);
-      onCreated?.(ws);
+    if (folders.length === 0 || busy) return;
+    setBusy(true);
+    try {
+      if (editing) {
+        await updateWorkspace({ ...editing, name: finalName, folders });
+      } else {
+        const ws = await addWorkspace(finalName, folders);
+        onCreated?.(ws);
+      }
+      onClose();
+    } finally {
+      setBusy(false);
     }
-    onClose();
   };
 
   // Portal 到 body — 侧栏外层带 transform（折叠动画），会把 fixed 定位困在侧栏内
@@ -131,9 +139,10 @@ export default function WorkspaceDialog({ open, editing, onClose, onCreated }: P
             </button>
             <button
               onClick={() => void submit()}
-              disabled={folders.length === 0}
-              className="rounded-lg bg-ink px-4 py-1.5 text-ui font-medium text-bg transition hover:opacity-85 disabled:opacity-40"
+              disabled={folders.length === 0 || busy}
+              className="flex items-center gap-1.5 rounded-lg bg-ink px-4 py-1.5 text-ui font-medium text-bg transition hover:opacity-85 disabled:opacity-40"
             >
+              {busy && <BrandSpinner size={12} />}
               {editing ? t('save') : t('createProject')}
             </button>
           </div>

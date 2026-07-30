@@ -35,9 +35,13 @@ import type {
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { ThinkSplitter } from '../thinkSplitter';
 import { killEngineTree } from '../killTree';
+import { compatAudit } from '../compatAudit';
 import { kimiSpawnEnv, resolveKimiCli } from './resolveKimi';
 
 const INIT_TIMEOUT_MS = 30_000;
+
+/** 已知且刻意不渲染的 update kind — 不进兼容审计（不是协议漂移）。 */
+const KNOWN_IGNORED_UPDATES = new Set(['user_message_chunk', 'session_info_update', 'plan_removed']);
 
 /** AskUserQuestion bridge namespace (acp-adapter/src/question.ts). */
 const QUESTION_OPTION_RE = /^q\d+_(opt_\d+|skip)$/;
@@ -242,7 +246,10 @@ export class KimiAdapter implements EngineAdapter {
     const client = this.requireClient();
     try {
       await client.unstable_setSessionModel({ sessionId: this.sessionId, modelId });
-    } catch {
+    } catch (err) {
+      // 降级路径本身正常（旧版无此实验方法），但要留账：新版引擎若砍掉
+      // 此方法，这里是唯一能看到信号的地方。
+      compatAudit.record('kimi', 'rejected-method', 'unstable_setSessionModel', errorMessage(err));
       await client.setSessionConfigOption({
         sessionId: this.sessionId,
         optionId: 'model',
@@ -274,8 +281,10 @@ export class KimiAdapter implements EngineAdapter {
       );
       const forkedId = String((res as { sessionId?: unknown }).sessionId ?? '');
       return forkedId ? { engineSessionId: forkedId } : null;
-    } catch {
-      return null; // Method not found / timeout → unsupported
+    } catch (err) {
+      // Method not found / timeout → unsupported；降级静默但证据入账。
+      compatAudit.record('kimi', 'rejected-method', 'unstable_forkSession', errorMessage(err));
+      return null;
     }
   }
 
@@ -384,6 +393,10 @@ export class KimiAdapter implements EngineAdapter {
       }
       default:
         // user_message_chunk / session_info_update / plan_removed — no UI impact yet.
+        // 真正未知的 kind = 引擎升级新增能力信号 → 进兼容审计。
+        if (!KNOWN_IGNORED_UPDATES.has(u.sessionUpdate)) {
+          compatAudit.record('kimi', 'unknown-event', `sessionUpdate:${u.sessionUpdate}`, u);
+        }
         return;
     }
   }

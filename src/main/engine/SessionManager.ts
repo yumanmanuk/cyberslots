@@ -21,6 +21,7 @@ import { CodexAdapter } from './codex/CodexAdapter';
 import { ChangeTracker } from './changeTracker';
 import { OpencodeAdapter } from './opencode/OpencodeAdapter';
 import { OmpAdapter } from './omp/OmpAdapter';
+import { AntigravityAdapter } from './antigravity/AntigravityAdapter';
 import type { OpencodeServerHost } from './opencode/OpencodeServerHost';
 import type { OpencodeEventHub } from './opencode/OpencodeEventHub';
 import {
@@ -44,6 +45,8 @@ interface LiveSession {
 /** 从消息文件抽取的单回合用量行（turn_end 折叠）。 */
 interface UsageRow {
   ts: number;
+  /** 回合内真实 API 调用次数；无逐调用信号（omp/老数据）按 1 回合兜底。 */
+  calls: number;
   input: number;
   output: number;
   cached: number;
@@ -106,7 +109,8 @@ export class SessionManager {
           ? `本会话绑定多根工作区「${workspace.name}」，包含以下根目录（当前工作目录是第一个，其余目录也属于本项目范围，可用绝对路径访问）：\n${workspace.folders.join('\n')}`
           : undefined,
       modelId: req.modelId ?? '',
-      permissionMode: req.permissionMode ?? settings.defaultPermissionMode,
+      // antigravity headless 无法交互式审批 → 默认自动放行（否则工作区外读写/shell 均被软拒）。
+      permissionMode: req.permissionMode ?? (req.engine === 'antigravity' ? 'auto' : settings.defaultPermissionMode),
       status: 'starting',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -240,6 +244,7 @@ export class SessionManager {
     const src = this.require(sessionId);
     const id = randomUUID();
     const history = this.getMessages(sessionId);
+    const engineChanged = engine !== src.meta.engine;
     const meta: SessionMeta = {
       ...src.meta,
       id,
@@ -248,6 +253,10 @@ export class SessionManager {
       title: `⇄ ${src.meta.title.replace(/^[⑂⇄] /, '')}`,
       parentId: src.meta.id,
       contextSeed: serializeHistory(history),
+      // 切到不同引擎时重置模型（否则沿用上一个引擎的模型名）；空串 = 目标引擎用其默认。
+      modelId: engineChanged ? '' : src.meta.modelId,
+      // antigravity headless 默认自动放行（同 create；无法交互式审批）。
+      permissionMode: engine === 'antigravity' ? 'auto' : src.meta.permissionMode,
       status: 'closed',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -485,7 +494,8 @@ export class SessionManager {
   /** turn_end 抽取行缓存 — mtime 命中直接复用，避免每次查询重析全部消息文件。 */
   private readonly usageRowCache = new Map<string, { mtimeMs: number; rows: UsageRow[] }>();
 
-  /** 聚合各会话消息文件里的 turn_end 用量（不含费用）：
+  /** 聚合各会话消息文件里的 turn_end 用量（不含费用）：requests 口径为
+   *  真实 API 调用次数（usage.apiCalls 累加，缺失时按 1 回合兜底）。
    *  跨度 ≤24h 按小时桶（起点对齐），否则按本地日历天分桶，空桶补零。
    *  kimi 会话一律不参与统计（无可靠的真实 token 上报，只有字符数估算）。 */
   usageStats(query: UsageStatsQuery): UsageStatsResult {
@@ -535,11 +545,11 @@ export class SessionManager {
         }
         const b = buckets[idx];
         if (!b) continue;
-        b.requests += 1;
+        b.requests += r.calls;
         b.inputTokens += r.input;
         b.outputTokens += r.output;
         b.cachedTokens += r.cached;
-        totals.requests += 1;
+        totals.requests += r.calls;
         totals.inputTokens += r.input;
         totals.outputTokens += r.output;
         totals.cachedTokens += r.cached;
@@ -567,6 +577,7 @@ export class SessionManager {
           ? [
               {
                 ts: m.createdAt,
+                calls: Math.max(1, m.usage?.apiCalls ?? 1),
                 input: m.usage?.inputTokens ?? 0,
                 output: m.usage?.outputTokens ?? 0,
                 cached: m.usage?.cachedInputTokens ?? 0,
@@ -640,6 +651,13 @@ export class SessionManager {
       // 直连未显式选模型时加载 ~/.codex/config.toml 的默认 model —
       // UI 与实际生效模型一致，且下发值等于 codex 自身默认，不改变行为。
       const directModelId = meta.modelId || codexCfg.model || '';
+      // 多根工作区：其余根目录并入 codex workspace-write 沙盒的可写根
+      // （提示注入只解决「认知」，codex 是唯一有 OS 沙盒会硬拦写的引擎）。
+      // 读当前 settings 而非建会时快照 — 目录增删后的懒唤醒/重启自动生效。
+      const wsFolders = meta.workspaceId
+        ? settings.workspaces.find((w) => w.id === meta.workspaceId)?.folders ?? []
+        : [];
+      const extraWritableRoots = wsFolders.filter((f) => f !== meta.cwd);
       return new CodexAdapter(
         {
           cwd: meta.cwd,
@@ -648,6 +666,7 @@ export class SessionManager {
           resumeThreadId: resumeSessionId,
           quietResumeFallback,
           configOverrideArgs: overrideArgs,
+          extraWritableRoots,
           modelProvider: settings.routing.codex ? 'cyberslots' : undefined,
           availableModels,
         },
@@ -685,6 +704,25 @@ export class SessionManager {
         (event) => this.onEngineEvent(meta.id, event),
       );
     }
+    if (meta.engine === 'antigravity') {
+      // headless `agy -p --output-format stream-json`，每回合一个进程。
+      // 账号切换由 agyAccounts 覆写 keyring 完成，本适配器无需感知——
+      // 下一个 prompt 进程自然以新账号启动（实时读 keyring）。
+      return new AntigravityAdapter(
+        {
+          cwd: meta.cwd,
+          // 未显式选模型时回落设置里的 agy 默认模型（仍为空则适配器用内置默认）。
+          // 读当前 settings 而非建会时快照 — 改默认后懒唤醒/重启自然生效。
+          modelId: meta.modelId || settings.antigravityDefaultModel || '',
+          permissionMode: meta.permissionMode,
+          resumeSessionId,
+          // 工作态会话：把项目根传给适配器，首个 prompt 注入工作目录上下文
+          // （headless agent 不把进程 cwd 当「工作区」自述，不告知就说“未设置工作区”）。
+          workDir: meta.chatMode === 'work' ? meta.cwd : undefined,
+        },
+        (event) => this.onEngineEvent(meta.id, event),
+      );
+    }
     throw new Error(`未知引擎: ${meta.engine}`);
   }
 
@@ -698,6 +736,12 @@ export class SessionManager {
         if (event.status === 'running') s.meta.updatedAt = Date.now();
         // 持久化运行态：崩溃/重启后 loadPersistedMetas 才能据此识别
         // 「上次仍在执行/待回答」并标记未读（否则中断的任务无痕）。
+        this.persistMetas();
+      } else if (event.type === 'session.meta') {
+        // 适配器回填的元数据（如 antigravity 首个 prompt 后的 conversation_id、
+        // opencode 服务端会话重建后的新 id）必须合并进 meta 并落盘 —— 否则
+        // 重启后 resumeSessionId 为空，续接断链（上下文丢失）。
+        Object.assign(s.meta, event.patch);
         this.persistMetas();
       } else if (event.type === 'models.update') {
         s.meta.modelId = event.current;

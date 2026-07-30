@@ -23,12 +23,20 @@ import type {
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { killEngineTree } from '../killTree';
+import { compatAudit } from '../compatAudit';
 import { NdjsonRpc } from './rpc';
 import { codexSpawnEnv, resolveCodexCli } from './resolveCodex';
 
 const INIT_TIMEOUT_MS = 30_000;
 
 type Json = Record<string, unknown>;
+
+/** 已知且刻意不渲染的通知 — 不进兼容审计；各类 *Delta 流另按后缀豁免
+ *（内容面要么已由其它通知覆盖、要么刻意不渲染）。 */
+const KNOWN_IGNORED_NOTIFICATIONS = new Set(['thread/started']);
+
+/** 已知且刻意不渲染的 item 类型（由 delta 通知覆盖）。 */
+const KNOWN_IGNORED_ITEMS = new Set(['userMessage', 'agentMessage', 'reasoning']);
 
 export interface CodexAdapterOptions {
   cwd: string;
@@ -42,6 +50,9 @@ export interface CodexAdapterOptions {
   cliEntry?: string;
   /** 路由开启时的 `-c key=value` 命令行覆盖（零文件写入）。 */
   configOverrideArgs?: string[];
+  /** 多根工作区的其余根目录 — 并入 workspace-write 沙盒的额外可写根
+   *  （提示注入只让模型「知道」目录，沙盒放行必须走这里）。 */
+  extraWritableRoots?: string[];
   /** 路由开启时指定的 model_provider；缺省 = 用户配置默认。 */
   modelProvider?: string;
   /** Model aliases to surface in the model picker. */
@@ -60,6 +71,16 @@ const MODE_MAP: Record<PermissionMode, { approvalPolicy: string; sandbox: string
   yolo: { approvalPolicy: 'never', sandbox: 'danger-full-access' },
 };
 
+/** SandboxMode（kebab-case，thread/start 的 `sandbox` 字段）→ SandboxPolicy
+ *  的 serde tag（camelCase，thread/settings/update 的 `sandboxPolicy.type`）。
+ *  两套命名是 codex 协议的地面真值（app-server-protocol v2 permissions.rs），
+ *  混用会反序列化失败被静默吞掉 — 模式热切等于没同步。 */
+const SANDBOX_POLICY_TAG: Record<string, string> = {
+  'workspace-write': 'workspaceWrite',
+  'read-only': 'readOnly',
+  'danger-full-access': 'dangerFullAccess',
+};
+
 export class CodexAdapter implements EngineAdapter {
   private child: ChildProcessWithoutNullStreams | undefined;
   private rpc: NdjsonRpc | undefined;
@@ -75,6 +96,9 @@ export class CodexAdapter implements EngineAdapter {
    *  UI 会卡在「执行中/等待授权」且中止看似无效。 */
   private backgroundTurnActive = false;
   private backgroundCodexTurnId = '';
+  /** 中止点在 turn id 未就绪的空窗期（turn/start 响应未回）— 记账，
+   *  id 一到立即补发 turn/interrupt，否则那一下停止等于白点。 */
+  private cancelRequested = false;
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly stderrTail: string[] = [];
   /** 最近一次补全的 token 明细（thread/tokenUsage `last`）— 仅用于
@@ -84,6 +108,9 @@ export class CodexAdapter implements EngineAdapter {
   private latestTotalUsage: UsageBreakdown | undefined;
   /** 本回合开始时的 `total` 基线 — 与结束时的差值 = 整回合全部 API 调用之和。 */
   private turnUsageBaseline: UsageBreakdown | undefined;
+  /** 本回合的 API 调用计数 — 每次补全完成都会推一条带 `last` 的
+   *  tokenUsage 更新，逐条累计即真实请求数（仅 prompt 回合）。 */
+  private turnApiCalls = 0;
   private turnStartedAt = 0;
   /** 回合内"非 API"区间（工具执行 / 等待审批）的并集累计 ms — t/s 只按 API 时间算。 */
   private turnBusyMs = 0;
@@ -113,7 +140,10 @@ export class CodexAdapter implements EngineAdapter {
   async start(): Promise<{ engineSessionId: string }> {
     this.emit({ type: 'session.status', status: 'starting' });
     // 路由覆盖是 root 级 `-c` 参数，必须排在 app-server 子命令之前。
-    const spec = resolveCodexCli([...(this.opts.configOverrideArgs ?? []), 'app-server'], this.opts.cliEntry);
+    const spec = resolveCodexCli(
+      [...(this.opts.configOverrideArgs ?? []), ...this.writableRootsArgs(), 'app-server'],
+      this.opts.cliEntry,
+    );
     const child = spawn(spec.command, spec.args, {
       cwd: this.opts.cwd,
       shell: spec.shell ?? false,
@@ -171,6 +201,11 @@ export class CodexAdapter implements EngineAdapter {
       approvalPolicy: modeCfg.approvalPolicy,
       sandbox: modeCfg.sandbox,
     };
+    // 多根工作区的原生通道（codex ≥ 0.144 实验字段，需 experimentalApi，上面
+    // initialize 已开）：替换语义，必须含 cwd。旧版 codex 不认识此字段会
+    // 静默忽略 — 那时靠 spawn 级 `-c writable_roots` 覆盖兑底（两者等效）。
+    const extraRoots = this.opts.extraWritableRoots ?? [];
+    if (extraRoots.length) threadParams.runtimeWorkspaceRoots = [this.opts.cwd, ...extraRoots];
     if (this.opts.modelProvider) threadParams.modelProvider = this.opts.modelProvider;
     if (this.modelId) threadParams.model = this.modelId;
 
@@ -183,6 +218,16 @@ export class CodexAdapter implements EngineAdapter {
     this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.threadId };
+  }
+
+  /** 多根工作区 → `-c sandbox_workspace_write.writable_roots=[...]` 覆盖。
+   *  值按 TOML 数组拼；JSON.stringify 的反斜杠转义与 TOML basic string
+   *  兼容，Windows 路径直接可用。danger-full-access / read-only 下无害
+   *  （只影响 workspace-write 策略的构造），所以不按模式区分。 */
+  private writableRootsArgs(): string[] {
+    const roots = this.opts.extraWritableRoots ?? [];
+    if (!roots.length) return [];
+    return ['-c', `sandbox_workspace_write.writable_roots=[${roots.map((r) => JSON.stringify(r)).join(',')}]`];
   }
 
   private async openThread(method: string, params: Json): Promise<string> {
@@ -229,6 +274,7 @@ export class CodexAdapter implements EngineAdapter {
     const turnId = ++this.turnId;
     this.lastTurnUsage = undefined;
     this.turnUsageBaseline = this.latestTotalUsage;
+    this.turnApiCalls = 0;
     this.turnBusyMs = 0;
     this.busyKeys.clear();
     this.turnStartedAt = Date.now();
@@ -256,6 +302,7 @@ export class CodexAdapter implements EngineAdapter {
       const res = await rpc.request<Json>('turn/start', params);
       const turn = res.turn as Json | undefined;
       this.activeCodexTurnId = String(turn?.id ?? '');
+      this.flushPendingCancel();
       await done; // resolved by turn/completed
     } catch (err) {
       this.emit({ type: 'error', turnId, source: classifyError(err), message: errorMessage(err) });
@@ -263,15 +310,30 @@ export class CodexAdapter implements EngineAdapter {
     } finally {
       this.turnDone = undefined;
       this.activeCodexTurnId = '';
+      this.cancelRequested = false;
       if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
     }
   }
 
   async cancel(): Promise<void> {
-    if (!this.activeCodexTurnId) return;
+    if (!this.activeCodexTurnId) {
+      // 回合在跑但 turn id 还没到（排队消息刚派发/自发回合刚起步）：
+      // 记账等 id 到达后补发中断 — 此前直接 return，停止点了等于没点。
+      if (this.turnDone || this.backgroundTurnActive) this.cancelRequested = true;
+      return;
+    }
+    this.cancelRequested = false;
     await this.requireRpc().request('turn/interrupt', {
       threadId: this.threadId,
       turnId: this.activeCodexTurnId,
+    });
+  }
+
+  /** turn id 迟到时补发空窗期记账的中止；失败显性化（无调用方可接异常）。 */
+  private flushPendingCancel(): void {
+    if (!this.cancelRequested || !this.activeCodexTurnId) return;
+    void this.cancel().catch((err) => {
+      this.emit({ type: 'error', source: 'engine', message: `中止失败：${errorMessage(err)}` });
     });
   }
 
@@ -287,11 +349,17 @@ export class CodexAdapter implements EngineAdapter {
     // 传参，只认线程存量设置 — 不同步的话，切到 YOLO 后续跑回合仍会按
     // 旧策略弹授权（沙箱受限命令）。失败静默：prompt 回合有 turn/start 兜底。
     const modeCfg = MODE_MAP[mode];
+    // sandboxPolicy 的 tag 是 camelCase（与 thread/start 的 kebab-case `sandbox`
+    // 不同套命名）；对象整体替换线程策略 — workspace-write 必须带上多根
+    // 的额外可写根，否则热切一次模式就把开线程时的可写根丢掉。
+    const sandboxPolicy: Json = { type: SANDBOX_POLICY_TAG[modeCfg.sandbox] ?? modeCfg.sandbox };
+    const roots = this.opts.extraWritableRoots ?? [];
+    if (modeCfg.sandbox === 'workspace-write' && roots.length) sandboxPolicy.writableRoots = roots;
     try {
       await this.requireRpc().request('thread/settings/update', {
         threadId: this.threadId,
         approvalPolicy: modeCfg.approvalPolicy,
-        sandboxPolicy: { type: modeCfg.sandbox },
+        sandboxPolicy,
       });
     } catch {
       /* 旧版 codex 无此实验方法 — 忽略 */
@@ -416,6 +484,7 @@ export class CodexAdapter implements EngineAdapter {
         // 只靠响应会让 activeCodexTurnId 短暂为空 → cancel/steer 变哑弹。
         const startedTurn = params.turn as Json | undefined;
         if (startedTurn?.id) this.activeCodexTurnId = String(startedTurn.id);
+        this.flushPendingCancel();
         // 引擎自发回合补全生命周期：推进 running（否则输入框/心跳全程装死），
         // 并发 turn.started 让主进程拍变更基线快照。
         if (!this.turnDone && !this.backgroundTurnActive) {
@@ -458,6 +527,7 @@ export class CodexAdapter implements EngineAdapter {
         const used = Number(last?.totalTokens ?? total?.totalTokens ?? 0);
         const size = Number(usage?.modelContextWindow ?? 0);
         if (last) {
+          if (this.turnDone) this.turnApiCalls += 1;
           this.lastTurnUsage = {
             inputTokens: Number(last.inputTokens ?? 0),
             cachedInputTokens: Number(last.cachedInputTokens ?? 0),
@@ -543,8 +613,10 @@ export class CodexAdapter implements EngineAdapter {
             ? diffBreakdown(this.latestTotalUsage, this.turnUsageBaseline)
             : undefined;
         const usage: UsageInfo | undefined = summed
-          ? { ...this.lastTurnUsage, ...summed }
-          : this.lastTurnUsage;
+          ? { ...this.lastTurnUsage, ...summed, apiCalls: this.turnApiCalls || undefined }
+          : this.lastTurnUsage
+            ? { ...this.lastTurnUsage, apiCalls: this.turnApiCalls || undefined }
+            : undefined;
         // 纯 API/模型耗时 = 本地墙钟 − 非 API 区间并集（须同钟相减，
         // 故不用引擎的 turn.durationMs）。
         this.busyFlush();
@@ -567,7 +639,12 @@ export class CodexAdapter implements EngineAdapter {
         return;
       }
       default:
-        return; // thread/started, item deltas we don't render yet, etc.
+        // thread/started 等已知不渲染的通知静默；其余未知 method 进审计
+        //（rejected-method/-32601 在 rpc 层集中入账，这里只管通知面）。
+        if (!KNOWN_IGNORED_NOTIFICATIONS.has(method) && !method.endsWith('Delta')) {
+          compatAudit.record('codex', 'unknown-event', `notification:${method}`, params);
+        }
+        return;
     }
   }
 
@@ -578,6 +655,7 @@ export class CodexAdapter implements EngineAdapter {
     this.backgroundTurnActive = false;
     this.backgroundCodexTurnId = '';
     this.activeCodexTurnId = '';
+    this.cancelRequested = false;
     const status = String(turn?.status ?? 'completed');
     const err = turn?.error as Json | undefined;
     if (status === 'failed' && err) {
@@ -667,7 +745,12 @@ export class CodexAdapter implements EngineAdapter {
         return;
       }
       default:
-        return; // userMessage / agentMessage / reasoning — covered by deltas
+        // userMessage / agentMessage / reasoning 由 delta 通知覆盖；其余未知
+        // item 类型 = 引擎新增能力信号，入账。
+        if (!KNOWN_IGNORED_ITEMS.has(String(item.type ?? ''))) {
+          compatAudit.record('codex', 'unknown-event', `item:${String(item.type ?? '')}`, item);
+        }
+        return;
     }
   }
 
@@ -706,6 +789,9 @@ export class CodexAdapter implements EngineAdapter {
         this.emit({ type: 'session.status', status: 'awaiting' });
       });
     }
+    // 未知 server request：回 -32603 拒绝（引擎侧自行降级），同时入账 —
+    // 新增审批类型不适配会卡掉对应功能，这是唯一可见信号。
+    compatAudit.record('codex', 'unknown-event', `serverRequest:${method}`, params);
     return Promise.reject(new Error(`unsupported server request: ${method}`));
   }
 

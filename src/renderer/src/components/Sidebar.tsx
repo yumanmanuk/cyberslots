@@ -33,13 +33,22 @@ import {
 import { DEFAULT_FILTER, useChatStore, type SidebarFilter } from '../store/chatStore';
 import { useRaceStore } from '../store/raceStore';
 import type { AppLanguage, AppSettings, EngineId, SessionMeta, WorkspaceInfo } from '@shared/types';
+import { isRaceActive, raceHostArchived } from '@shared/race';
 import { useT, type MsgKey } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
-import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import { EngineIcon, ENGINE_LABELS, useEngineOrder } from './EngineIcon';
 import { UsageQuickButton } from './UsageQuota';
 import { BrandMark, BrandSpinner } from './brand';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
+
+/** 归档拦截：会话正在跑，或名下有进行中的赛马（被打断的不算）。
+ *  非响应式取快照 — 批量归档与点击时兜底用；行内按钮的反应式
+ *  禁用态在 SessionRow 里另行订阅。 */
+function archiveBlocked(meta: SessionMeta): boolean {
+  if (meta.status === 'running' || meta.status === 'starting') return true;
+  return Object.values(useRaceStore.getState().races).some((g) => g.parentSessionId === meta.id && isRaceActive(g));
+}
 
 /** Escape 关闭弹层（侧栏内的裸 popover 用）。 */
 function useEscClose(open: boolean, onClose: () => void): void {
@@ -65,18 +74,20 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   const [wsDialog, setWsDialog] = useState<{ open: boolean; editing: WorkspaceInfo | null }>({ open: false, editing: null });
 
   // 赛马角色会话（raceId 标记）不入侧栏 —— 赛马寄生于宿主对话，
-  // 只能从宿主对话的 ⚔ 入口进赛马视图查看。
+  // 只能从宿主对话的 🏇 入口进赛马视图查看。
   const visible = useMemo(() => applyFilter(sessions.filter((m) => !m.raceId), filter), [sessions, filter]);
-  const groups = useMemo(() => groupSessions(visible, workspaces), [visible, workspaces]);
+  const groups = useMemo(() => groupSessions(visible, workspaces, sessions), [visible, workspaces, sessions]);
   const archivedCount = useMemo(() => sessions.filter((s) => s.archived).length, [sessions]);
   // 总控制台入口角标：等你处理的会话数（awaiting/error）+ 等决策的赛马。
   const races = useRaceStore((s) => s.races);
-  const inboxCount = useMemo(
-    () =>
+  const inboxCount = useMemo(() => {
+    // 宿主已归档的赛马不计入角标（与总控台泳道/待办口径一致）。
+    const archivedIds = new Set(sessions.filter((s) => s.archived).map((s) => s.id));
+    return (
       sessions.filter((m) => !m.archived && !m.raceId && (m.status === 'awaiting' || m.status === 'error')).length +
-      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt).length,
-    [sessions, races],
-  );
+      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt && !raceHostArchived(g, archivedIds)).length
+    );
+  }, [sessions, races]);
 
   // 分组头“+”快捷创建 — 先选引擎再建会话，避免进会话后切引擎产生分支
   const createSession = useChatStore((s) => s.createSession);
@@ -195,7 +206,7 @@ interface Groups {
   chats: SessionMeta[];
 }
 
-function groupSessions(sessions: SessionMeta[], workspaces: WorkspaceInfo[]): Groups {
+function groupSessions(sessions: SessionMeta[], workspaces: WorkspaceInfo[], allSessions: SessionMeta[]): Groups {
   const wsIds = new Set(workspaces.map((w) => w.id));
   const chats: SessionMeta[] = [];
   const byWs = new Map<string, SessionMeta[]>();
@@ -211,11 +222,20 @@ function groupSessions(sessions: SessionMeta[], workspaces: WorkspaceInfo[]): Gr
     }
   }
 
+  // Project 组常驻：会话全部归档（或被筛选器滤空）后项目不消失，空置显示。
+  // cwd 集合与排序时间戳都从全量列表推导，谓词与上面的分组规则一致。
+  const latestByCwd = new Map<string, number>();
+  for (const s of allSessions) {
+    if (s.raceId || s.chatMode !== 'work' || (s.workspaceId && wsIds.has(s.workspaceId))) continue;
+    if (!byCwd.has(s.cwd)) byCwd.set(s.cwd, []);
+    latestByCwd.set(s.cwd, Math.max(latestByCwd.get(s.cwd) ?? 0, s.updatedAt));
+  }
+
   return {
     workspaces: workspaces.map((workspace) => ({ workspace, sessions: byWs.get(workspace.id) ?? [] })),
     projects: [...byCwd.entries()]
       .map(([cwd, list]) => ({ cwd, name: cwd.split(/[\\/]/).pop() ?? cwd, sessions: list }))
-      .sort((a, b) => (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0)),
+      .sort((a, b) => (latestByCwd.get(b.cwd) ?? 0) - (latestByCwd.get(a.cwd) ?? 0)),
     chats,
   };
 }
@@ -302,9 +322,8 @@ function GroupHeader({
   );
 }
 
-/** 快捷创建的引擎选择 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。 */
-const ENGINE_OPTIONS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp'];
-
+/** 快捷创建的引擎选择 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。
+ *  列表顺序跟随设置 engineOrder。 */
 function EnginePick({
   title,
   onPick,
@@ -321,6 +340,7 @@ function EnginePick({
   const [dropUp, setDropUp] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const availability = useChatStore((s) => s.engineAvailability);
+  const engineOrder = useEngineOrder();
   useEscClose(open, () => setOpen(false));
   return (
     <div className="relative">
@@ -347,7 +367,7 @@ function EnginePick({
             className={`absolute right-0 z-20 w-36 rounded-xl border border-line bg-bg-input py-1 shadow-lg ${dropUp ? 'bottom-6' : 'top-6'}`}
           >
             <MenuSection label={t('pickEngine')} />
-            {ENGINE_OPTIONS.map((id) => {
+            {engineOrder.map((id) => {
               // 未安装置灰展示（可见不可选）；尚未探测（null）时不置灰。
               const unavailable = availability ? !availability[id] : false;
               return (
@@ -401,9 +421,12 @@ function WorkspaceGroup({
   const hasSessions = useChatStore((s) => s.sessions.some((x) => x.workspaceId === workspace.id && !x.archived));
   const [expanded, setExpanded] = useState(true);
 
-  /** 归档本工作区全部未归档会话（取全量列表，不受侧栏筛选影响）。 */
+  /** 归档本工作区全部未归档会话（取全量列表，不受侧栏筛选影响；
+   *  进行中的跳过）。 */
   const archiveAll = async (): Promise<void> => {
-    const list = useChatStore.getState().sessions.filter((x) => x.workspaceId === workspace.id && !x.archived);
+    const list = useChatStore
+      .getState()
+      .sessions.filter((x) => x.workspaceId === workspace.id && !x.archived && !archiveBlocked(x));
     for (const s of list) await archiveSession(s.id, true);
   };
 
@@ -490,12 +513,17 @@ function ProjectGroup({
   const [expanded, setExpanded] = useState(true);
 
   /** 归档本项目全部未归档会话 — 谓词与 groupSessions 的分组规则一致，
-   *  取全量列表避免遭侧栏筛选器遮蔽。 */
+   *  取全量列表避免遭侧栏筛选器遮蔽；进行中的跳过。 */
   const archiveAll = async (): Promise<void> => {
     const { sessions, settings } = useChatStore.getState();
     const wsIds = new Set((settings?.workspaces ?? []).map((w) => w.id));
     const list = sessions.filter(
-      (x) => !x.archived && x.cwd === cwd && x.chatMode === 'work' && (!x.workspaceId || !wsIds.has(x.workspaceId)),
+      (x) =>
+        !x.archived &&
+        x.cwd === cwd &&
+        x.chatMode === 'work' &&
+        (!x.workspaceId || !wsIds.has(x.workspaceId)) &&
+        !archiveBlocked(x),
     );
     for (const s of list) await archiveSession(s.id, true);
   };
@@ -547,12 +575,16 @@ function ProjectGroup({
 function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void }): JSX.Element {
   const t = useT();
   const archiveSession = useChatStore((s) => s.archiveSession);
+  // 反应式拦截态：会话在跑 / 名下有进行中赛马（选择器返回布尔，不产生新引用）。
+  const raceBusy = useRaceStore((s) => Object.values(s.races).some((g) => g.parentSessionId === meta.id && isRaceActive(g)));
+  const blocked = meta.status === 'running' || meta.status === 'starting' || raceBusy;
   const [confirming, setConfirming] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
   // 侧栏不提供删除 — 只能归档；彻底删除去「已归档」页操作。
   const onArchive = (e: React.MouseEvent): void => {
     e.stopPropagation();
+    if (blocked) return;
     if (!confirming) {
       // 二段确认：第一次点击进入确认态（3 秒内再点才真正归档）。
       setConfirming(true);
@@ -577,13 +609,18 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
         <RowIndicator meta={meta} />
       </span>
       <button
-        title={confirming ? t('confirmArchive') : t('archive')}
+        title={blocked ? t('archiveBlockedBusy') : confirming ? t('confirmArchive') : t('archive')}
         onClick={onArchive}
+        disabled={blocked}
         onMouseLeave={() => {
           clearTimeout(timer.current);
           setConfirming(false);
         }}
-        className={`hidden rounded-md p-0.5 transition group-hover:block ${confirming ? 'block bg-warn/15 text-warn' : 'text-ink-faint hover:text-ink'
+        className={`hidden rounded-md p-0.5 transition group-hover:block ${blocked
+            ? 'cursor-not-allowed text-ink-faint opacity-40'
+            : confirming
+              ? 'block bg-warn/15 text-warn'
+              : 'text-ink-faint hover:text-ink'
           }`}
       >
         {confirming ? <Check size={13} /> : <Archive size={13} />}
@@ -703,32 +740,27 @@ function GearMenu(): JSX.Element {
   const t = useT();
   const settings = useChatStore((s) => s.settings);
   const saveSettings = useChatStore((s) => s.saveSettings);
+  // 兼容性审计有条目 → 齿轮上小黄点（不打断的诊断入口，详情在设置→模型）。
+  const hasCompatIssues = useChatStore((s) =>
+    Object.values(s.compatAudit?.engines ?? {}).some((list) => (list?.length ?? 0) > 0),
+  );
   const [open, setOpen] = useState(false);
   useEscClose(open, () => setOpen(false));
 
   return (
     <div className="relative">
       <button
-        title={t('settings')}
+        title={hasCompatIssues ? `${t('settings')}（引擎兼容性诊断有新条目）` : t('settings')}
         onClick={() => setOpen(!open)}
-        className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+        className="relative rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
       >
         <Settings size={15} />
+        {hasCompatIssues && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-warn" />}
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="absolute bottom-8 right-0 z-20 w-44 rounded-xl border border-line bg-bg-input py-1.5 shadow-lg">
-            <button
-              onClick={() => {
-                setOpen(false);
-                useChatStore.setState({ settingsOpen: true });
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover"
-            >
-              <Settings size={13} /> {t('settings')}
-            </button>
-            <div className="mx-3 my-1 border-t border-line" />
             <SubMenu icon={<Languages size={13} />} label={t('language')}>
               {LANG_ITEMS.map((l) => (
                 <MenuCheck
@@ -759,6 +791,16 @@ function GearMenu(): JSX.Element {
                 />
               ))}
             </SubMenu>
+            <div className="mx-3 my-1 border-t border-line" />
+            <button
+              onClick={() => {
+                setOpen(false);
+                useChatStore.setState({ settingsOpen: true });
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink transition hover:bg-bg-hover"
+            >
+              <Settings size={13} /> {t('settings')}
+            </button>
           </div>
         </>
       )}

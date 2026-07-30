@@ -18,10 +18,12 @@ import {
 } from 'lucide-react';
 
 import { useChatStore } from '../store/chatStore';
+import { useRaceStore } from '../store/raceStore';
 import { useT } from '../i18n';
 import MessageList from './MessageList';
 import Composer from './Composer';
 import PermissionSheet from './PermissionSheet';
+import QuestionPin from './QuestionPin';
 import RightDock, { SIDE_PENDING, SIDE_PREFIX, TERM_PREFIX } from './RightDock';
 import TurnRail from './TurnRail';
 import { BrandHero, BrandSpinner } from './brand';
@@ -235,15 +237,19 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
 
   return (
     <div className="relative flex h-full min-w-0">
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+      {/* 中间列保底宽度 — 防右侧 dock 把会话流/Composer 挤成条（溢出时由 dock 一侧收缩） */}
+      <div className="flex h-full min-w-[340px] flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-3 px-5">
           <span className="min-w-0 truncate text-sm font-medium">{meta?.title ?? '会话'}</span>
           {isWork && meta && (
-            <span className="truncate rounded-md bg-bg-panel px-2 py-0.5 font-mono text-[11px] text-ink-soft">{meta.cwd}</span>
+            <span className="truncate rounded-md bg-bg-panel px-2 py-[3px] font-mono text-[11px] leading-none text-ink-soft">{meta.cwd}</span>
           )}
           <div className="flex-1" />
           <Heartbeat sessionId={sessionId} busy={meta?.status === 'running' || meta?.status === 'awaiting'} awaiting={meta?.status === 'awaiting'} />
         </header>
+
+        {/* 赛马角色会话不在侧栏，落进来后靠面包屑标明归属与回路 */}
+        {meta?.raceId && <RaceCrumb raceId={meta.raceId} />}
 
         {/* 消息滚动区 — relative 供刻度条测量锚点；左缘叠加 codex 同款回合导航刻度 */}
         <div className="relative min-h-0 flex-1">
@@ -265,6 +271,8 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           </div>
           <TurnRail sessionId={sessionId} scrollRef={scrollRef} />
+          {/* 当前提问滚出上缘后钉在顶部的提问胶囊（点击回跳） */}
+          <QuestionPin sessionId={sessionId} scrollRef={scrollRef} />
         </div>
 
         <PermissionSheet sessionId={sessionId} />
@@ -296,6 +304,37 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       <div className="flex w-11 shrink-0 flex-col items-center gap-1 py-2.5">
         {railButtons}
       </div>
+    </div>
+  );
+}
+
+/** 赛马角色会话面包屑：角色会话被侧栏隐藏（赛马寄生设计），从赛马视图
+ *  「↗ 打开执行会话」等入口跳进来后，靠这条横幅看清自己在哪、
+ *  一键回赛马视图或回发起该赛马的宿主对话。 */
+function RaceCrumb({ raceId }: { raceId: string }): JSX.Element | null {
+  const race = useRaceStore((s) => s.races[raceId]);
+  const openRace = useRaceStore((s) => s.openRace);
+  const selectSession = useChatStore((s) => s.selectSession);
+  if (!race) return null;
+  return (
+    <div className="mx-5 mb-1 flex shrink-0 items-center gap-2 rounded-lg border border-line bg-bg-panel/70 px-3 py-1.5 text-[12px] text-ink-soft">
+      <span className="min-w-0 flex-1 truncate" title={race.prompt}>
+        🏇 赛马「{race.prompt}」的角色会话
+      </span>
+      <button
+        onClick={() => openRace(raceId)}
+        className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+      >
+        ↩ 返回赛马
+      </button>
+      {race.parentSessionId && (
+        <button
+          onClick={() => selectSession(race.parentSessionId!)}
+          className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+        >
+          返回发起对话
+        </button>
+      )}
     </div>
   );
 }
@@ -373,14 +412,20 @@ function DockReveal({ open, children }: { open: boolean; children: React.ReactNo
   if (!mounted) return null;
   return (
     <div
-      className="grid min-h-0 shrink-0"
-      style={{ gridTemplateColumns: expanded ? '1fr' : '0fr', transition: 'grid-template-columns 220ms ease-out' }}
+      // min-w-0（非 shrink-0）：窗口不够宽时由 dock 被裁剪收缩，中间列保住保底宽度
+      className="grid min-h-0 min-w-0"
+      // minmax(0, …fr)：裸 1fr 的隐式最小宽度是内容宽（minmax(auto,1fr)），
+      // 窄窗口下轨道拒绝收缩会把 dock 整体顶出屏外；锁死最小 0 才能
+      // 落地「裁剪而非溢出」的设计（dock 贴右缘露出可用部分）
+      style={{ gridTemplateColumns: expanded ? 'minmax(0, 1fr)' : 'minmax(0, 0fr)', transition: 'grid-template-columns 220ms ease-out' }}
       onTransitionEnd={(e) => {
         if (e.propertyName === 'grid-template-columns' && !open) setMounted(false);
       }}
     >
-      {/* 右对齐 + 裁剪：收窄时 dock 保持贴右缘，呈现从右滑入/滑出 */}
-      <div className="flex min-w-0 justify-end overflow-hidden">{children}</div>
+      {/* 右对齐 + 裁剪：收窄时 dock 保持贴右缘，呈现从右滑入/滑出。
+          overflow-clip：禁止程序化滚动（xterm 聚焦/scrollIntoView 会把
+          overflow-hidden 容器滚出错位，同 App 主容器的踩坑） */}
+      <div className="flex min-w-0 justify-end overflow-clip">{children}</div>
     </div>
   );
 }

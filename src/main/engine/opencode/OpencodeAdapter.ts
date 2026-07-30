@@ -23,6 +23,7 @@ import type {
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { ThinkSplitter } from '../thinkSplitter';
+import { compatAudit } from '../compatAudit';
 import type { OpencodeEventHub, OpencodeSseEvent } from './OpencodeEventHub';
 import type { OpencodeServerHost } from './OpencodeServerHost';
 
@@ -50,6 +51,10 @@ const PERMISSION_OPTIONS: PermissionOptionView[] = [
   { optionId: 'reject', name: '拒绝', kind: 'reject_once' },
 ];
 
+/** 已知且刻意不渲染的 SSE 事件/part 类型 — 不进兼容审计。 */
+const KNOWN_IGNORED_SSE = new Set(['session.status', 'session.diff', 'session.updated', 'message.part.removed', 'message.removed']);
+const KNOWN_IGNORED_PARTS = new Set(['step-start', 'snapshot', 'patch', 'file']);
+
 export class OpencodeAdapter implements EngineAdapter {
   private sessionID = '';
   private turnId = 0;
@@ -75,6 +80,8 @@ export class OpencodeAdapter implements EngineAdapter {
   /** 本回合 assistant 消息的 token/cost 快照（message.updated 持续刷新）。 */
   private turnTokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number } | undefined;
   private turnCost = 0;
+  /** 本回合 API 调用计数 — 每个 step-finish = 一次 LLM 请求完成。 */
+  private turnApiCalls = 0;
   private readonly pendingPermissions = new Set<string>();
 
   constructor(
@@ -164,6 +171,7 @@ export class OpencodeAdapter implements EngineAdapter {
     this.splitter.reset();
     this.turnTokens = undefined;
     this.turnCost = 0;
+    this.turnApiCalls = 0;
     this.turnStartedAt = Date.now();
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
@@ -241,7 +249,11 @@ export class OpencodeAdapter implements EngineAdapter {
   async fork(): Promise<{ engineSessionId: string } | null> {
     try {
       const res = await this.api(`/session/${this.sessionID}/fork`, { method: 'POST', body: '{}' });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // 非 2xx = server 版本不支持/禁用了 fork — 降级静默，证据入账。
+        compatAudit.record('opencode', 'rejected-method', 'POST /session/:id/fork', `HTTP ${res.status}`);
+        return null;
+      }
       const id = String((res.json as Json)?.id ?? '');
       return id ? { engineSessionId: id } : null;
     } catch {
@@ -367,7 +379,12 @@ export class OpencodeAdapter implements EngineAdapter {
         return;
       }
       default:
-        return; // session.status/diff/updated 等 — 未知事件静默忽略（版本漂移防御）
+        // session.status/diff/updated 等已知事件静默；真正未知的类型进
+        // 兼容审计（版本漂移防御 + 维护者可见）。
+        if (!KNOWN_IGNORED_SSE.has(evt.type)) {
+          compatAudit.record('opencode', 'unknown-event', `sse:${evt.type}`, evt);
+        }
+        return;
     }
   }
 
@@ -441,7 +458,8 @@ export class OpencodeAdapter implements EngineAdapter {
         return;
       }
       case 'step-finish': {
-        // 消息级 tokens 由 message.updated 提供；这里只刷上下文占用。
+        // 消息级 tokens 由 message.updated 提供；这里计 API 调用次数并刷上下文占用。
+        this.turnApiCalls += 1;
         const tokens = (part.tokens ?? {}) as Json;
         const cache = (tokens.cache ?? {}) as Json;
         const used = num(tokens.input) + num(tokens.output) + num(tokens.reasoning) + num(cache.read) + num(cache.write);
@@ -450,7 +468,11 @@ export class OpencodeAdapter implements EngineAdapter {
         return;
       }
       default:
-        return; // step-start / snapshot / patch / file …
+        // step-start / snapshot / patch / file 等已知 part 静默；未知的入账。
+        if (!KNOWN_IGNORED_PARTS.has(String(part.type ?? ''))) {
+          compatAudit.record('opencode', 'unknown-event', `part:${String(part.type ?? '')}`, part);
+        }
+        return;
     }
   }
 
@@ -471,6 +493,7 @@ export class OpencodeAdapter implements EngineAdapter {
           outputTokens: t.output + t.reasoning,
           totalTokens: totalInput + t.output + t.reasoning,
           cachedInputTokens: t.cacheRead || undefined,
+          apiCalls: this.turnApiCalls || undefined,
           contextUsed: totalInput + t.output + t.reasoning,
           contextMax: this.entryOf(this.modelId)?.contextWindow,
         }

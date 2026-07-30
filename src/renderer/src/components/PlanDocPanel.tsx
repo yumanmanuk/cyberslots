@@ -15,10 +15,13 @@ import { downloadMarkdown, extractPlanTitle } from '../planDoc';
 export default function PlanDocPanel({
   sessionId,
   text,
+  width,
   onClose,
 }: {
   sessionId: string;
   text: string;
+  /** 面板宽度 — 由 RightDock 统一管理（dock 左缘把手拖拽）。 */
+  width: number;
   onClose: () => void;
 }): JSX.Element {
   const t = useT();
@@ -40,7 +43,7 @@ export default function PlanDocPanel({
   };
 
   return (
-    <aside className="flex w-[420px] shrink-0 flex-col bg-bg-panel/50">
+    <aside className="flex shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
       <div className="flex shrink-0 items-center gap-2 px-3 pb-1.5 pt-2.5">
         <NotebookText size={14} className="shrink-0 text-accent" />
         <span className="min-w-0 flex-1 truncate text-ui font-medium" title={title}>

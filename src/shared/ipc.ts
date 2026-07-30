@@ -5,7 +5,13 @@
  */
 
 import type {
+  AgyAccountsSnapshot,
+  AgyActiveQuota,
+  AgyImportCandidate,
+  AgyQuotaInfo,
+  AntigravityCatalog,
   AppSettings,
+  CompatAuditSnapshot,
   CronTask,
   EngineConfigsSnapshot,
   EngineEventEnvelope,
@@ -56,11 +62,21 @@ export const IPC = {
   workspaceAnnounce: 'workspace:announce',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  titleGenerate: 'title:generate',
   usageStats: 'usage:stats',
   providerQuota: 'usage:provider-quota',
   engineConfigsGet: 'engine-configs:get',
   opencodeCatalogGet: 'opencode:catalog-get',
   ompCatalogGet: 'omp:catalog-get',
+  antigravityCatalogGet: 'antigravity:catalog-get',
+  agyAccountsList: 'agy:accounts-list',
+  agyImportCandidates: 'agy:import-candidates',
+  agyAccountsImport: 'agy:accounts-import',
+  agyAccountsImportFile: 'agy:accounts-import-file',
+  agyAccountRemove: 'agy:account-remove',
+  agyAccountSwitch: 'agy:account-switch',
+  agyQuota: 'agy:quota',
+  agyActiveQuota: 'agy:active-quota',
   themeSync: 'window:theme-sync',
   badgeSet: 'window:badge-set',
   cronList: 'cron:list',
@@ -68,6 +84,7 @@ export const IPC = {
   cronDelete: 'cron:delete',
   cronRunNow: 'cron:run-now',
   enginesStatus: 'engines:status',
+  compatAuditGet: 'compat:audit-get',
   dialogPickFolder: 'dialog:pick-folder',
   fsTree: 'fs:tree',
   fsRead: 'fs:read',
@@ -101,6 +118,7 @@ export const IPC = {
   engineEvent: 'engine:event',
   terminalData: 'terminal:data',
   raceEvent: 'race:event',
+  compatAudit: 'compat:audit',
 } as const;
 
 export interface SessionCreateRequest {
@@ -236,6 +254,9 @@ export interface CyberSlotsApi {
   workspaceAnnounce(workspaceId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** AI 生成会话标题（主进程调用设置里的 OpenAI 兼容接口）；
+   *  未配置/失败返回 null，渲染层回退截取式标题。 */
+  titleGenerate(text: string): Promise<string | null>;
   /** 用量统计：主进程扫描各会话 turn_end 统计行按时间桶聚合。 */
   usageStats(query: UsageStatsQuery): Promise<UsageStatsResult>;
   /** 供应商余量/余额（kimi/minimax token plan、deepseek 余额）；只返回
@@ -247,6 +268,26 @@ export interface CyberSlotsApi {
   opencodeCatalogGet(force?: boolean): Promise<OpencodeCatalog>;
   /** omp 模型目录（主进程代理 `omp models --json`，带缓存）。 */
   ompCatalogGet(force?: boolean): Promise<OmpCatalog>;
+  /** antigravity 模型目录（主进程代理 `agy models`，带缓存）。 */
+  antigravityCatalogGet(force?: boolean): Promise<AntigravityCatalog>;
+  /** Antigravity 导入池快照（仅已导入账号 + 当前活动邮箱）。只读。 */
+  agyAccountsList(): Promise<AgyAccountsSnapshot>;
+  /** 扫描 cockpit 账号库生成导入候选（只读，仅供导入弹层展示）。 */
+  agyImportCandidates(): Promise<{ candidates: AgyImportCandidate[]; error?: string }>;
+  /** 把选中的 cockpit 账号凭据拷入导入池（按 id 覆盖更新）；返回新快照。 */
+  agyAccountsImport(ids: string[]): Promise<AgyAccountsSnapshot>;
+  /** 从导出文件（[{email, refresh_token}] 数组或 {accounts:[…]}）导入 —
+   *  主进程弹文件选择框并解析；取消选择返回 null。 */
+  agyAccountsImportFile(): Promise<AgyAccountsSnapshot | null>;
+  /** 从导入池移除账号（只删本程序副本，不碰 cockpit / keyring）。 */
+  agyAccountRemove(id: string): Promise<AgyAccountsSnapshot>;
+  /** 切换 Antigravity 账号（限导入池内；覆写 keyring + 更新 active）；返回新活动邮箱。
+   *  agy 下一次调用即以新账号执行（实时读 keyring）。 */
+  agyAccountSwitch(accountId: string): Promise<{ email: string }>;
+  /** Antigravity 分组周额度（扫导入池内全部账号，带缓存；force 跳缓存）。 */
+  agyQuota(force?: boolean): Promise<AgyQuotaInfo[]>;
+  /** 当前活动 Antigravity 账号的额度（只 1 次往返，用量小窗/大窗常显；force 跳缓存）。 */
+  agyActiveQuota(force?: boolean): Promise<AgyActiveQuota>;
   /** Push the resolved appearance to main so the native title bar matches. */
   themeSync(appearance: WindowAppearance): Promise<void>;
   /** 任务栏角标（Windows overlay icon）：dataUrl = renderer 画好的角标图；
@@ -281,6 +322,10 @@ export interface CyberSlotsApi {
   /** 订阅 shell 输出流（main → renderer）。 */
   onTerminalData(listener: (payload: { id: string; data: string }) => void): () => void;
   onEngineEvent(listener: (e: EngineEventEnvelope) => void): () => void;
+  /** 引擎兼容性审计快照（未知事件/被拒方法/解析失败的聚合计数）。 */
+  compatAuditGet(): Promise<CompatAuditSnapshot>;
+  /** 订阅审计快照变更（新指纹出现/计数增长时节流推送）。 */
+  onCompatAudit(listener: (snap: CompatAuditSnapshot) => void): () => void;
   // --- 大模型赛马 ---
   /** 发起一场赛马（config → 立即开跑 planning）。 */
   raceCreate(req: RaceCreateRequest): Promise<RaceGroup>;

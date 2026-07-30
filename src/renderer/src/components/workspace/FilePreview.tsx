@@ -275,7 +275,7 @@ function NumberedSource({
     const rootRect = root.getBoundingClientRect();
     setSelBtn({
       top: last.bottom - rootRect.top + 6,
-      left: Math.max(8, Math.min(last.right - rootRect.left, rootRect.width - 120)),
+      left: Math.max(8, Math.min(last.right - rootRect.left, rootRect.width - 150)),
       startLine,
       endLine,
       text: snapshot,
@@ -334,10 +334,14 @@ function NumberedSource({
           // mousedown 阻止默认：保住 DOM 选区，click 才能拿到完整快照。
           onMouseDown={(e) => e.preventDefault()}
           onClick={addToChat}
-          className="absolute z-20 flex items-center gap-1.5 rounded-lg bg-ink px-2.5 py-1 text-[11px] font-medium text-bg shadow-lg transition hover:opacity-85"
+          className="absolute z-20 flex animate-[sel-pop_.14s_ease-out] items-center gap-1.5 rounded-full bg-accent py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-white shadow-lg shadow-accent/25 transition hover:brightness-110 active:scale-95"
         >
           <MessageSquarePlus size={12} />
           {t('addToChat')}
+          {/* 选区行号徽标 — 投递前就能确认范围 */}
+          <span className="rounded-full bg-white/20 px-1.5 font-mono text-[10px] leading-4 tabular-nums">
+            {selBtn.startLine === selBtn.endLine ? `L${selBtn.startLine}` : `L${selBtn.startLine}-${selBtn.endLine}`}
+          </span>
         </button>
       )}
     </div>

@@ -18,9 +18,20 @@ export interface ModelOption {
   label: string;
 }
 
-export const RACE_ENGINES: EngineId[] = ['codex', 'opencode', 'kimi', 'omp'];
 export const CODEX_FALLBACK_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
-export const EFFORT_LABELS: Record<string, string> = { low: '低', medium: '中', high: '高', xhigh: '极致', none: '关', off: '关', auto: '自动' };
+export const EFFORT_LABELS: Record<string, string> = { minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极致', max: '最大', none: '关', off: '关', auto: '自动', thinking: '开' };
+
+/** antigravity 静态模型清单（slug 取自 `agy models` 实测，见 headless-mode.md）。
+ *  adapter 接受任意合法 slug；gemini flash slug 已含档位，claude 系支持 --effort。 */
+const ANTIGRAVITY_MODELS: ModelOption[] = [
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (Thinking)' },
+  { value: 'claude-opus-4-6-thinking', label: 'Claude Opus 4.6 (Thinking)' },
+  { value: 'gemini-3.1-pro-high', label: 'Gemini 3.1 Pro (High)' },
+  { value: 'gemini-3.6-flash-high', label: 'Gemini 3.6 Flash (High)' },
+  { value: 'gemini-3.6-flash-medium', label: 'Gemini 3.6 Flash (Medium)' },
+  { value: 'gemini-3.5-flash-medium', label: 'Gemini 3.5 Flash (Medium)' },
+];
+const ANTIGRAVITY_CLAUDE_EFFORTS = ['low', 'medium', 'high'];
 
 /** omp 的 ACP 思考值域＝off/auto + 模型目录 thinking[] 精细档（动态扩展）。 */
 const OMP_BASE_EFFORTS = ['off', 'auto'];
@@ -46,6 +57,7 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
   const loadOmpCatalog = useChatStore((s) => s.loadOmpCatalog);
   const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
   const hiddenList = useChatStore((s) => s.settings?.opencodeHiddenModels);
+  const agyHiddenList = useChatStore((s) => s.settings?.antigravityHiddenModels);
   const [snap, setSnap] = useState<EngineConfigsSnapshot | null>(null);
 
   useEffect(() => {
@@ -55,9 +67,10 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
     void loadOmpCatalog();
   }, [active, loadOpencodeCatalog, loadOmpCatalog, refreshEngineConfigs]);
 
-  // 遵守设置页的隐藏黑名单 — 赛马配置里也不展示被隐藏的 opencode 模型。
+  // 遵守设置页的隐藏黑名单 — 赛马配置里也不展示被隐藏的 opencode/antigravity 模型。
   const hidden = new Set(hiddenList ?? []);
   const ocVisible = (ocCatalog?.models ?? []).filter((m) => !hidden.has(m.slug));
+  const agyHidden = new Set(agyHiddenList ?? []);
 
   const modelOptions = (engine: EngineId): ModelOption[] => {
     if (engine === 'codex') {
@@ -70,6 +83,9 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
     if (engine === 'omp') {
       return (ompCatalog?.models ?? []).map((m) => ({ value: m.slug, label: m.displayName ?? m.slug }));
     }
+    if (engine === 'antigravity') {
+      return ANTIGRAVITY_MODELS.filter((m) => !agyHidden.has(m.value));
+    }
     return ocVisible.map((m) => ({ value: m.slug, label: m.displayName ?? m.slug }));
   };
 
@@ -77,6 +93,7 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
     if (engine === 'codex') return snap?.codex.model ?? snap?.codex.catalogModels?.[0]?.slug ?? '';
     if (engine === 'kimi') return snap?.kimi.defaultModel ?? modelOptions('kimi')[0]?.value ?? '';
     if (engine === 'omp') return ompCatalog?.models[0]?.slug ?? '';
+    if (engine === 'antigravity') return 'claude-sonnet-4-6';
     if (ocCatalog) {
       const def = ocVisible.find((m) => ocCatalog.defaults[m.providerID] === m.modelID);
       return def?.slug ?? ocVisible[0]?.slug ?? '';
@@ -97,6 +114,10 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
       const entry = ompCatalog?.models.find((m) => m.slug === modelId);
       if (entry && entry.reasoning === false) return [];
       return entry?.efforts?.length ? [...OMP_BASE_EFFORTS, ...entry.efforts] : OMP_BASE_EFFORTS;
+    }
+    if (engine === 'antigravity') {
+      // claude 系支持 low/medium/high；gemini flash slug 已含档位→禁用控件。
+      return /^claude/i.test(modelId) ? ANTIGRAVITY_CLAUDE_EFFORTS : [];
     }
     return [];
   };

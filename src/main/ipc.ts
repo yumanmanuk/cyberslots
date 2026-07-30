@@ -7,7 +7,7 @@ import { BrowserWindow, dialog, ipcMain, nativeImage } from 'electron';
 
 import type { AnswerPermissionRequest, OpenTarget, SessionCreateRequest, SessionPromptRequest, SlashListRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { AppSettings, CronTask, EngineId, GoalControlAction, OmpCatalog, PermissionMode, UnifiedMessage, UsageStatsQuery, WindowAppearance } from '@shared/types';
+import type { AgyAccountsSnapshot, AntigravityCatalog, AppSettings, CronTask, EngineId, GoalControlAction, OmpCatalog, PermissionMode, UnifiedMessage, UsageStatsQuery, WindowAppearance } from '@shared/types';
 import type { RaceAdoptStrategy, RaceCreateRequest, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from './engine/SessionManager';
 import type { SettingsStore } from './config/settings';
@@ -17,10 +17,14 @@ import type { TerminalService } from './terminal/TerminalService';
 import type { RaceManager } from './race/RaceManager';
 import { readEngineConfigs } from './config/engineConfigs';
 import { fetchOmpCatalog } from './engine/omp/resolveOmp';
+import { fetchAntigravityCatalog } from './engine/antigravity/resolveAntigravity';
+import { listAgyAccounts, listAgyImportCandidates, importAgyAccounts, importAgyAccountsFromFile, removeAgyAccount, switchAgyAccount, queryAgyQuota, queryActiveAgyQuota } from './engine/antigravity/agyAccounts';
 import { applyWindowTheme } from './windowTheme';
 import { gitStatus, importPaths, isDirectory, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
+import { compatAudit } from './engine/compatAudit';
 import { listSlashItems } from './slash/slashService';
 import { getProviderQuotas } from './usage/providerQuota';
+import { generateTitle } from './titleGen';
 
 export function registerIpc(
   sessions: SessionManager,
@@ -96,12 +100,16 @@ export function registerIpc(
 
   ipcMain.handle(IPC.settingsGet, () => settings.get());
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => settings.set(patch));
+  // AI 生成会话标题 — key 只在主进程使用；失败返回 null 由渲染层回退。
+  ipcMain.handle(IPC.titleGenerate, (_e, text: string) => generateTitle(settings.get().titleGen, text));
   // 用量统计 — 扫描各会话消息文件的 turn_end 统计行按时间桶聚合。
   ipcMain.handle(IPC.usageStats, (_e, query: UsageStatsQuery) => sessions.usageStats(query));
   // 供应商套餐余量/余额 — key 只在主进程使用，结果不含任何密钥。
   ipcMain.handle(IPC.providerQuota, (_e, force?: boolean) => getProviderQuotas(!!force));
   // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
   ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
+  // 引擎兼容性审计快照（设置页诊断卡首次打开时拉取；增量走推送）。
+  ipcMain.handle(IPC.compatAuditGet, () => compatAudit.snapshot());
   // opencode 模型目录 — 主进程代理 /config/providers（renderer 不直连
   // serve 端口，server 密码不出主进程）；按需启动 server。
   ipcMain.handle(IPC.opencodeCatalogGet, (_e, force?: boolean) => opencodeHost.getCatalog(force));
@@ -112,6 +120,33 @@ export function registerIpc(
     ompCatalogCache = await fetchOmpCatalog();
     return ompCatalogCache;
   });
+  // antigravity 模型目录 — 主进程代理 `agy models`，进程级缓存。
+  let agyCatalogCache: AntigravityCatalog | undefined;
+  ipcMain.handle(IPC.antigravityCatalogGet, async (_e, force?: boolean) => {
+    if (!force && agyCatalogCache && !agyCatalogCache.error) return agyCatalogCache;
+    agyCatalogCache = await fetchAntigravityCatalog();
+    return agyCatalogCache;
+  });
+  // Antigravity 导入池 / 导入 / 切号 / 额度 — 凭据与切号逻辑全在主进程，renderer 只拿脱敏结果。
+  ipcMain.handle(IPC.agyAccountsList, (): AgyAccountsSnapshot => listAgyAccounts());
+  ipcMain.handle(IPC.agyImportCandidates, () => listAgyImportCandidates());
+  ipcMain.handle(IPC.agyAccountsImport, (_e, ids: string[]) => importAgyAccounts(Array.isArray(ids) ? ids : []));
+  // 从导出文件导入：文件选择 + 解析全在主进程，renderer 不接触凭据内容。
+  ipcMain.handle(IPC.agyAccountsImportFile, async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const opts = {
+      properties: ['openFile'] as Array<'openFile'>,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    };
+    const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    if (result.canceled || !result.filePaths[0]) return null;
+    return importAgyAccountsFromFile(result.filePaths[0]);
+  });
+  ipcMain.handle(IPC.agyAccountRemove, (_e, id: string) => removeAgyAccount(id));
+  ipcMain.handle(IPC.agyAccountSwitch, (_e, accountId: string) => switchAgyAccount(accountId));
+  ipcMain.handle(IPC.agyQuota, (_e, force?: boolean) => queryAgyQuota(!!force));
+  // 当前活动账号额度 — 只 1 次往返（用量小窗/大窗常显），与扫全账号的 agyQuota 解耦。
+  ipcMain.handle(IPC.agyActiveQuota, (_e, force?: boolean) => queryActiveAgyQuota(!!force));
 
   ipcMain.handle(IPC.themeSync, (e, appearance: WindowAppearance) => {
     const win = BrowserWindow.fromWebContents(e.sender);

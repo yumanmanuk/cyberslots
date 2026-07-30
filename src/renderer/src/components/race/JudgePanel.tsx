@@ -1,31 +1,45 @@
 /**
  * JudgePanel — 裁判台，两道人工关口：
  *   ④a 采纳决策：4 选 1（采纳A/采纳B/以A为准结合B/以B为准结合A）+ 可选评语；
- *   ④b 裁判按策略出最终方案（等待期显示进行中）；
+ *   ④b 裁判按策略出最终方案（等待期直播裁判会话输出流，不黑盒）；
  *   ④c 批注 → 裁判修订（v+1）→ 定稿交给 Builder。
  */
 
-import { Check, PenLine, Square } from 'lucide-react';
+import { Check, Maximize2, PenLine, Square } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-import { BrandHero } from '../brand';
+import { BrandHero, BrandSpinner } from '../brand';
 
 import type { RaceAdoptStrategy, RaceGroup, RacerRole } from '@shared/race';
 import { RACER_ROLES, RACE_ADOPT_LABELS, adoptLabel } from '@shared/race';
 import { useRaceStore } from '../../store/raceStore';
+import { ENGINE_LABELS } from '../EngineIcon';
+import ArtifactZoom from './ArtifactZoom';
+import RaceLane from './RaceLane';
 
 const LETTER: Record<RacerRole, 'A' | 'B' | 'C'> = { racerA: 'A', racerB: 'B', racerC: 'C' };
 
-export default function JudgePanel({ race }: { race: RaceGroup }): JSX.Element {
+export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup; readOnly?: boolean }): JSX.Element {
   const revokeAdopt = useRaceStore((s) => s.revokeAdopt);
   // 裁判回合可手动中止（中止后走错误横幅的「↻ 重试当前阶段」重跑）。
   const stopJudge = race.sessions.judge
     ? (): void => void window.cyberslots.sessionCancel(race.sessions.judge!)
     : undefined;
+  // 回看态（从电路回点裁判节点）：裁判环节已完成，最终方案只读展示，
+  // 不提供采纳/批注/定稿等任何可变操作。
+  if (readOnly) {
+    if (race.finalPlan) return <ReviewStep race={race} readOnly />;
+    return (
+      <div className="mx-auto w-full max-w-2xl rounded-2xl border border-line bg-bg-panel/70 p-5 text-center text-[12px] text-ink-faint">
+        （裁判环节尚未产出最终方案）
+      </div>
+    );
+  }
   if (!race.adopt) return <AdoptStep race={race} />;
   if (!race.finalPlan)
     return (
       <Working
+        race={race}
         label={`裁判正在按「${adoptLabel(race.adopt.strategy)}」出方案…`}
         onStop={stopJudge}
         onRevoke={() => void revokeAdopt()}
@@ -48,7 +62,7 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
     ...letters.map((l) => `prefer${l}` as RaceAdoptStrategy),
   ];
   return (
-    <div className="mx-auto w-full max-w-2xl rounded-2xl border border-line bg-bg-panel/70 p-5">
+    <div className="mx-auto min-h-0 w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-bg-panel/70 p-5">
       <div className="mb-1 text-[14px] font-semibold">⚖ 采纳决策 · 由你定方向</div>
       <div className="mb-4 text-[12px] text-ink-faint">
         读完各选手的方案与反驳/辩护后，选择采纳策略；裁判将严格按你的决策产出最终方案。
@@ -103,7 +117,7 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
 }
 
 /** ④c 方案评审：批注修订循环 + 定稿。 */
-function ReviewStep({ race, stopJudge }: { race: RaceGroup; stopJudge?: () => void }): JSX.Element {
+function ReviewStep({ race, stopJudge, readOnly = false }: { race: RaceGroup; stopJudge?: () => void; readOnly?: boolean }): JSX.Element {
   const revise = useRaceStore((s) => s.revise);
   const finalize = useRaceStore((s) => s.finalize);
   const [note, setNote] = useState('');
@@ -111,6 +125,7 @@ function ReviewStep({ race, stopJudge }: { race: RaceGroup; stopJudge?: () => vo
   // 报错（错误横幅出现）也要解除，否则永远卡在转圈态。
   const [revising, setRevising] = useState(false);
   const [seenVersion, setSeenVersion] = useState(race.finalPlanVersion);
+  const [zoomed, setZoomed] = useState(false);
   const error = useRaceStore((s) => (s.activeRaceId ? s.errors[s.activeRaceId] : undefined));
   useEffect(() => {
     if (race.finalPlanVersion !== seenVersion) {
@@ -123,9 +138,10 @@ function ReviewStep({ race, stopJudge }: { race: RaceGroup; stopJudge?: () => vo
   }, [error]);
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
-      <div className="rounded-2xl border border-line border-l-2 border-l-accent bg-bg-panel/70 p-5">
-        <div className="mb-2 flex items-center gap-2">
+    <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+      {/* 最终方案卡：header 固定，方案内容区内滚（占满剩余高度） */}
+      <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-line border-l-2 border-l-accent bg-bg-panel/70 p-5">
+        <div className="mb-2 flex shrink-0 items-center gap-2">
           <span className="text-[14px] font-semibold">📋 最终方案</span>
           <span className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[10.5px] text-ink-faint">
             v{race.finalPlanVersion}
@@ -133,22 +149,37 @@ function ReviewStep({ race, stopJudge }: { race: RaceGroup; stopJudge?: () => vo
           {race.adopt && (
             <span className="text-[11px] text-ink-faint">策略：{adoptLabel(race.adopt.strategy)}</span>
           )}
+          <button
+            title="放大查看"
+            onClick={() => setZoomed(true)}
+            className="ml-auto rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+          >
+            <Maximize2 size={13} />
+          </button>
         </div>
-        <div className="max-h-[46vh] overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-ink-soft">
+        <div className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-ink-soft">
           {race.finalPlan}
         </div>
       </div>
 
+      {zoomed && race.finalPlan && (
+        <ArtifactZoom
+          title={`⚖ 裁判方案 v${race.finalPlanVersion}`}
+          text={race.finalPlan}
+          onClose={() => setZoomed(false)}
+        />
+      )}
+
       {race.annotations.length > 0 && (
-        <div className="mt-3 rounded-r-lg border-l-2 border-warn bg-bg-input px-3 py-2 text-[12px] text-ink-soft">
+        <div className="mt-3 shrink-0 rounded-r-lg border-l-2 border-warn bg-bg-input px-3 py-2 text-[12px] text-ink-soft">
           ✂ 最近批注：{race.annotations[race.annotations.length - 1]}
         </div>
       )}
 
       {revising ? (
-        <Working label="裁判正在按批注修订方案…" onStop={stopJudge} />
-      ) : (
-        <div className="mt-4">
+        <Working race={race} label="裁判正在按批注修订方案…" onStop={stopJudge} />
+      ) : readOnly ? null : (
+        <div className="mt-4 shrink-0">
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -180,12 +211,28 @@ function ReviewStep({ race, stopJudge }: { race: RaceGroup; stopJudge?: () => vo
   );
 }
 
-function Working({ label, onStop, onRevoke }: { label: string; onStop?: () => void; onRevoke?: () => void }): JSX.Element {
+/** 裁判工作中：精简操作行 + 裁判会话实时输出泳道（复用 RaceLane，
+ *  思考/工具/正文流与选手泳道同款）——裁判不再黑盒。 */
+function Working({
+  race,
+  label,
+  onStop,
+  onRevoke,
+}: {
+  race: RaceGroup;
+  label: string;
+  onStop?: () => void;
+  onRevoke?: () => void;
+}): JSX.Element {
+  const sessionId = race.sessions.judge;
+  const cfg = race.roles.judge;
+  const subtitle = cfg
+    ? `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || '默认模型'}${cfg.effort ? ` · ${cfg.effort}` : ''}`
+    : '';
   return (
-    <div className="mx-auto mt-6 flex w-full max-w-2xl flex-col items-center justify-center gap-3 rounded-2xl border border-line bg-bg-panel/70 py-8 text-[13px] text-ink-soft">
-      {/* 大横幅用完整拉霸仪式 — 15px 三星在此场景太小，看起来像三个灰点 */}
-      <BrandHero size={48} />
-      <div className="flex items-center gap-3">
+    <div className="mx-auto mt-4 flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-1">
+      <div className="flex shrink-0 items-center justify-center gap-3 rounded-2xl border border-line bg-bg-panel/70 px-4 py-2.5 text-[13px] text-ink-soft">
+        <BrandSpinner size={13} />
         {label}
         {onRevoke && (
           <button
@@ -206,6 +253,25 @@ function Working({ label, onStop, onRevoke }: { label: string; onStop?: () => vo
           </button>
         )}
       </div>
+      {/* 裁判过程直播：占满剩余高度内滚（fill），不撑出容器级滚动条；
+          会话未建好前给大场面等待（按规范用 BrandHero） */}
+      {sessionId ? (
+        <RaceLane
+          title="裁判"
+          badge="⚖"
+          subtitle={subtitle}
+          sessionId={sessionId}
+          tone="neutral"
+          running
+          fill
+          finished={false}
+        />
+      ) : (
+        <div className="flex flex-col items-center gap-2 rounded-xl border border-line bg-bg-panel/70 py-8 text-[12px] text-ink-faint">
+          <BrandHero size={48} />
+          裁判会话创建中…
+        </div>
+      )}
     </div>
   );
 }

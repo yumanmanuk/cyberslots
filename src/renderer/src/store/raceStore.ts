@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 
-import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig, RaceRoleConfigs } from '@shared/race';
+import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig, RaceRoleConfigs, RaceStage } from '@shared/race';
 import { RACE_ROLE_LABELS } from '@shared/race';
 import { announceSystem, useChatStore } from './chatStore';
 
@@ -19,12 +19,14 @@ interface RaceState {
   races: Record<string, RaceGroup>;
   /** 当前全屏打开的赛马视图；null = 不在赛马视图。 */
   activeRaceId: string | null;
-  /** 发起面板（Composer ⚔ 入口打开的配置对话框）。 */
+  /** 发起面板（Composer 🏇 入口打开的配置对话框）。 */
   setupOpen: boolean;
   /** 选手配置调整弹窗（重试前改 A/B 引擎/模型/思考档）。 */
   tuneOpen: boolean;
   /** raceId → 最近一次编排错误（视图顶部横幅展示）。 */
   errors: Record<string, string | undefined>;
+  /** 阶段切换飘字：进入新环节时短暂提示，自动消失（RaceView 渲染）。 */
+  stageFlash: { raceId: string; stage: RaceStage; seq: number } | null;
   init(): Promise<void>;
   openSetup(): void;
   closeSetup(): void;
@@ -72,8 +74,25 @@ function refreshRace(set: SetFn, raceId: string): void {
   });
 }
 
+// 阶段飘字自动消失：时长与 index.css 的 race-stage-toast 动画同步，
+// 动画淡出结束后 store 才清掉，避免元素在淡出中途被突然卸载。
+const STAGE_FLASH_MS = 2600;
+let flashSeq = 0;
+
+function flashStage(set: SetFn, raceId: string, stage: RaceStage): void {
+  const seq = ++flashSeq;
+  set(() => ({ stageFlash: { raceId, stage, seq } }));
+  window.setTimeout(() => {
+    // 只清自己那条：期间又来了新飘字（seq 更大）则由新定时器负责。
+    set((s) => (s.stageFlash?.seq === seq ? { stageFlash: null } : {}));
+  }, STAGE_FLASH_MS);
+}
+
 function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
   const { raceId, event } = envelope;
+  // 阶段确实发生变化时记下新阶段，set 完成后触发飘字（避免在
+  // set 回调内嵌套 set 副作用）。
+  let entered: RaceStage | undefined;
   set((s) => {
     const g = s.races[raceId];
     if (!g) {
@@ -84,6 +103,7 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
     switch (event.type) {
       case 'race.stage':
         // 阶段推进 = 上一个错误已翻篇，顺手清掉错误横幅。
+        if (g.stage !== event.stage) entered = event.stage;
         next.stage = event.stage;
         return { races: { ...s.races, [raceId]: next }, errors: { ...s.errors, [raceId]: undefined } };
       case 'race.role': {
@@ -112,15 +132,19 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
         next.audit = { passed: event.passed, issues: event.issues };
         next.repairRound = event.repairRound;
         break;
+      case 'race.stats':
+        next.stats = event.stats;
+        break;
       case 'race.done': {
+        if (g.stage !== 'done') entered = 'done';
         next.stage = 'done';
         // 产出回流宿主对话：留下可回溯的收尾公告（寄生闭环）。
         if (g.parentSessionId) {
           announceSystem(
             g.parentSessionId,
             event.delivered
-              ? `🏇 赛马完成：「${g.prompt.slice(0, 40)}」· 审计通过，成果已交付（最终方案 v${g.finalPlanVersion}）。点输入栏 ⚔ 可回看全程与产物`
-              : `🏇 赛马已结束：「${g.prompt.slice(0, 40)}」（未交付：中止或修复轮次耗尽）。点输入栏 ⚔ 可回看`,
+              ? `🏇 赛马完成：「${g.prompt.slice(0, 40)}」· 审计通过，成果已交付（最终方案 v${g.finalPlanVersion}）。点输入栏 🏇 可回看全程与产物`
+              : `🏇 赛马已结束：「${g.prompt.slice(0, 40)}」（未交付：中止或修复轮次耗尽）。点输入栏 🏇 可回看`,
           );
         }
         break;
@@ -133,6 +157,7 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
     }
     return { races: { ...s.races, [raceId]: next } };
   });
+  if (entered) flashStage(set, raceId, entered);
 }
 
 export const useRaceStore = create<RaceState>((set, get) => ({
@@ -141,6 +166,7 @@ export const useRaceStore = create<RaceState>((set, get) => ({
   setupOpen: false,
   tuneOpen: false,
   errors: {},
+  stageFlash: null,
 
   async init() {
     const list = await window.cyberslots.raceList();
@@ -161,7 +187,7 @@ export const useRaceStore = create<RaceState>((set, get) => ({
     const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed });
     // 发起痕迹回流宿主对话 —— 历史里能翻到“这里跑过一场赛马”。
     if (parentSessionId) {
-      announceSystem(parentSessionId, `🏇 已发起赛马：「${prompt.slice(0, 40)}」—— 双方规划中，点输入栏 ⚔ 进入观战`);
+      announceSystem(parentSessionId, `🏇 已发起赛马：「${prompt.slice(0, 40)}」—— 双方规划中，点输入栏 🏇 进入观战`);
     }
     set((s) => ({
       races: { ...s.races, [g.id]: g },

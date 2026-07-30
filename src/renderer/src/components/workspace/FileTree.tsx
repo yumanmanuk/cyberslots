@@ -7,10 +7,24 @@ import { useCallback, useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, RefreshCw } from 'lucide-react';
 
 import type { FsNode } from '@shared/ipc';
+import { BrandSpinner } from '../brand';
 
 interface Props {
-  root: string;
+  /** workspace 全部根目录（首个为 primary）；普通项目传单元素数组。 */
+  roots: string[];
   onOpenFile: (path: string) => void;
+}
+
+/** 绝对路径归属的 workspace 根（Windows 不区分大小写）；找不到退回 primary。
+ *  多根下 fsTree/fsWrite 的边界校验必须用归属根，用 primary 会误判越界。 */
+export function ownerRoot(path: string, roots: string[]): string {
+  const norm = (p: string): string => p.replace(/[\\/]+$/, '').toLowerCase();
+  const p = norm(path);
+  for (const r of roots) {
+    const rn = norm(r);
+    if (p === rn || p.startsWith(rn + '\\') || p.startsWith(rn + '/')) return r;
+  }
+  return roots[0]!;
 }
 
 /** 树内拖拽节点的自定义 MIME — Composer 据此识别内部拖拽
@@ -23,45 +37,58 @@ const GHOST_ICONS = {
   file: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>',
 };
 
+// git 徽标配色按 VS Code 惯例分色：新增绿 / 修改琥珀 / 删除红 / 重命名蓝。
+// U（untracked）= 未跟踪新文件，与 A（已暂存新增）同为「新增」语义，用同色。
+// 不用 accent —— 金色主题下 accent 与 warn 近似，新增/修改会混色。
 const GIT_COLORS: Record<string, string> = {
   M: 'text-warn',
   A: 'text-ok',
+  U: 'text-ok',
   D: 'text-err',
-  '?': 'text-accent',
+  R: 'text-info',
 };
 
-export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
+export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
   const [children, setChildren] = useState<Record<string, FsNode[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // 多根时根分组可折叠 — 记「已折叠」而非「已展开」，默认全展开。
+  const [collapsedRoots, setCollapsedRoots] = useState<Set<string>>(new Set());
   const [git, setGit] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   // 拖放导入高亮（拖入区域时描边）。
   const [dragOver, setDragOver] = useState(false);
 
+  const multi = roots.length > 1;
+  const rootsKey = roots.join('|');
+
   const loadDir = useCallback(
     async (dir: string): Promise<void> => {
       try {
-        const nodes = await window.cyberslots.fsTree(root, dir);
+        const nodes = await window.cyberslots.fsTree(ownerRoot(dir, roots), dir);
         setChildren((c) => ({ ...c, [dir]: nodes }));
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [root],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rootsKey],
   );
 
   const refresh = useCallback(async (): Promise<void> => {
     setError(null);
-    await loadDir(root);
-    setGit(await window.cyberslots.fsGitStatus(root));
+    await Promise.all(roots.map((r) => loadDir(r)));
+    // git 状态各根分别取再合并（key 是绝对路径，不会冲突）。
+    const maps = await Promise.all(roots.map((r) => window.cyberslots.fsGitStatus(r)));
+    setGit(Object.assign({}, ...maps));
     // Reload any expanded dirs so the tree stays fresh.
     for (const dir of expanded) void loadDir(dir);
-  }, [root, expanded, loadDir]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootsKey, expanded, loadDir]);
 
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root]);
+  }, [rootsKey]);
 
   const toggle = (dir: string): void => {
     setExpanded((prev) => {
@@ -95,7 +122,7 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
     setTimeout(() => ghost.remove());
   };
 
-  // 拖外部文件/文件夹进树 = 导入拷贝到工作区根目录，完成后刷新。
+  // 拖外部文件/文件夹进树 = 导入拷贝到 primary 根目录，完成后刷新。
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault();
     setDragOver(false);
@@ -106,7 +133,7 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
       const p = window.cyberslots.getPathForFile(file);
       if (p) paths.push(p);
     }
-    if (paths.length) void window.cyberslots.fsImport(root, paths).then(() => void refresh());
+    if (paths.length) void window.cyberslots.fsImport(roots[0]!, paths).then(() => void refresh());
   };
 
   const renderNodes = (dir: string, depth: number): JSX.Element[] =>
@@ -161,8 +188,8 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
       onDrop={onDrop}
     >
       <div className="flex items-center justify-between px-2 py-1.5">
-        <span className="truncate font-mono text-[11px] text-ink-faint" title={root}>
-          {root.split(/[\\/]/).pop()}
+        <span className="truncate font-mono text-[11px] text-ink-faint" title={multi ? roots.join('\n') : roots[0]}>
+          {multi ? `${roots.length} 个项目` : roots[0]!.split(/[\\/]/).pop()}
         </span>
         <button onClick={() => void refresh()} title="刷新" className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <RefreshCw size={12} />
@@ -170,8 +197,41 @@ export default function FileTree({ root, onOpenFile }: Props): JSX.Element {
       </div>
       <div className="flex-1 overflow-y-auto px-1 pb-2">
         {error && <div className="px-2 py-1 text-[11px] text-err">{error}</div>}
-        {dragOver && <div className="px-2 py-1 text-[11px] text-accent">松开导入到 {root.split(/[\\/]/).pop()}</div>}
-        {renderNodes(root, 0)}
+        {dragOver && <div className="px-2 py-1 text-[11px] text-accent">松开导入到 {roots[0]!.split(/[\\/]/).pop()}</div>}
+        {/* 根目录未到达（undefined）= 读盘中，与空目录（[]）区分 — 避免初载瞬间的无指示空白 */}
+        {children[roots[0]!] === undefined && !error ? (
+          <div className="flex items-center gap-2 px-2 py-2 text-[12px] text-ink-faint">
+            <BrandSpinner size={12} /> 读取目录…
+          </div>
+        ) : multi ? (
+          // 多根：每个项目一个可折叠分组（VS Code 多根风格），primary 在首。
+          roots.map((r) => {
+            const folded = collapsedRoots.has(r);
+            return (
+              <div key={r}>
+                <button
+                  onClick={() =>
+                    setCollapsedRoots((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(r)) next.delete(r);
+                      else next.add(r);
+                      return next;
+                    })
+                  }
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-[4px] text-left text-[12px] font-semibold text-ink hover:bg-bg-hover"
+                  title={r}
+                >
+                  {folded ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
+                  <span className="min-w-0 flex-1 truncate">{r.split(/[\\/]/).filter(Boolean).pop()}</span>
+                  {r === roots[0] && <span className="shrink-0 rounded bg-accent-soft px-1 text-[9px] font-normal text-accent">primary</span>}
+                </button>
+                {!folded && renderNodes(r, 0)}
+              </div>
+            );
+          })
+        ) : (
+          renderNodes(roots[0]!, 0)
+        )}
       </div>
     </div>
   );

@@ -25,14 +25,14 @@ import {
 
 import type { EngineId, UsageBucket, UsageStatsResult } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
-import { BrandSpinner } from './brand';
+import { BrandHero, BrandSpinner } from './brand';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
-import { fmtInt, fmtShort, QuotaRow, useProviderQuotas } from './UsageQuota';
+import { AgyQuotaRow, fmtInt, fmtShort, QuotaRow, useActiveAgyQuota, useProviderQuotas } from './UsageQuota';
 
-// kimi 不参与用量统计（无可靠的真实 token 上报），筛选器列其余三个引擎
-// （omp 走 pi-ai 的真实 usage 上报，计入统计）。
-const ENGINES: EngineId[] = ['codex', 'opencode', 'omp'];
+// kimi 不参与用量统计（无可靠的真实 token 上报），筛选器列其余引擎
+// （omp 走 pi-ai 的真实 usage 上报，antigravity 走 agy result.usage，均计入统计）。
+const ENGINES: EngineId[] = ['codex', 'opencode', 'omp', 'antigravity'];
 
 // 趋势图序列色 — 固定品牌色（明暗主题下均有足够对比度），与 cc-switch 同源。
 const COLOR_INPUT = '#3b82f6';
@@ -128,6 +128,8 @@ export default function UsageView(): JSX.Element | null {
   const [data, setData] = useState<UsageStatsResult | null>(null);
   // 已配 key 供应商的套餐余量/余额（kimi/minimax/deepseek）
   const { quotas, refreshing: quotaRefreshing, refresh: refreshQuotas } = useProviderQuotas(open);
+  // 当前活动 Antigravity 账号额度（只 1 次往返；无活动账号时 email 空，据此隐藏）
+  const { quota: agyActive, refreshing: agyRefreshing, refresh: refreshAgy } = useActiveAgyQuota(open);
 
   const load = useCallback(async (): Promise<void> => {
     const { start, end } = resolveRange(range);
@@ -247,8 +249,8 @@ export default function UsageView(): JSX.Element | null {
             </div>
           </div>
 
-          {/* 套餐余量 — 仅当本地配置探到 kimi/minimax/deepseek key 时展示 */}
-          {quotas && quotas.length > 0 && (
+          {/* 套餐余量 — 本地探到 kimi/minimax/deepseek key 或有活动 Antigravity 账号时展示 */}
+          {((quotas && quotas.length > 0) || agyActive?.email) && (
             <div className="mt-4 rounded-2xl border border-line bg-bg-panel p-5">
               <div className="mb-2.5 flex items-center justify-between">
                 <h2 className="flex items-center gap-2 text-[15px] font-semibold text-ink">
@@ -256,18 +258,30 @@ export default function UsageView(): JSX.Element | null {
                 </h2>
                 <button
                   title={t('quotaRefresh')}
-                  onClick={() => refreshQuotas(true)}
-                  disabled={quotaRefreshing}
+                  onClick={() => {
+                    refreshQuotas(true);
+                    refreshAgy(true);
+                  }}
+                  disabled={quotaRefreshing || agyRefreshing}
                   className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:pointer-events-none"
                 >
                   {/* 刷新期间品牌星芒轮闪，完成即恢复 — 点击有确实执行的可见反馈 */}
-                  {quotaRefreshing ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
+                  {quotaRefreshing || agyRefreshing ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
                 </button>
               </div>
               <div className="flex flex-col gap-2.5">
-                {quotas.map((q) => (
-                  <QuotaRow key={q.provider} q={q} roomy />
-                ))}
+                {/* 排序：时间窗额度类（kimi/minimax）→ Antigravity → 余额类（deepseek）垫底 */}
+                {quotas
+                  ?.filter((q) => q.provider !== 'deepseek')
+                  .map((q) => (
+                    <QuotaRow key={q.provider} q={q} roomy />
+                  ))}
+                {agyActive?.email && <AgyQuotaRow data={agyActive} roomy />}
+                {quotas
+                  ?.filter((q) => q.provider === 'deepseek')
+                  .map((q) => (
+                    <QuotaRow key={q.provider} q={q} roomy />
+                  ))}
               </div>
             </div>
           )}
@@ -278,7 +292,14 @@ export default function UsageView(): JSX.Element | null {
               <h2 className="text-[15px] font-semibold text-ink">{t('usageTrend')}</h2>
               <span className="text-ui text-ink-faint">{rangeLabel}</span>
             </div>
-            {data && <TrendChart result={data} lang={lang} />}
+            {/* 统计未到达前占位同高度 — 面板级等待用 BrandHero，不让图表区塌陷成无指示空白 */}
+            {data ? (
+              <TrendChart result={data} lang={lang} />
+            ) : (
+              <div className="flex h-[280px] items-center justify-center">
+                <BrandHero size={56} />
+              </div>
+            )}
             <div className="mt-3 flex flex-wrap items-center justify-center gap-4 text-[11.5px] text-ink-soft">
               <LegendDot color={COLOR_INPUT} label={t('usageInputSeries')} />
               <LegendDot color={COLOR_OUTPUT} label={t('usageOutputSeries')} />

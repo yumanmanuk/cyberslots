@@ -17,8 +17,8 @@ import type { RaceRole, RaceRoleConfigs } from '@shared/race';
 import { RACE_ROLES, RACE_ROLE_LABELS } from '@shared/race';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
-import { ENGINE_LABELS } from '../EngineIcon';
-import { EFFORT_LABELS, RACE_ENGINES, maxEffort, useRoleCatalogs } from './modelCatalogs';
+import { ENGINE_LABELS, useEngineOrder } from '../EngineIcon';
+import { EFFORT_LABELS, maxEffort, useRoleCatalogs } from './modelCatalogs';
 
 interface RoleDraft {
   engine: EngineId;
@@ -57,6 +57,7 @@ export default function RaceSetup(): JSX.Element | null {
   const parentMessages = useChatStore((s) => (s.activeSessionId ? s.ui[s.activeSessionId]?.messages : undefined));
   const raceDefaults = useChatStore((s) => s.settings?.race);
   const availability = useChatStore((s) => s.engineAvailability);
+  const engineOrder = useEngineOrder();
   const { snap, ocCatalog, modelOptions, defaultModel, effortOptions } = useRoleCatalogs(open);
   const [prompt, setPrompt] = useState('');
   const [roles, setRoles] = useState<Record<RaceRole, RoleDraft>>(DEFAULT_ROLES);
@@ -177,7 +178,7 @@ export default function RaceSetup(): JSX.Element | null {
                   onChange={(e) => onEngine(role, e.target.value as EngineId)}
                   className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-soft outline-none transition focus:border-accent"
                 >
-                  {RACE_ENGINES.map((eng) => (
+                  {engineOrder.map((eng) => (
                     <option key={eng} value={eng} disabled={availability ? !availability[eng] : false}>
                       {ENGINE_LABELS[eng]}
                       {availability && !availability[eng] ? '（未安装）' : ''}

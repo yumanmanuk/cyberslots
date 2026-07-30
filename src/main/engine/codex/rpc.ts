@@ -10,14 +10,26 @@
 
 import type { Readable, Writable } from 'node:stream';
 
+import { compatAudit } from '../compatAudit';
+
 type Json = Record<string, unknown>;
 
 export type NotificationHandler = (method: string, params: Json) => void;
 export type ServerRequestHandler = (method: string, params: Json) => Promise<unknown>;
 
+/** 带错误码的 RPC 错误 — 上层可精确判 -32601（Method not found）降级。 */
+export class RpcError extends Error {
+  constructor(message: string, readonly code?: number) {
+    super(message);
+    this.name = 'RpcError';
+  }
+}
+
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
+  /** 请求方法名 — 错误应答时审计日志能指向具体方法。 */
+  method: string;
 }
 
 export class NdjsonRpc {
@@ -41,7 +53,7 @@ export class NdjsonRpc {
     const id = this.nextId++;
     const frame = params === undefined ? { id, method } : { id, method, params };
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, method });
       this.write(frame);
     });
   }
@@ -79,7 +91,10 @@ export class NdjsonRpc {
       try {
         msg = JSON.parse(line) as Json;
       } catch {
-        continue; // non-JSON noise on stdout
+        // non-JSON noise on stdout（banner/日志行属正常）；以 { 开头却解不动
+        // = 畸形 JSON 帧（格式漂移信号）才留账。
+        if (line.startsWith('{')) compatAudit.record('codex', 'parse-error', 'stdout-malformed-json', line);
+        continue;
       }
       this.dispatch(msg);
     }
@@ -108,7 +123,9 @@ export class NdjsonRpc {
       this.pending.delete(Number(id));
       if (msg.error) {
         const e = msg.error as { code?: number; message?: string };
-        p.reject(new Error(e.message ?? `rpc error ${e.code}`));
+        // Method not found 集中入账：引擎升级砍方法时各 catch 降级点无需各自重复记录。
+        if (e.code === -32601) compatAudit.record('codex', 'rejected-method', p.method, e.message);
+        p.reject(new RpcError(e.message ?? `rpc error ${e.code}`, e.code));
       } else {
         p.resolve(msg.result);
       }

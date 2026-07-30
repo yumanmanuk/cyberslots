@@ -22,7 +22,6 @@ import {
   Play,
   ShieldCheck,
   Square,
-  Swords,
   Target,
   Trash2,
   X,
@@ -34,12 +33,12 @@ import type { CodeSelection, CodexCatalogModel, EngineId, PermissionMode } from 
 import { useChatStore, type QueuedMessage } from '../store/chatStore';
 import { useRaceStore } from '../store/raceStore';
 import { useT, type MsgKey } from '../i18n';
-import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import { EngineIcon, ENGINE_LABELS, useEngineOrder } from './EngineIcon';
 import { BrandSpinner } from './brand';
 import OpencodeModelPicker from './OpencodeModelPicker';
 import ChipInput, { type ChipInputHandle } from './ChipInput';
 import SlashMenu from './SlashMenu';
-import SelectionChip from './SelectionChip';
+import { selectionRangeLabel } from '../selections';
 import { TREE_NODE_MIME } from './workspace/FileTree';
 import PlanWidget from './PlanWidget';
 
@@ -265,12 +264,40 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     setSlashDismissed(null);
   };
 
-  // 新选区卡片到达 → 聚焦输入框（Copilot 同款：点完「添加到对话」直接提问）。
-  const prevSelCount = useRef(0);
+  // 新选区到达 → 行内胶囊插到输入框光标处（而非顶部卡片行），光标落在
+  // 胶囊之后可直接提问。切会话只刷新名单不插入；队列编辑回填的选区
+  // 文本里已有标记，用 skip 标志跳过插胶囊（只回填 store 快照）。
+  const knownSelIds = useRef<Set<string>>(new Set());
+  const selSessionRef = useRef(sessionId);
+  const skipSelInsert = useRef(false);
   useEffect(() => {
-    if (selections.length > prevSelCount.current) chipRef.current?.focus();
-    prevSelCount.current = selections.length;
-  }, [selections.length]);
+    const isSwitch = selSessionRef.current !== sessionId;
+    selSessionRef.current = sessionId;
+    const prev = knownSelIds.current;
+    knownSelIds.current = new Set(selections.map((s) => s.id));
+    if (isSwitch) return;
+    const added = selections.filter((s) => !prev.has(s.id));
+    if (!added.length) return;
+    if (skipSelInsert.current) {
+      skipSelInsert.current = false;
+      return;
+    }
+    for (const s of added) {
+      chipRef.current?.insertSelectionChip({
+        id: s.id,
+        fileName: s.fileName,
+        rangeLabel: selectionRangeLabel(s),
+        path: s.path,
+      });
+    }
+  }, [selections, sessionId]);
+
+  /** 输入框里的选区胶囊被删（退格/剪切/清空）→ 同步移除 store 快照，
+   *  避免发送时夹带看不见的选区块。 */
+  const syncSelChips = (ids: string[]): void => {
+    const cur = useChatStore.getState().selections[sessionId] ?? [];
+    for (const s of cur) if (!ids.includes(s.id)) removeSelection(sessionId, s.id);
+  };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
     // Shift+Tab 由上面的 window 监听统一处理（避免双重触发）。
@@ -402,8 +429,10 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           }}
           onEditItem={(item) => {
             setText(item.text);
-            // 队列项携带的选区引用一并回填为输入框卡片（addSelection 自带去重）。
+            // 队列项携带的选区引用一并回填 store（文本里已含胶囊标记，
+            // 跳过行内插入避免重复；addSelection 自带去重）。
             if (item.selections?.length) {
+              skipSelInsert.current = true;
               for (const sel of item.selections) useChatStore.getState().addSelection(sessionId, sel);
             }
             useChatStore.getState().removeQueued(sessionId, item.id);
@@ -441,14 +470,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           )}
 
-          {/* 代码选区引用卡片 —— 文件预览里「添加到对话」投递过来的 */}
-          {selections.length > 0 && (
-            <div className={`flex flex-wrap gap-1.5 px-3 pb-1.5 ${images.length === 0 ? 'pt-3' : ''}`}>
-              {selections.map((sel) => (
-                <SelectionChip key={sel.id} sel={sel} onRemove={() => removeSelection(sessionId, sel.id)} />
-              ))}
-            </div>
-          )}
+          {/* 代码选区引用改为行内胶囊（见 insertSelectionChip），不再占卡片行 */}
 
           <ChipInput
             ref={chipRef}
@@ -456,6 +478,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             onChange={setText}
             onKeyDown={onKeyDown}
             onImagePaste={handleImagePaste}
+            onSelChipsChange={syncSelChips}
             placeholder={goalMode ? t('goalPlaceholder') : starting && !busy ? t('inputStarting') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
             className="no-scrollbar max-h-32 min-h-[3.25rem] overflow-y-auto px-4 pb-1 pt-3 text-body"
           />
@@ -507,7 +530,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             <button
               title={t('expandInput')}
               onClick={() => setExpanded(true)}
-              className="rounded-lg p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              className="shrink-0 rounded-lg p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
             >
               <Maximize2 size={13} />
             </button>
@@ -517,7 +540,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
                 <button
                   onClick={() => send()}
                   title={t('enqueue')}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90"
                 >
                   <Clock size={15} />
                 </button>
@@ -526,7 +549,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
                 <button
                   onClick={() => void cancel()}
                   title={t('stop')}
-                  className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80"
                 >
                   <Square size={13} fill="currentColor" />
                 </button>
@@ -536,7 +559,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
                 onClick={() => send()}
                 disabled={!text.trim() && attachments.length === 0 && selections.length === 0}
                 title={goalMode ? t('goalSet') : t('send')}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90 disabled:opacity-30"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition hover:opacity-90 disabled:opacity-30"
               >
                 {goalMode ? <Target size={14} /> : <ArrowUp size={15} />}
               </button>
@@ -842,11 +865,13 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const forkToEngine = useChatStore((s) => s.forkToEngine);
+  const openAgySwitch = useChatStore((s) => s.openAgySwitch);
   const availability = useChatStore((s) => s.engineAvailability);
+  const engineOrder = useEngineOrder();
   const [open, setOpen] = useState(false);
   if (!meta) return null;
-  // 四引擎：列出除当前引擎外的全部选项（二元切换已成历史）。
-  const others = (['codex', 'opencode', 'kimi', 'omp'] as EngineId[]).filter((e) => e !== meta.engine);
+  // 五引擎：按设置 engineOrder 列出除当前引擎外的全部选项。
+  const others = engineOrder.filter((e) => e !== meta.engine);
 
   return (
     <div className="relative">
@@ -859,6 +884,23 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
       </button>
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
+          {meta.engine === 'antigravity' && (
+            <>
+              <DropdownItem
+                active={false}
+                onClick={() => {
+                  setOpen(false);
+                  openAgySwitch(sessionId);
+                }}
+              >
+                <span className="flex items-center gap-2">
+                  <EngineIcon engine="antigravity" size={13} />
+                  切换账号…
+                </span>
+              </DropdownItem>
+              <div className="my-1 border-t border-line" />
+            </>
+          )}
           <div className="px-3 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">{t('continueWith')}</div>
           {others.map((other) => {
             // 未安装置灰展示（可见不可选）；尚未探测（null）时不置灰。
@@ -892,10 +934,13 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
 function PermissionPicker({ sessionId, compact }: { sessionId: string; compact?: boolean }): JSX.Element | null {
   const t = useT();
   const ui = useChatStore((s) => s.ui[sessionId]);
+  const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const setMode = useChatStore((s) => s.setMode);
   const [open, setOpen] = useState(false);
   const current = ui?.modes.current ?? 'default';
   const options: PermissionMode[] = ['default', 'auto', 'yolo'];
+  // antigravity headless 无交互式审批 → 「手动审批(default)」不可用（选了只会软拒工具）。
+  const isAgy = meta?.engine === 'antigravity';
   const label = (m: string): string => (PERM_LABEL_KEYS[m] ? t(PERM_LABEL_KEYS[m]!) : m);
 
   return (
@@ -911,18 +956,27 @@ function PermissionPicker({ sessionId, compact }: { sessionId: string; compact?:
       </button>
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
-          {options.map((m) => (
-            <DropdownItem
-              key={m}
-              active={m === current}
-              onClick={() => {
-                setOpen(false);
-                void setMode(m);
-              }}
-            >
-              {label(m)}
-            </DropdownItem>
-          ))}
+          {options.map((m) => {
+            const disabled = isAgy && m === 'default';
+            return (
+              <DropdownItem
+                key={m}
+                active={m === current}
+                onClick={() => {
+                  if (disabled) return;
+                  setOpen(false);
+                  void setMode(m);
+                }}
+              >
+                <span
+                  className={disabled ? 'flex cursor-not-allowed items-center text-ink-faint opacity-40' : ''}
+                  title={disabled ? 'headless 无法交互式审批，请用自动/yolo' : undefined}
+                >
+                  {label(m)}
+                </span>
+              </DropdownItem>
+            );
+          })}
         </Dropdown>
       )}
     </div>
@@ -960,10 +1014,11 @@ function RaceToggle({ sessionId }: { sessionId: string }): JSX.Element {
   const unfinished = mine.filter((r) => r.stage !== 'done');
   const doneOnes = mine.filter((r) => r.stage === 'done');
   const running = unfinished.some((r) => !r.interrupted);
+  // emoji 图标不吃 text 着色，状态区分靠底色：进行中=accent 底，待继续=warn 底。
   const tint = running
     ? 'bg-accent-soft font-medium text-accent'
     : unfinished.length
-      ? 'font-medium text-warn hover:bg-bg-hover'
+      ? 'bg-warn/15 font-medium text-warn hover:bg-bg-hover'
       : 'text-ink-faint hover:bg-bg-hover hover:text-ink';
   return (
     <div className="relative">
@@ -980,7 +1035,7 @@ function RaceToggle({ sessionId }: { sessionId: string }): JSX.Element {
         }
         className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition ${tint}`}
       >
-        <Swords size={13} />
+        <span className="text-[13px] leading-none">🏇</span>
       </button>
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
@@ -1017,18 +1072,29 @@ function RaceToggle({ sessionId }: { sessionId: string }): JSX.Element {
 
 // -------------------------------------------------------- model & effort
 
+/** antigravity slug → 友好显示名（composer 模型选择器 + 设置页默认模型下拉共用；与 AntigravityAdapter.AGY_MODEL_SLUGS 对齐）。 */
+export const ANTIGRAVITY_LABELS: Record<string, string> = {
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
+  'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
+  'gemini-3.1-pro-high': 'Gemini 3.1 Pro (High)',
+  'gemini-3.6-flash-high': 'Gemini 3.6 Flash (High)',
+  'gemini-3.6-flash-medium': 'Gemini 3.6 Flash (Medium)',
+  'gemini-3.5-flash-medium': 'Gemini 3.5 Flash (Medium)',
+};
+
 function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const uiModels = useChatStore((s) => s.ui[sessionId]?.models);
   const setModel = useChatStore((s) => s.setModel);
   const catalog = useChatStore((s) => s.codexCatalog);
   const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const agyHiddenList = useChatStore((s) => s.settings?.antigravityHiddenModels);
 
   // 引擎未运行（会话恢复/懒启动）时不会有 models.update 事件，
   // 此时用持久化的 meta.modelId + catalog 兑底，避免选择器消失。
   const catalogSlugs = catalog.map((c) => c.slug);
   const current = uiModels?.current || meta?.modelId || '';
-  const available =
+  const rawAvailable =
     uiModels?.available.length
       ? uiModels.available
       : meta?.engine === 'codex'
@@ -1040,11 +1106,18 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
         : current
           ? [current]
           : [];
+  // antigravity：按设置页隐藏黑名单过滤选择器（始终保留当前模型，避免选中项消失）。
+  const available =
+    meta?.engine === 'antigravity' && agyHiddenList?.length
+      ? rawAvailable.filter((m) => m === current || !agyHiddenList.includes(m))
+      : rawAvailable;
 
   const [open, setOpen] = useState(false);
   if (!current && !available.length) return null;
 
   const entryOf = (id: string): ReturnType<typeof catalog.find> => catalog.find((c) => c.slug === id);
+  // antigravity 无 codexCatalog 条目 → 用 slug→友好名映射展示（否则显示原始 slug）。
+  const labelFor = (id: string): string => entryOf(id)?.displayName ?? ANTIGRAVITY_LABELS[id] ?? id;
   const activeId = current || available[0]!;
 
   const pick = (id: string): void => {
@@ -1069,12 +1142,12 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
           if (!open) void refreshEngineConfigs();
           setOpen(!open);
         }}
-        title={entryOf(activeId)?.displayName ?? activeId}
+        title={labelFor(activeId)}
         className="flex w-full min-w-0 items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
         {/* min-w-0 + truncate：宽度不够时模型名截断省略，不撑出输入框 */}
         <span className="min-w-0 truncate font-medium">
-          {entryOf(activeId)?.displayName ?? activeId}
+          {labelFor(activeId)}
         </span>
         <ChevronDown size={12} className="shrink-0" />
       </button>
@@ -1092,7 +1165,7 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
                 }}
               >
                 <span className="flex min-w-44 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate">{entry?.displayName ?? m}</span>
+                  <span className="min-w-0 flex-1 truncate">{entry?.displayName ?? ANTIGRAVITY_LABELS[m] ?? m}</span>
                   {entry && (
                     <span className="flex shrink-0 items-center gap-1 text-[10px] text-ink-faint">
                       {entry.contextWindow ? fmtCtxWindow(entry.contextWindow) : ''}

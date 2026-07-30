@@ -2,7 +2,23 @@
 
 > 本文件是后续新对话的**唯一总指引**（as-built 版）：记录已定决策、已实现功能、关键实测结论、代码地图、遗留项与后续路线。
 > 历史决策依据见 `d:\ai-agent\handoff.md`；阶段 0 实测报告见 `cyberslots/docs/phase0-findings.md`。
-> 最后更新：2026-07-29 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+> 最后更新：2026-07-30 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+>
+> 🆕 **2026-07-30 追加（顶部钉住当前提问 QuestionPin，详见 §4.24）**：滚动时把「当前提问」钉在消息区顶部——提问气泡完全滚出视口上缘后，顶部浮出右对齐提问胶囊（用户气泡同色系单行摘要，点击平滑回跳该提问）· 下一条提问逼近顶缘时按 **sticky 分组头手感把胶囊顶出视口**（translateY 上推 + overflow-hidden 裁切）、越过顶缘后接棒换字，两者永不重叠 · 纯只读浮层不改消息流布局与数据，测量方式同 TurnRail（data-msg-id + offsetTop，滚动 rAF 节流 + ResizeObserver 兑底流式/折叠高度变化）。
+>
+> 🆕 **2026-07-30 追加（品牌 loading 动效体系 — 拉霸叙事动画 + 全应用等待态统一，详见 §4.22）**：全应用「进行中/等待/加载」指示统一为品牌组件（brand.tsx：BrandSpinner 三星芒错峰轮闪 / BrandHero 拉杆全叙事 / BrandMark 静态），禁用通用 spinner（lucide 图标旋转、animate-spin/pulse 表达 loading、孤立无动效「加载中…」）· BrandHero 重构为**拉霸因果时序叙事**（3.2s：待机全暗→拉杆下压→回弹机身抖→三星依次爆亮→齐亮→同步熄灭；「点亮错峰、熄灭同步」需三组独立 keyframes，delay 相位偏移无法实现）· 多轮排查（关键词 grep → 状态源头穷举 43 文件）共清扫约 20 处，附带补齐一批等待态 UX（ScheduledView/FileTree 加载态与空态三态区分、WorkspaceDialog/定时任务表单提交 busy+防连点、UsageView 趋势图同高占位防塌陷）· 规范双轨落盘：`.qoder/rules/brand-loading.md`（Qoder 常驻注入）+ 新建根目录 `AGENTS.md`（codex/kimi/opencode 等引擎可读，含项目背景/命令/规范全文），两份内容一致、改一处必同步另一处 · 明确不属 loading 的豁免面：状态呼吸灯、ContextRing 数据量表、textarea placeholder 提示文字、终端就绪光标、静态产物渲染。
+>
+> 🆕 **2026-07-30 追加（引擎兼容性审计 — 优雅降级 + 全量记账，详见 §4.21）**：四引擎 adapter 的降级点（未知事件/方法被拒/报文解析失败）由「静默吞掉」升级为「用户侧静默降级 + 维护者侧全量留痕」——新增主进程 compatAudit 单例（指纹聚合计数 + 原始报文样本落 `userData/logs/compat-audit.jsonl`，每指纹限 3 条防刷盘）· codex rpc 层新增 RpcError 保留错误码并集中记账 -32601 Method not found（此前错误码直接丢失）· 已知刻意不渲染的类型进白名单不算漂移 · 侧栏齿轮小黄点（不打断）+ 设置→模型页「引擎兼容性诊断」卡（按引擎列 分类+明细+次数+最近时间，一键定位日志文件）——引擎升级后协议漂移（砍方法/加事件/改格式）第一时间显形可排查。
+>
+> 🆕 **2026-07-30 追加（RightDock tab 无上限治理 + dock 统一拖宽，详见 §4.7 / §4.8）**：tab 栏不再撑宽 dock（`w-0 min-w-full`，dock 宽度始终由内容面板决定——开 9 个 sidechat 也不会把中间聊天区挤成条），装不下时栏内横向滚动 + 激活 tab 自动滚入视野（scrollIntoView） · 溢出时右侧露出**「全部标签页 ⌄」下拉兑底**（列全部 tab：图标+名称+关闭，当前项高亮），「+」与下拉钉在栏右缘不随滚动走 · **dock 左缘统一拖拽把手**（悬停高亮细线）：对当前激活面板调宽、按面板类型分别记忆（文件树 300/终端 440/sidechat 380/plan 420 默认，各自上下限，localStorage 持久），取代原 sidechat 面板内部专属把手 · 中间列 340px 保底、窗口过窄时改由 dock 一侧收缩，Composer 发送/中止钮补 shrink-0 任何情况不再被压扁。
+>
+> 🆕 **2026-07-30 追加（「添加到对话」行内胶囊化 + 按钮精修 + 主题选区色，详见 §4.4 / §4.7）**：划选投递从「输入框上方卡片行」改为**在输入框当前光标处插入行内胶囊** `</> 文件名 #L起-止`（ChipInput 经 selectionchange 持续记忆框内最后光标，焦点在文件预览区也能回插原位，光标不再被重置到开头；退格/剪切删胶囊同步移除背后快照，不会发送时夹带看不见的选区块） · 浮动按钮精修：accent 胶囊 + 行号徽标（L18-21）+ 140ms 弹出动画，替换原灰黑方块 · 全局 `::selection` 半透明主题色（25% accent，五套配色自动跟随），替换浏览器默认蓝色选区。
+>
+> 🆕 **2026-07-30 追加（codex 真 workspace — 多根目录沙盒放行，详见 §4.1 / §4.12）**：workspace 多根目录对 codex 从「提示注入告知」升级为「沙盒真放行」——此前 cwd 只取首目录、其余目录仅拼进 contextSeed 文字（模型知道但 OS 沙盒写入被硬拦）；现 thread/start（含 resume/fork）随参传 **`runtimeWorkspaceRoots = [cwd, ...其余根]`**（codex ≥0.144 原生实验字段，替换语义，experimentalApi 已开启）作主通道，spawn 级 `-c sandbox_workspace_write.writable_roots=[...]` 作旧版兜底（源码确认 legacy 播种路径新版仍生效），权限模式热切 `thread/settings/update` 的 sandboxPolicy 亦带 writableRoots 防切换丢根；SessionManager 建 adapter 时**现读**当前 settings 的 workspace folders（非建会快照），目录增删后懒唤醒/重启自动生效；其余三引擎（opencode/kimi/omp）无 OS 沙盒、审批制天然可写多根，无需改动；真机冒烟探针 `.dev/workdir/probe-writable-roots.mjs` 在 codex 0.144.4 / 0.146.0 均验证通过。
+>
+> 🆕 **2026-07-30 追加（右侧文件树多根展示，详见 §4.7）**：workspace 会话的「文件」tab 由仅显 primary 升级为**展示全部项目根目录**——多根时每个项目一个可折叠分组（VS Code 多根风格，默认全展开，primary 项目带徽标，cwd 强制置首防 workspace 编辑调序脱钩），单根外观不变；git 状态徽标各根分别采集后合并；顶栏单根显目录名、多根显「N 个项目」；fsTree/预览编辑保存的主进程边界校验改按**归属根**判定（ownerRoot 前缀匹配，Windows 大小写不敏感——用 primary 校验会把第二项目误判越界）；外部文件拖入导入仍落 primary 根。
+>
+> 🆕 **2026-07-30 追加（文件树 git 徽标语义化 + 分色，详见 §4.7）**：未跟踪文件徽标由 porcelain 原始 `?` 归一化为 **U**（Untracked，VS Code 惯例，主进程 gitStatus 层做映射）；徽标按状态分色——新增 U/A 绿（text-ok）/ 修改 M 琥珀（text-warn）/ 删除 D 红（text-err）/ 重命名 R 蓝（text-info）；废除原 `?` 的 accent 配色（金色主题下 accent 与 warn 近似，新增/修改混色不可分辨）。
 >
 > 🆕 **2026-07-29 追加（大模型赛马 —— 竞争式规划工作流，本轮主体功能，详见 §4.20）**：双/三选手盲跑并行规划 → 三段式交叉反驳（⚔反驳/🤝吸纳/🛡辩护，方案冻结）→ 裁判两道人工关口（采纳策略前置 4/6 选 1 + 评语 → 三段式出方案含**设计溯源表** → 批注修订循环）→ 唯一写盘执行者 → 独立审计 VERDICT → 有界修复回环（≤3）· 赛马**寄生于宿主对话**（⚔ 入口按会话过滤/直入、可携带对话摘录作选手背景、角色会话侧栏隐藏、发起/剔除/收尾公告回流宿主）· 设置→赛马页（各角色默认引擎/模型/思考档 + 第三选手开关）· 全套容错：瞬时错自动重试、单选手 ■中止/↻精准重试（逐选手产物落盘、只补跑缺失方）、⚙调参即自动重跑、✂剔除选手（三人场二段确认、标记式不删数据）、↩重选策略/重跑规划、重启恢复（interrupted+手动继续）· 交卷判定 = 静默收敛（兼容 codex 内部多回合）· 泳道复用主区 MessageList（隐藏 token 统计行/回退钮/实施钮，Plan 卡弹窗预览）· 全阶段整页锁滚。
 >
@@ -101,12 +117,13 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 
 ### 4.1 会话与侧栏
 - 三段分类：Workspaces（多目录工作区）/ Projects（单目录，按 cwd 分组）/ Chats（纯聊天）
+- Project 组常驻：组内会话全部归档（或被侧栏筛选器滤空）后项目头不消失，空置显示，仍保留 ⋯ 菜单与 + 新建入口；cwd 集合与排序时间戳从全量会话列表推导（谓词与分组规则一致），只有把归档会话在「已归档」页彻底删除后项目才真正消失
 - 目录组头用文件夹开合图标（闭 Folder / 开 FolderOpen），不用旋转箭头
 - Workspace 组头：git 徽标文件夹图标 + ×N 目录数
 - 每个分组标题 hover 浮现 + 号：新建 Chat / 新建 Project 会话（弹目录选择）/ 新建工作区
 - 每个 Workspace/Project 会话行 hover 右侧浮现 + 号：一键在该工作区/项目目录下开新会话；+ 固定行内最右缘（最高频操作），⋯ 管理菜单居其左
 - + 号新建均先弹引擎选择（EnginePick）：codex/opencode/kimi/omp 品牌图标 + 名字列表（复用 EngineIcon，未安装项置灰），建会话时定引擎、避免进会话后换引擎走 forkToEngine 产生分支；菜单开启前测量按钮位置，距视口底部不足一个菜单高（<170px）时自动改向上弹出，chats 分组靠屏幕底时不被窗口下缘遮挡
-- Workspace 实体：命名 + 多文件夹（首目录为 cwd，其余目录经 contextSeed 前缀注入告知引擎）
+- Workspace 实体：命名 + 多文件夹（首目录为 cwd，其余目录经 contextSeed 前缀注入告知引擎）；**codex 会话为真多根**（2026-07-30）：其余目录随 `runtimeWorkspaceRoots` 并入 workspace-write 沙盒可写根，写第二根不再弹「不在沙盒可写目录」授权（详见 §4.12）；opencode/kimi/omp 无 OS 沙盒天然可写
 - Workspace 管理菜单（···）：管理工作区（名称/文件夹对话框）/ 打开终端 / 在编辑器打开 / 在文件管理器中打开 / 归档全部对话 / 从侧栏移除
 - 「从侧栏移除」带守卫：本身只解散分组、不删会话（组内会话按首目录 cwd 回落 Projects 分组）；组内还有未归档对话时菜单项禁用，tooltip 提示「组内还有对话，清空后才能移除」——判断基于全量会话列表、不受侧栏筛选器影响，已归档对话不阻止移除（DotMenu 组件新增 disabled/title 通用禁用态）
 - Project 组头菜单（···）：打开终端 / 在编辑器打开 / 在文件管理器中打开 / 归档全部对话
@@ -114,6 +131,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 「归档全部对话」带二段确认（DotMenu 新增 confirmLabel 通用确认态：首次点击图标换勾、文案换「再点一次确认归档」、黄色警示底色，再点才执行；移开鼠标/关菜单/Esc 均重置）；归档范围取全量会话列表不受侧栏筛选器影响，project 组谓词与分组规则一致不误伤 workspace 内会话；workspace 组无未归档会话时该项置灰
 - 会话行状态位（codex 风，统一在行尾）：运行中灰色转圈 / 等待回答蓝色问号（LLM 提问或待审批）/ 出错红色叹号 / 未读金色实心点（任务完成未查看）/ 空闲已读显相对时间；蓝色走主题化 `--info` token
 - 侧栏会话行不提供删除 — 只能归档（二段确认：归档图标 → 黄色对勾 → 再点才归档，3 秒未确认/移开鼠标自动恢复）；彻底删除只在「已归档」页操作（删除仍是垃圾桶 → 红色对勾二段确认），防误删对话历史
+- 归档拦截进行中会话：会话 running/starting、或名下有进行中赛马（被打断的不算，isRaceActive 判定）时不可归档 — 行内归档按钮反应式置灰（cursor-not-allowed + tooltip 提示忙碌原因），workspace/project 的「归档全部对话」批量操作自动跳过这类会话；chatStore.archiveSession 动作层同谓词兜底（防未来新 UI 入口绕过，还原方向不拦）
 - 筛选菜单（漏斗）：排序（更新时间/创建时间）+ 状态（全部/运行中/等待操作/出错/已完成）+ 仅未读 + 重置
 - fork 分支树缩进展示（⑂ 前缀）；换引擎分支 ⇄ 前缀
 - 未读机制：非活动会话回合完成标未读，选中即已读（main 持久化 + renderer 同步）
@@ -121,7 +139,8 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 左下角：定时任务矩形入口 + 齿轮菜单（语言/明暗模式与配色主题快速切换 + 进入全页设置）
 
 ### 4.2 新会话页
-- 引擎切换：Codex / opencode / Kimi Code / Oh My Pi（顺序统一；未安装项置灰不可选，默认选中不可用时自动切首个可用）
+- 引擎切换：Codex / opencode / Kimi Code / Oh My Pi（顺序跟随设置「引擎列表顺序」，见 §4.10；未安装项置灰不可选，默认选中排序首位引擎、不可用时自动切排序首个可用）
+- **引擎切换滑动胶囊（2026-07-30）**：选中高亮背景不再逐按钮瞬移切换，改为容器内单个绝对定位胶囊层（useLayoutEffect 测量选中按钮 offsetLeft/offsetWidth，transition-all 300ms ease-out 平移 + 宽度渐变，pointer-events-none 不挡点击，availability 变化时重测对齐）；标签用隐形加粗占位（invisible font-medium 文本与正常文本同格叠放）预留粗体宽度，选中变粗时相邻按钮不再被挤动
 - 引擎品牌图标（EngineIcon，全局复用）：codex=OpenAI 结、kimi=K 字标，单色跟随 currentColor 适配明暗主题；opencode=官方块状光标（粗边框空心竖长方形，边框约占宽 1/4，铺满视窗高对齐 codex/kimi 视觉体量），固定金属银纵向渐变（上亮→中暗→下回光，#cfd2d6→#9aa0a8→#8f959d→#b7bbc1）不随主题变色，渐变 ID 用 useId 按实例隔离避免多处渲染冲突
 - 三张卡：Chat（无目录）/ Project（选单目录）/ Workspace（弹多目录工作区创建，建完直接开会话）
 - 已有 workspace 列表快捷开会话
@@ -129,18 +148,21 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 ### 4.3 对话流
 - 流式 Markdown 正文（黄色打字 caret 已废除 — 进行态反馈由下述各块自带标签 + 底部活动指示器承担；进行态标签全部固定英文不进 i18n，用户拍板）
 - **思考块 ThinkingBlock（无边框，2026-07-29 重构）**：流式中 🧠 图标 + "Thinking" 流光文字（.shimmer-text），正文默认展开、限高 8 行、新内容自动滚底、顶部渐隐遮罩；结束自动折叠为 "Thought for Ns"（点击展开全文，用户点击覆盖默认态、流结束复位）；**真实思考时长**：opencode reasoning part 自带 time.start/end，adapter 随 thinking.delta 下发 durationMs（SSE 快照常整段突发送达，渲染端墙钟会把几秒思考算成几十毫秒），time.end 晚到时空 delta 单独回填到本回合最近思考段；kimi/codex 无此数据走墙钟兑底
-- **工具调用聚合组（MessageList 分组渲染层，qoder 风）**：连续同类工具自动聚合为可折叠组 — **Explore 组**（read/search/fetch）：进行中 "Exploring" 流光 + 左竖线明细流（动词过去式行：Grepped/Globbed/Read/Searched + 对象 + N results，命中数来自 grep/glob metadata），全部完成自动折叠成 "Explored N files · M searches"；**Shell 组**（execute）：进行中 "Running" + 命令卡流，完成折叠成 "Ran N commands"（失败时附红色 "M failed" 计数）；**思考段并入组内**渲染（Thought 行嵌组里不切断分组、紧邻的前一段思考回拉入组，正文叙述才切断）；进行中强制展开、结束复位默认折叠可点开；回合结束时遗留 in_progress/pending 工具收敛 canceled（防组永停进行态）
+- **工具调用聚合组（MessageList 分组渲染层，2026-07-30 重构为「定高活动窗」）**：设计前提 — 工具调用只为提供知情权与情绪价值（感知 AI 在工作），无人逐条细读，且旧版「进行中强制展开 N 行→结束自动折叠」的高度突变会引起页面上下跳动（用户拍板）。连续同类工具仍自动聚合（Explore 组 read/search/fetch；Shell 组 execute；思考段并入组内不切断分组、紧邻前段思考回拉入组），但渲染分三态：**① 进行中 = 定高活动窗 ActivityWindow**（高度恒定不随步数增长）：22px 状态行（BrandSpinner + Exploring/Running 流光动词 + 右侧 mono「N steps · 用时」秒级走表）+ 1px accent 扫描线（.tool-scan 往复扫光，取代整卡 card-sweep）+ 60px（3 行）遮罩视窗 — 内容底部对齐，新行从底部推入、旧行上移溢出顶部被渐隐遮罩吞掉（终端滚屏感，只渲染尾部 8 条）；**② 结束 = 单行摘要 ToolSummary**（「Explored N files · M searches」/「Ran N commands」+ 失败计数），高度突变只在回合边界发生一次；**③ 摘要点击展开完整历史**（用户主动操作允许跳动）：沿用原明细 ToolLine/ShellCard/ThinkingBlock，**命令输出与工具详情的查看入口保留在这里**；回合结束时遗留 in_progress/pending 工具收敛 canceled（防组永停进行态）
+- **工具行紧凑态样式（CompactRow / ToolLine 统一 20px 行高，2026-07-30 重设计）**：左侧 3px 状态竖刻度（进行中 accent 呼吸 .tool-tick-run（属状态呼吸灯豁免项）/ 完成灰 / 失败红）+ 12px 常规动词（进行中流光，动词过去式映射 toolLabel 已导出供两处复用）+ 11.5px mono 灰淡对象截断 + 右对齐 10.5px 纯数字命中数（不再带 results 后缀）/ 红色 failed；活动窗内工具行纯知情不可展开，独立 ToolLine（mcp/兑底）仍可点开输出；科技感来源从整卡扫光收敛为扫描线 + 刻度呼吸 + 底部推入滚动
+- **活动窗内思考行可点击展开（2026-07-30）**：思考 ≠ 工具调用 — 推理是真内容可读，故 Thinking 紧凑行带展开箭头（hover 显现）；因定高遮罩视窗内行内展开会被裁切，推理正文渲染到**视窗下方抽屉 ThinkingReveal**（左竖线缩进、限高 max-h-56 滚动、流式中自动贴底，与 ThinkingBlock 正文同样式）；同时仅展开一条（再点收起/点另一条切换），回合结束活动窗卸载自动复位；空内容思考行不响应点击
 - **编辑卡片 EditCard（矩形框）**：文件类型品牌色图标（FileTypeIcon 扩展名映射：tsx/jsx=React 原子青、ts 蓝、js 黄、json/css/vue/py/rs/go 等各随品牌色，未知回退灰；已导出可全局复用）+ mono 文件名（悬停全路径）；进行中卡面 accent 扫光（.card-sweep）+ 右侧 "Generating…" 流光；完成右侧 **+N -N 行数变更 + A/M/D 字母徽章**（opencode edit 的 filediff.additions/deletions metadata；write 按 exists 判 A/M、新文件行数用入参内容兑底）；失败 "Failed" / 取消 "Canceled"；点开逐行着色 unified diff（PatchView：+绿 −红 @@ 灰）
 - **shell 命令条 ShellCard（单行框）**：终端图标 + mono 命令文本 + 右侧状态（Running… 流光 / Ran / 非零退出码 Exit N 红 / Failed / Canceled）；点开实时输出（运行中 metadata.output 流式更新 + 自动追底）
 - **内联 To-dos 卡片**（plan 消息，todo.updated 折叠）：头部 ☰ To-dos + 右侧 "N/M done" 进度；条目状态就地刷新 — 待办空心圈 / 进行中旋转 loader / 完成灰色圆圈勾（文字不划线不置灰，用户拍板）；todowrite/todoread 工具行过滤不渲染（卡片已呈现）；与 Composer 上方 PlanWidget 常驻进度条并存
 - **底部活动指示器**：旋转 ✳ + "Working…" 流光，**仅静默空窗期显示**（流末尾存在任何可见进行态 — 流式思考/正文、进行中工具、未应答审批 — 即隐藏，避免与各块自带标签同词重复）；prompt 在途（sending）也算进行态，发送到回合开始的窗口期不像死机
-- 审批记录行：待处理 "Waiting for approval" 流光，应答后绿/红结果徽章；数据链路：OpencodeAdapter tool 分支提取 state.metadata（filediff/diff/matches/count/exit/exists）+ toolName 原始工具名透传（明细行动词依据）+ grep/glob 归类 search；错误卡与思考正文长串 overflow-wrap:anywhere 防撑破边框
+- **授权记录不留痕（2026-07-30，用户拍板：授权结果不需展示）**：待处理时流内一行知情提示（BrandSpinner 琥珀 + "Waiting for approval" 流光 + mono 命令标题），底部 PermissionSheet 仍是作答入口；**应答后该行直接从流里移除**（buildStream 过滤已作答 permission + DecisionRecord 兑底返 null），不再保留绿/红结果徽章历史行；数据链路：OpencodeAdapter tool 分支提取 state.metadata（filediff/diff/matches/count/exit/exists）+ toolName 原始工具名透传（明细行动词依据）+ grep/glob 归类 search；错误卡与思考正文长串 overflow-wrap:anywhere 防撑破边框
 - **折叠块平滑收展 + 无跳变滚动跟随**（2026-07-29）：所有自动/手动折叠区（Running/Exploring 工具组明细、Thinking 正文、ShellCard 输出、EditCard diff、ToolLine 输出）统一走 `Collapsible` 容器 —— `grid-template-rows 1fr↔0fr` 200ms 高度过渡（无需测量内容高度），完成态自动收起不再整块一帧消失；关闭动画跑完后延时卸载 children，长会话不积压隐藏 DOM · 贴底跟随在原 messages effect 基础上增加 **ResizeObserver 观察内容容器**（ChatView 与 SideChatPanel 各一），动画期间高度逐帧变化持续重贴底部，收起表现为平滑下滑而非跳变、流式增高跟随也更顺；用户上翻阅读时收起发生在视口下方不影响阅读位置，手动折叠上方旧块由 Chromium 原生 scroll anchoring 兜底
 - 审批底部卡（Approve once / Approve for session / Reject）+ **AskUserQuestion 提问卡**（2026-07-29 改版，仿 ChatGPT「Asking questions」：卡外灰色小字「模型提问」标签；深色圆角卡 = 问题标题 + `< 1 / N >` 分页器（多条待处理授权/提问循环切换，授权卡同获）+ × 关闭（取消）；选项纵向列表——序号圆圈 + 加粗名称截断 + hover 箭头，整行点击作答；底部回形针 + 补充说明输入行（提交 = 原文先以 `Other: …` 留档进消息记录（`noteAskUserAnswer`）+ 取消提问 + `enqueueTo` 排入本会话队列、回合后自动派发，有文本时 Skip 变发送钮）+ 圆角 Skip（reject 类选项映射，如 kimi `q0_skip`）；kimi 桥接现为单问题单请求、选项仅 label，无 description/Recommended 数据）
-- **提问流内记录卡 QuestionRecord**（2026-07-29，仿 ChatGPT「Questions Answers」）：ask_user 在对话流的历史记录为独立卡片（To-dos 卡同风头部栏：问号图标 +「模型提问」+ 右侧状态角标：待答 BrandSpinner 琥珀 / 已答 ✓ 绿 / 跳过 × 灰）；卡身保留加粗问题原文 + 一行回答：选项作答 ✓+选项名 / 自定义回答 `Other: 原话`（新增 `answeredNote` 可选字段，只增不删随会话持久化，旧历史无此字段照常渲染）/ 跳过取消灰字「已跳过」/ 待答 shimmer「等待作答…」；授权（permission）记录仍为单行小字，高频授权不刷屏
+- **提问流内记录卡 QuestionRecord**（2026-07-29，仿 ChatGPT「Questions Answers」）：ask_user 在对话流的历史记录为独立卡片（To-dos 卡同风头部栏：问号图标 +「模型提问」+ 右侧状态角标：待答 BrandSpinner 琥珀 / 已答 ✓ 绿 / 跳过 × 灰）；卡身保留加粗问题原文 + 一行回答：选项作答 ✓+选项名 / 自定义回答 `Other: 原话`（新增 `answeredNote` 可选字段，只增不删随会话持久化，旧历史无此字段照常渲染）/ 跳过取消灰字「已跳过」/ 待答 shimmer「等待作答…」；授权（permission）记录则不同于提问 — 应答后不留痕（见上「授权记录不留痕」条）
 - 任务清单 PlanWidget（sticky）
 - **Plan 计划文档卡**（Plan 模式产出的 md 长文本）：卡片内直接渲染 md 预览（限高 + 底部渐隐），点卡在右侧面板开完整预览（预览中卡片收起成单行小条）；卡上支持 复制 / 下载 / 「按此计划实施」（赛马角色会话隐藏实施钮、预览改弹窗）；**下载文件名 = 计划标题 + 时间戳**（`标题_YYYYMMDD-HHmm.md`，重复下载不撞名），标题取正文 md 一级标题，无标题时取首个有意义文本行（剥列表/加粗/引用记号截 30 字）兜底，不再千篇一律叫「计划文档」（planDoc.ts `extractPlanTitle`/`downloadMarkdown`，卡片/右侧面板/赛马弹窗三处下载入口共用）
 - 回合统计行：有真实 usage 显示 ↑上行（含缓存比）/ ↓下行 / t/s / 用时；无真实 usage（kimi ACP 不推 usage_update）时只显用时，不再展示 `~` 估算 token
+- **复制提问按钮**（2026-07-30）：用户提问气泡 hover 时左侧浮现复制图标按钮（与「回退到此处」纵向堆叠、复制在上回退在下），点击复制提问原文到剪贴板，成功后图标变绿 ✓「已复制」1.5s 后恢复；**常驻可用**（不受会话忙碌/steer/Goal/赛马角色等回退隐藏条件限制）；纯只读 UI 操作不触碰消息数据；i18n `copyQuestion` 词条（zh 复制提问 / en Copy prompt）
 - 消息持久化（debounce 写盘）+ 会话恢复：**选中会话即预热引擎**（sessionWarmUp IPC → ensureRuntime + ACP session/resume，取代“首条消息才惰性复活”），模型/思考深度/命令选择器立即就绪
 - cron/steer 等 main 侧发起的消息经 `user.echo` 事件回显气泡
 - **重启中断任务状态收敛**：运行态实时持久化（session.status 事件即写 meta）；重启后上次仍在执行/待回答的会话自动标**未读**（侧栏醒目提示半截任务）；被打断的进行中工具调用收敛为 **canceled**（灰色 ×，与真正的 failed 红色区分），未应答的权限/提问卡锁定；磁盘文件收敛后回写避免长期留存脏状态
@@ -149,7 +171,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 功能条布局（左→右）：引擎图标 → 模式（Agent/Plan）→ 权限 → ⚡Swarm → 🎯Goal ｜ 模型 → 思考深度（codex/opencode）→ 上下文圆环 → 展开 → 发送
 - **5 级响应式退避**（控件条宽度收窄时按优先级依次退避，ResizeObserver 断点 730/650/560/470/400px）：①权限变图标 → ②隐思考深度 → ③隐模型名 → ④隐权限图标 → ⑤隐 Agent/Plan；引擎图标/放大输入框/发送按钮永不退避（Agent/Plan 隐藏后 Shift+Tab 仍可切模式）
 - **输入框动态行高**：默认 2 行，Shift+Enter/粘贴多行时逐行增高，5 行封顶；永不显滚动条（`.no-scrollbar`）；无聚焦高亮边框（始终 border-line 暗边框）
-- **ChipInput（contenteditable 输入框）**：拖入非图片文件 → 在光标处插入彩色文件引用胶囊 chip（`</> 文件名`样式）；Ctrl+C 复制/发送时 chip 序列化为纯文本 `文件名(绝对路径)`（拦截 copy/cut 按选区片段序列化）；纯文本粘贴去格式；保留 Enter 发送/Shift+Enter 换行/IME/空态占位符；chip 只由拖拽命令式插入不从字符串反解析（回填/清空为纯文本）
+- **ChipInput（contenteditable 输入框）**：拖入非图片文件 → 在光标处插入彩色文件引用胶囊 chip（`</> 文件名`样式）；Ctrl+C 复制/发送时 chip 序列化为纯文本 `文件名(绝对路径)`（拦截 copy/cut 按选区片段序列化）；纯文本粘贴去格式；保留 Enter 发送/Shift+Enter 换行/IME/空态占位符；chip 只由拖拽/划选投递命令式插入不从字符串反解析（回填/清空为纯文本）；**插入点光标记忆**：经 selectionchange 持续快照框内最后光标位置，焦点移去文件预览等外部区域后命令式插入（拖文件/添加到对话）仍回插到原光标处而非追加末尾，且先解析插入点再 focus 避免光标被重置到开头
 - **斜线命令菜单（slash commands）**：输入仅为 `/token`（/ 开头、无空格无换行 — 与各引擎「/name 须在消息起始处生效」语义一致；goal 模式不触发）时，输入卡片正上方弹出补全菜单（Codex 桌面版同款），随输入实时过滤（名称精确 > 前缀 > 子串 > 描述命中），分 命令组 / 技能组 两区，行 = 图标 + /名称 + 描述 + 全局/项目 徽章（tooltip 显示来源文件路径）；↑↓ 循环选择（滚动跟随）、Enter/Tab 插入 `/name ` 并把光标移到末尾（ChipInput.setPlainText 命令式整体替换）、Esc 关闭（记住关闭时文本，继续输入即恢复）、IME 组合中不抢键；候选来自主进程 slashService 只读目录扫描（每次唤起重扫，无缓存）—— skills（目录内含 SKILL.md，frontmatter 取 name/description，容忍 UTF-8 BOM）：全局 ~/.codex/skills、~/.kimi-code/skills、~/.config/opencode/skills、~/.agents/skills，项目级 .codex/skills、.kimi-code/skills、.opencode/skills、.agents/skills；commands（*.md，取 frontmatter description 或首个有效正文行）：全局 ~/.codex/prompts、~/.config/opencode/commands（兼容 command 拼写），项目级 .codex/prompts、.opencode/commands（兼容 command）；按会话引擎过滤可见性（本引擎 + generic，kimi 兼容可见 codex skills — kimi-code dist 实测其内置读取 ~/.codex/skills），同名条目项目级覆盖全局；kimi 自定义 command 走插件清单机制（无目录约定）故 kimi 会话仅列 skills；IPC `slash:list` 通道（cwd + engine → SlashItem[]）
 - Agent/Plan 分段切换 + **全局 Shift+Tab** 循环切换（window 级监听，焦点在任意处均生效，阻止默认焦点导航）
 - Plan 模式：权限选择器隐藏（不再显示底部“只读规划”提示文字，避免切换时输入框上下跳动）
@@ -163,7 +185,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 压缩可见化（codex）：压缩过程渲染为工具行「正在压缩上下文…→已压缩上下文」，完成后由下一次 tokenUsage 回填「已压缩上下文：X → Y tokens」（真实释放量）；压缩失败以 error 显性化、不再静默
 - **图片附件**：拖拽或 **Ctrl+V 粘贴截图**（剪贴板原始图像→写 `userData/pasted/` 临时文件拿路径）→ 输入框**内部顶部 14×14 圆角缩略图**（object URL 预览，免读盘）；点击弹全屏**灯箱放大预览**（遮罩点击/Esc/右上角 × 关闭）；悬停缩略图右上角 × 移除；CSP img-src 含 blob:
 - 非图片文件 chip（中性色 border-line + bg-panel，不抢眼）
-- **代码选区引用卡片**（§4.7 预览划选投递）：`{EXT} 文件名 #L起-止` 紧凑卡片（类型徽标 accent 色），× 移除、hover 显示完整路径、**点击弹快照预览浮层**（路径标题栏 + 带行号只读代码，Esc/点外侧关闭）；背后是**添加那一刻的代码快照 + 绝对路径 + 行号范围**（快照而非发送时重读——AI 改文件后行号不错位；同文件同范围去重；新卡片到达自动聚焦输入框）；发送时序列化为 `<selection path lines>` + fenced 代码块注入 prompt 最前（上下文在前、提问在后），引导语注明可用 read 工具按路径+行号扩展上下文；**截断保护**（Claude Code 同款 maxSelectionLength=2000）：快照本体不截断、注入时截到最后完整行并标注剩余读法，超限卡片带 warn 色「截」徽标；历史气泡回显只读卡片（随 user 消息持久化）；仅卡片无文字也可发送
+- **代码选区引用——行内胶囊（§4.7 预览划选投递；2026-07-30 由顶部卡片行改版）**：投递后在输入框**当前光标处**插入行内胶囊 `</> 文件名 #L起-止`（行号 accent 微高亮与普通文件引用区分，title 悬浮显路径+行号），光标落在胶囊后可直接提问；胶囊可退格/剪切删除，删除即同步移除背后快照（onSelChipsChange 存活名单回报，不会发送时夹带看不见的选区块）；序列化为纯文本标记 `文件名#L起-止(绝对路径)`；切会话只刷新名单不误插，队列编辑回填因文本已含标记只回填快照不重复插胶囊；背后仍是**添加那一刻的代码快照 + 绝对路径 + 行号范围**（快照而非发送时重读——AI 改文件后行号不错位；同文件同范围去重）；发送时快照序列化为 `<selection path lines>` + fenced 代码块注入 prompt 最前（上下文在前、提问在后），引导语注明可用 read 工具按路径+行号扩展上下文；**截断保护**（Claude Code 同款 maxSelectionLength=2000）：快照本体不截断、注入时截到最后完整行并标注剩余读法；历史气泡仍回显只读 SelectionChip 卡片（`{EXT} 文件名 #L起-止`，点击弹快照预览浮层、超限带 warn「截」徽标，随 user 消息持久化）；仅胶囊无正文也可发送
 - 展开按钮：长文输入大弹窗
 - 思考深度选择器（codex/opencode 会话）：codex 档位取自当前模型 catalog 的 `supported_reasoning_levels`（缺省 low/medium/high/xhigh）；**opencode 档位 = 模型 reasoning variants 键名**（如 none/thinking、low/medium/high/max，无 variants 的模型自动隐藏控件；未显式选择时不下发 variant 跟随 server 默认）；滑条交互；拉满档（xhigh）时轨道金色流光 + 滑块脉冲光环 + 档位文字渐变流光动画（index.css `effort-max-*`）
 - 模型选择器（右侧，与思考深度并排）：codex 候选来自 `model_catalog_json`（每项显示 displayName + 上下文窗口如 1M/256K + 图片模态图标），kimi 取 ACP 会话模型；**始终显示实际模型名**（无“默认”占位）；恢复态引擎未起时用持久化 modelId + catalog 兜底；切模型自动校正不支持的思考深度档；热切换（kimi unstable_setSessionModel；codex/opencode 下一 turn 生效）；opencode 用专属完整版选择器（见 §4.14）
@@ -191,11 +213,13 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 
 ### 4.7 右侧图标 rail + RightDock 统一 tab 面板
 - **RightDock 统一标签栏（codex 同款 tab 化）**：rail 图标只做入口，面板本体是带统一 tab 栏的 dock——`文件 | 变更 N | Agents N | [终端×n] | [Sidechat×n] | [计划预览] | +` 并列同级 tab（变更/Agents 带计数徽标，数据提升到 dock 层与内容面板共用一份）；动态 tab（终端/sidechat/plan）悬停出 × 关闭，关后激活态落到邻居 tab、全关完自动收起；切会话时 activeTab 失效自动回退首个可用 tab；**“+”菜单** = 新终端（workspace 按根目录逐项列出，首项标 Primary）+ 新 Sidechat 分支；dock 开合走 DockReveal 宽度过渡（grid 列 0fr↔1fr 插值 220ms，中间消息区平滑让位而非瞬移，收起等过渡结束再卸载子树）
-- 文件（工程树 + 预览/编辑，写入有 workspace 边界检查）；预览随 AI 编辑/回退**实时重读盘刷新**；编辑态有未保存草稿且 AI 改了同一文件 → 顶部冲突提示条（加载 AI 版本 / 保留我的），保存或切文件后清除；**文件树支持拖放导入**（从资源管理器拖文件/文件夹进树 → 拷贝导入到工作区根目录并刷新；拖入时描边高亮 +「松开导入到 XXX」提示；fsImport IPC 递归拷贝，逐个尽力单个失败不阻断）
+- **tab 数量不设上限（2026-07-30）**：tab 栏 `w-0 min-w-full` 不参与撑宽 dock（dock 宽度始终由内容面板决定，多开 tab 不再挤压中间聊天区），装不下时栏内横向滚动且激活 tab 自动滚入视野（scrollIntoView，切换/新建不会“失踪”）；溢出时（ResizeObserver 检测 scrollWidth > clientWidth）栏右侧露出**「全部标签页 ⌄」下拉兑底**：列全部 tab（图标+名称+可关项悬停 ×）、当前项 accent 高亮、点选即跳转；「+」与下拉钉在栏右缘不随滚动走；tab 描述（图标/标签/可关性）集中生成，滚动栏与下拉共用一份
+- **dock 左缘统一拖拽把手（2026-07-30）**：中间区与 dock 的分割线悬停高亮成细线（cursor-col-resize），拖拽调整**当前激活面板**的宽度，按面板类型分别记忆（localStorage）——文件树列 300(220–520) / 终端 440(300–800) / sidechat 380(300–720) / plan 420(320–720)；各内容面板宽度改为受控 props（取代写死宽度与 sidechat 面板内部专属把手）；中间列 340px 保底，窗口过窄时改由 dock 一侧收缩
+- 文件（工程树 + 预览/编辑，写入有 workspace 边界检查）；**多根展示（2026-07-30）**：workspace 会话列出全部项目根目录——每个项目一个可折叠分组（VS Code 多根风格，默认全展开，primary 带徽标、cwd 强制置首），单根外观不变；顶栏单根显目录名、多根显「N 个项目」；fsTree/预览编辑保存的边界校验按**归属根**判定（ownerRoot 前缀匹配，Windows 大小写不敏感）；预览随 AI 编辑/回退**实时重读盘刷新**；编辑态有未保存草稿且 AI 改了同一文件 → 顶部冲突提示条（加载 AI 版本 / 保留我的），保存或切文件后清除；**文件树支持拖放导入**（从资源管理器拖文件/文件夹进树 → 拷贝导入到 primary 根目录并刷新；拖入时描边高亮 +「松开导入到 XXX」提示；fsImport IPC 递归拷贝，逐个尽力单个失败不阻断）；**文件行尾 git 状态徽标**（主进程 `git status --porcelain -z` 逐根采集合并，非 git 目录静默无徽标）：未跟踪 `??` 归一化为 **U**（不直接露 `?`，VS Code 惯例），按状态分色 —— 新增 U/A 绿 / 修改 M 琥珀 / 删除 D 红 / 重命名 R 蓝，未知码回退灰（不用 accent —— 金色主题下与 warn 近似会混色）
 - 审查变更（**接受/回退**，保命级）：列出本会话 AI 编辑过的文件（M/A/D 徽标 + 真实 +/- 行数，主进程 ChangeTracker 台账驱动）；每行悬停 ✓接受（保留改动、停止跟踪）/ ↺回退（还原到编辑前）；头部「全部接受」/「全部回退」（回退全部两次点击确认）；点文件行开左侧 **before/after diff 对照**（LCS 红绿着色、双列行号，借鉴 claude-code StructuredDiff）
   - 基线机制（**影子 git 快照**，对标 opencode Snapshot）：每 root 一个独立 GIT_DIR（`userData/shadow-git/<hash>`）叠在工作树上，不碰用户 .git、非 git 目录也可用（自带 info/exclude 排除 node_modules 等 + 尊重工作树 .gitignore）；会话首个回合开始（AI 未动手）`add -A + write-tree` 拍**基线 tree hash**（含用户未提交手改，race-free）；回退 = `git checkout <hash> -- <file>`（不在快照=删新建）；行数/类型 = `git diff --cached --numstat/--name-status`；shell/命令改动无 fileChange 事件 → 回合结束快照 diff 扫尾补登记；台账仅持久化 `{baselineHash, touched[]}`（`userData/changes/<id>.json`，轻量非全文），**app 重启后仍可回退**
   - 多会话共编同一文件：各会话持自己的不可变基线 hash，回退互不打架；文件名旁黄色「N 会话」徽标提示；共编文件的单文件回退需**两次点击确认**（会影响所有会话）
-- **预览划选「添加到对话」**（VS Code Copilot 同款交互）：源码视图鼠标/Shift+方向键划选几行 → 选区末端浮出深色小按钮「添加到对话」（absolute 定位随内容滚动；mousedown preventDefault 保住选区；选区折叠/转移/文件刷新自动收起；拖出代码区钳回 <pre> 内）→ 投递为该会话输入框的选区卡片（§4.4）；行号由 DOM Range 的 textContent 偏移换算（跨 highlight.js token 准确；终点在某行第 0 列不计该行——Claude Code 同款规则；截掉末尾多选的换行使快照与行号自洽）；md 渲染预览/编辑态不支持（行号无意义）
+- **预览划选「添加到对话」**（VS Code Copilot 同款交互）：源码视图鼠标/Shift+方向键划选几行 → 选区末端浮出 **accent 胶囊按钮**「添加到对话 + 行号徽标 L起-止」（与发送钮同一品牌主操作色、同色柔光投影，140ms sel-pop 弹出、hover 提亮、按下微缩；absolute 定位随内容滚动；mousedown preventDefault 保住选区；选区折叠/转移/文件刷新自动收起；拖出代码区钳回 <pre> 内）→ 投递为该会话输入框光标处的**行内胶囊**（§4.4）；行号由 DOM Range 的 textContent 偏移换算（跨 highlight.js token 准确；终点在某行第 0 列不计该行——Claude Code 同款规则；截掉末尾多选的换行使快照与行号自洽）；md 渲染预览/编辑态不支持（行号无意义）；配套全局 `::selection` 半透明主题色（25% accent，代码高亮 token 透过选区仍可读，五套配色自动跟随）替换浏览器默认蓝色选区
 - Agents（子代理活动卡片，按 title 前导动词匹配）
 - **内嵌终端（多实例 tab）**：真 TTY 终端作为 dock 的同级 tab（不再开外部 PowerShell/cmd 窗口）；**支持同时开多个**：渲染进程 store 台账 `terminals`，主进程 PTY 按终端 tab id 管理；rail 终端钮默认在 **primary 根目录**（workspace 首目录 = 会话 cwd）新开/激活最近终端，tab 栏“+”菜单可选 **workspace 任一根目录**再开一个；tab 标签显示文件夹名、悬浮显全路径；非活动终端 tab 用 hidden 保活（xterm 实例不卸载，切回时滚动缓冲不丢），关 tab 才 dispose PTY，删会话同步清理其全部 PTY；后端 @lydell/node-pty 真 ConPTY（预编译 N-API 二进制，Electron 33 免 rebuild，无需本机编译器），前端 xterm.js + fit；支持颜色/光标定位/TUI(vim)/resize 同步；终端主题读 CSS 变量跟随应用配色；app 退出全部 kill + orphanSweep 覆盖；打包 asarUnpack 原生 .node
 - 开分支 sidechat（所有会话可用）：rail 钮**每次点击都新建一个独立分支 tab**（不复用已有分支），悬停按钮即预热父引擎（fork 免等唤醒）；关 tab 即删除该分支会话（阅后即焚，详 §4.8）
@@ -207,7 +231,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 客户端复制消息文件，分支立即可见完整历史；打开即预热分支引擎（sessionWarmUp）
 - **多实例 + tab 化宿主**：分支挂在 RightDock 统一标签栏（store `sidechats` 为分支 id 数组，一个主会话可同时开多个分支 tab）；新建时**乐观先弹「分支创建中…」占位 tab**（fork/引擎唤醒后台跑，完成后原地替换为真实面板，占位宽度对齐真实面板不跳动；用户中途切走则不强制跳回）；**关 tab = 彻底清理该分支**（删除 fork 会话，引擎/消息/侧栏一并移除）
 - **「只读分支」说明不再常驻面板头部**：鼠标悬浮其 tab 标签（及“+”菜单的新建项）时以 tooltip 展示；面板头部整体移除，标题/关闭由 tab 栏接管，省出的空间给消息流
-- 右侧面板宽度可拖拽调节（左缘把手，300–720px，localStorage 记忆）；开合动画统一由 dock 的 DockReveal 宽度过渡承担
+- 面板宽度由 dock 左缘统一拖拽把手调节（300–720px，localStorage 记忆，见 §4.7；2026-07-30 取代原面板内部专属把手）；开合动画统一由 dock 的 DockReveal 宽度过渡承担
 - mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兑底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left，codex/opencode 会话显示）；输入框行高与主输入框一致（2 行起 5 行封顶、无滚动条）
 
 ### 4.9 定时任务（Cron）
@@ -218,7 +242,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 
 ### 4.10 设置（全页，按类别分栏）
 - **全量实时保存（2026-07-29）**：无草稿快照、无底部保存钮；单一数据源 = store settings，顶层 `commit(patch)` 传入各面板（PaneProps = { settings, commit }），每个控件改动直接按字段 patch 经 saveSettings 浅合并写盘；历史教训：旧版草稿机制（打开时 structuredClone + 保存钮整体回写）会把其他面板的即时改动冲掉（实测：隐藏模型后点保存被重置），故彻底移除草稿而非打补丁
-- 通用：界面语言（简体中文/English 即时切换）/ 明暗模式与配色主题 / 发送键 / 自动压缩阈值（关闭 / 70/80/90/95%，默认 90%；占用达阈值时于回合边界自动压缩，绝不打断进行中回合）/ **满窗降切规则**（`{匹配模型 → 降切为}` 规则表可视化增删，默认内置 k3 256k → k3；达压缩阈值且当前模型命中规则时改为热切目标模型而非压缩，对话区插系统提示行；模型名词元通配忽略大小写与分隔符，详见顶部 2026-07-29 追加）
+- 通用：界面语言（简体中文/English 即时切换）/ 明暗模式与配色主题 / 发送键 / **引擎列表顺序（2026-07-30）**：五引擎行列表（序号 + 品牌图标 + 名称 + 上移/下移钮）自定义引擎在全局所有选择列表中的展示顺序，统一生效于：新会话页引擎切换、侧栏快捷创建引擎菜单、Composer「换引擎继续聊」列表、赛马角色引擎下拉（发起面板/调参弹窗/设置赛马页）；新建会话默认选中排序首位的可用引擎；持久化为 settings.engineOrder（读取端消毒：剔非法 id + 去重 + 缺失引擎补末尾，新版本加引擎老配置自动补全；渲染层统一入口 EngineIcon.tsx `useEngineOrder()`）/ 自动压缩阈值（关闭 / 70/80/90/95%，默认 90%；占用达阈值时于回合边界自动压缩，绝不打断进行中回合）/ **满窗降切规则**（`{匹配模型 → 降切为}` 规则表可视化增删，默认内置 k3 256k → k3；达压缩阈值且当前模型命中规则时改为热切目标模型而非压缩，对话区插系统提示行；模型名词元通配忽略大小写与分隔符，详见顶部 2026-07-29 追加）
 - 模型：CLI 配置只读快照 + 每引擎协议路由开关（详见顶部 2026-07-27 重大变更）；**opencode 卡片内含模型展示管理**（2026-07-29，详见 §4.14）；本页 ↻ 一次点击同时刷新本页快照与全局 codex 目录/默认思考档（与 Composer 选择器同源于 refreshEngineConfigs 同一次读取，天然一致，见 §4.4）
 - 通知：任务完成 / 提问（审批与 AskUser）/ 报错 三开关（仅窗口未聚焦时发）
 - 关于：版本信息
@@ -236,7 +260,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 
 ### 4.12 引擎层
 - KimiAdapter（ACP）：initialize / session new-resume / prompt（附件 resource_link）/ 取消 / 模型热切 / 权限模式 / 审批与 AskUserQuestion 桥 / think 标签拆分 / usage / slash 命令透传 / compact(`/compact`)
-- CodexAdapter（app-server v2）：thread start/resume/fork / turn start-interrupt-steer / item 事件映射（agentMessage、reasoning、commandExecution、fileChange、mcpToolCall、webSearch、collab）/ 审批 server-request 应答 / plan / tokenUsage / effort / compact / 权限模式映射（default=on-request+workspace-write，plan=read-only，auto=never，yolo=danger-full-access）；模式切换附带 `thread/settings/update` **热同步线程存量策略**（initialize 开 `experimentalApi`；goal continuation 等引擎自发回合不走 turn/start 传参、只认线程存量设置，不同步则切 YOLO 后续跑仍按旧策略弹授权；旧版 codex 无此方法静默降级）；**引擎自发回合（goal continuation / compact / review）完整生命周期**：turn/started 推 turn.started+running（主进程据此拍变更基线），结束发 `stopReason='background'` 的 turn.ended（无 usage 统计）+ 恢复 idle + 清 activeCodexTurnId；授权应答后无论哪类回合都把状态从 awaiting 拉回 running/idle；background 消费方约定：渲染端不产统计行/不派发队列/不触自动压缩（防压缩死循环），主进程不弹「任务完成」通知，赛马不误交卷
+- CodexAdapter（app-server v2）：thread start/resume/fork / turn start-interrupt-steer / item 事件映射（agentMessage、reasoning、commandExecution、fileChange、mcpToolCall、webSearch、collab）/ 审批 server-request 应答 / plan / tokenUsage / effort / compact / 权限模式映射（default=on-request+workspace-write，plan=read-only，auto=never，yolo=danger-full-access）；模式切换附带 `thread/settings/update` **热同步线程存量策略**（initialize 开 `experimentalApi`；goal continuation 等引擎自发回合不走 turn/start 传参、只认线程存量设置，不同步则切 YOLO 后续跑仍按旧策略弹授权；旧版 codex 无此方法静默降级）；**多根 workspace 沙盒放行（2026-07-30）**：adapter 新增 `extraWritableRoots`（SessionManager 建 adapter 时现读当前 settings 的 workspace folders、过滤掉 cwd 传入）—— ① 主通道 thread/start 随参 `runtimeWorkspaceRoots=[cwd,...其余根]`（codex ≥0.144 原生实验字段，替换语义须含 cwd、绝对路径）；② spawn 级 `-c sandbox_workspace_write.writable_roots=[...]` 兜底旧版（源码确认新版 legacy 播种路径仍生效）；③ setMode 热切的 sandboxPolicy 带 writableRoots 防切换丢根，并修正 tag 命名：`thread/settings/update` 的 SandboxPolicy.type 是 camelCase（workspaceWrite/readOnly/dangerFullAccess）而非 thread/start 的 kebab-case，此前发 kebab 反序列化静默失败、模式热切从未真同步过沙盒策略（SANDBOX_POLICY_TAG 映射表）；冒烟探针 `.dev/workdir/probe-writable-roots.mjs`（0.144.4/0.146.0 实测通过）；**引擎自发回合（goal continuation / compact / review）完整生命周期**：turn/started 推 turn.started+running（主进程据此拍变更基线），结束发 `stopReason='background'` 的 turn.ended（无 usage 统计）+ 恢复 idle + 清 activeCodexTurnId；授权应答后无论哪类回合都把状态从 awaiting 拉回 running/idle；background 消费方约定：渲染端不产统计行/不派发队列/不触自动压缩（防压缩死循环），主进程不弹「任务完成」通知，赛马不误交卷
 - OpencodeAdapter（HTTP + SSE，详见 §4.14）：共享单例 serve；session create/resume（服务端持久化直接续接）/ prompt（逐条带 model+agent+variant，**只以 SSE `session.idle` resolve 回合**，HTTP 响应仅作错误通道）/ abort / 原生 fork(`/session/{id}/fork`) / compact(summarize) / 权限模式映射（default→build agent，plan→plan agent，auto/yolo→build + adapter 自动应答权限 once/always 不弹窗）；SSE part 全量快照→自算增量 delta；steer/goal 不实现（UI 自动隐藏，opencode 无原生 steer，官方 CLI 也是串行队列）
 - OmpAdapter（ACP，详见 §4.17）：initialize / session new-load(resume)-fork（均原生）/ prompt（附件 resource_link + effort→thinking 直发降级）/ 取消 / 模型热切（unstable_setSessionModel→set_config_option 双路径）/ set_mode plan↔default / 审批与 ask 桥 / background 自发回合收尾 / 命令黑名单 / 虚拟 URL 过滤 / compact(`/compact`)；approval/精细思考档走 spawn flag（见 §4.17 映射表）
 - 内置 ai-server：resources/ai-server（上游 codex-server.js 原样 + config.js env shim），启动时复制到 userData 运行，key 只经 env 不落盘，仅 loopback 白名单，quota-guard 等团队功能关闭
@@ -290,7 +314,8 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
   - 展示：`5小时 X% ⏱4h7m · 7天 Y% ⏱1d2h`（已用% 按 <70 绿 / ≥70 橙 / ≥90 红），DeepSeek `余额 ¥…`；重置倒计时 >24h 显示 Nd Nh 否则 Nh Nm
   - **纵向对齐**：大窗 roomy 宽松模式（每时间窗定宽 w-52、标签/百分比各 w-12 定宽成列，多供应商行同类元素对齐）；小窗紧凑模式每时间窗独占一行同样定宽对齐（w-11）
   - 大窗独立「套餐余量」卡片带强制刷新按钮（跳过缓存）：刷新期间 BrandSpinner 持续转、完成即停（最短 600ms 保证命中缓存瞬回也可见），期间禁点防重复请求
-- 实现：`src/main/usage/providerQuota.ts`、`SessionManager.usageStats`、`src/renderer/src/components/UsageView.tsx`（大窗+趋势图+日历选择器）/ `UsageQuota.tsx`（入口按钮+小窗+QuotaRow+useProviderQuotas）；i18n `usage*` / `quota*` 词条（zh+en）
+- **Antigravity 当前账号 + 分组余量（本对话新增）**：小窗与大窗的余量区在 kimi/minimax/deepseek 行之外，额外显示**当前登录的 agy 账号邮箱 + Claude 组 5小时/7天额度剩余量**（带重置倒计时；账号行不带引擎图标，纯文字标签）；Gemini 组额度在主进程数据源头过滤，**所有展示位（悬浮小窗/用量大窗/切号弹窗/设置页账号卡片）一律不显示**；分组名同样不展示（用户只用 claude，「Claude and GPT」字样在窄卡片只会被截断）— group 字段在主进程直接归一为时间窗标签（5小时/7天，与 kimi/minimax 行措辞对齐），所有展示位直显该标签；数据走新 IPC `agyActiveQuota`（只查 keyring 侧活动账号、1 次网络往返，区别于切号弹窗扫全导入池的 `agyQuota`，同 60s TTL 缓存）；无活动账号则整行隐藏；百分比为「剩余」语义（区别 kimi/minimax 的「已用」，显式加「剩」前缀，配色 >30 绿 / 10–30 橙 / <10 红，同切号弹窗）（实现：`agyAccounts.ts` parseQuotaGroups 源头过滤+归一 + `UsageQuota.tsx`）
+- 实现：`src/main/usage/providerQuota.ts`、`SessionManager.usageStats`、`src/renderer/src/components/UsageView.tsx`（大窗+趋势图+日历选择器）/ `UsageQuota.tsx`（入口按钮+小窗+QuotaRow+useProviderQuotas + `AgyQuotaRow`/`useActiveAgyQuota` agy 账号余量行）、`agyAccounts.queryActiveAgyQuota` + IPC `agy:active-quota`；i18n `usage*` / `quota*` / `quotaLeft` 词条（zh+en）
 
 ### 4.17 omp 引擎（第四引擎，Oh My Pi，ACP）
 - **接入形态**：每会话 spawn 一个 `omp acp` 子进程（ACP ndjson stdio，复用 kimi 的 `@agentclientprotocol/sdk` 基建）；Windows 原生单 exe（`%LOCALAPPDATA%\omp\omp.exe`，不依赖 bun/node），解析顺序：设置显式路径 → 安装器默认位置 → PATH
@@ -324,15 +349,15 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
   - 运行中：单卡停止钮 + 「进行中」列头全部停止钮
   - Goal 会话：卡面显目标文本 + 预算进度条 + 暂停/续跑钮
 - **信息密度**：Plan 进度环（SVG 圆环 N/M）· 完成卡成果摘要（最终回复首段 + 文件变更数统计 + 未读金点、悬停浮现「标记已读」）· 上下文水位条（>65% 黄 >85% 红，同 Composer 圆环阈值）· 费用/token 角标（有真实 usage 的引擎）· 引擎图标 + 相对时间
-- **赛马泳道条**（有进行中赛马才浮现）：每场一卡，RACE_STAGE_ORDER 七段分段进度条（repairing 视觉归 auditing 段）+ 被打断徽章；**judging 且未采纳 = 「等你决策」**进待办列高亮卡（一键进入赛场）
+- **赛马泳道条**（有进行中赛马才浮现）：每场一卡，RACE_STAGE_ORDER 七段分段进度条（repairing 视觉归 auditing 段）+ 被打断徽章；**judging 且未采纳 = 「等你决策」**进待办列高亮卡（一键进入赛场）；宿主对话已归档的赛马一并收纳——不进泳道/待办列（`raceHostArchived` 共享谓词，src/shared/race.ts），还原宿主后自动回来，数据不删、进宿主对话仍可从 🏇 入口查看；无宿主的赛马不受影响
 - **cron 任务条**：启用任务行内展示下次运行倒计时（零依赖 `cronNext.ts` 前推匹配器）+ 立即运行 / 暂停恢复 / 跳转上次会话，不必进定时任务管理模态
 - **键盘流**：j/k 在全部卡片间移动选中（accent 描边 + 自动滚入视口）、Enter 打开会话/赛场、a 批准选中卡首个待审批、`/` 聚焦搜索；输入汇聚焦时不抢键
-- **任务栏角标**（App 级 useTaskbarBadge，不依赖总控台打开）：待处理数 = 非归档非赛马的 awaiting/error 会话 + judging 未采纳赛马；renderer canvas 画 32×32 红圈（#e5484d）白字（>99 显 99）经 `badgeSet` IPC → `win.setOverlayIcon`，归零即清；侧栏入口角标同源同步
+- **任务栏角标**（App 级 useTaskbarBadge，不依赖总控台打开）：待处理数 = 非归档非赛马的 awaiting/error 会话 + judging 未采纳赛马（宿主已归档的赛马不计，与泳道/待办口径一致）；renderer canvas 画 32×32 红圈（#e5484d）白字（>99 显 99）经 `badgeSet` IPC → `win.setOverlayIcon`，归零即清；侧栏入口角标同源同步
 - **数据安全**：纯增量渲染（只读 sessions/races/goals/queue/lastActivity + 懒水合消息），不触碰消息持久化路径；全部 zustand 选择器遵守稳定引用约开（EMPTY_XXX 常量兑底，见 §五坑表）
 - 实现：`src/renderer/src/components/mission/`（MissionControl.tsx 看板主体 / SessionCard.tsx 卡面直批 / cronNext.ts cron 前推）+ chatStore `dashboardOpen/openDashboard` + App.tsx `useTaskbarBadge`；i18n `mc*` 词条（zh+en）
 
 ### 4.19 提问级回退（Undo to prompt，Claude Code「Undo changes up to this point」同款）
-- **入口**：用户提问气泡 hover 时左侧浮现「↺ 回退到此处」小按钮（气泡左侧悬浮、不占纵向空间）；以下情形不显示：会话忙碌（running/awaiting/sending）、steer 插入消息、Sent as goal 提交、赛马角色会话（赛马流程状态机不允许历史被截断）
+- **入口**：用户提问气泡 hover 时左侧浮现「↺ 回退到此处」小按钮（气泡左侧悬浮，与复制提问按钮纵向堆叠、居下）；以下情形不显示：会话忙碌（running/awaiting/sending）、steer 插入消息、Sent as goal 提交、赛马角色会话（赛马流程状态机不允许历史被截断）
 - **确认弹窗 UndoConfirmDialog**（点击按钮 → 先 `sessionUndoPreview` 拉预览再弹窗）：
   - 有文件变更：说明文案 + 文件行列表（A/M/D 色标 + 文件名 + 绿 `+N` 红 `-M`；被多会话跟踪的文件带黄色「N 会话」徽标警示回退会影响彼此）
   - 无文件变更：提示「确认后移除该提问及后续回复，并把提问放回输入框」
@@ -360,7 +385,56 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **重启恢复**：未完成赛马保留原阶段 + interrupted 标记（judging 纯等待态原样恢复）；进赛马视图「▶ 继续赛马」手动重跑当前阶段（不自动防重启风暴；已落盘产物跳过不重烧）；泳道自行触发会话消息水合（已冲线角色恢复后历史完整可见）
 - **竞态防护（编排器内建）**：阶段链存活标记（链活着时重试/剔除不代推进、resume 拒绝重入防双发 prompt）、代际计数（重跑规划后旧链尸变静默退出）、重试接管让位（链收尾时缺产物方正被重试 → 不抛旧错交棒推进）、定稿同步切阶段防双击 Builder 双发、superseded 中性打断语义（撤回/重跑/剔除的叫停不弹假错误横幅）
 - **赛马视图 UI**：赛程电路 HUD（双规划→交叉反驳→裁判→执行→审计五节点）；泳道渲染**完全复用主区 MessageList**（thinking 动效/shell 动效/自动折叠同源同步），但隐藏主对话专属交互：token 统计行（竞速只看产出，消耗看用量页）、「回退到此处」（编排提问不可回退）、「按此计划实施」（实施走定稿→执行链路）；Plan 卡点击/⚢ 改**弹窗预览**（无右侧面板可用）；裁判阶段 = 冻结产物干净预览（每选手方案文档 md + 反驳/吸纳/辩护折叠，不展全过程原文噪音）；**全阶段整页锁滚**（竞速=泳道内滚；裁判=预览弹性内滚+裁判台固定下部；执行=执行泳道内滚+审计卡固定）；回显气泡超 2000 字预览截断（完整指令照发引擎）；执行阶段「↗ 打开执行会话」可在变更面板逐文件 diff/拒绝
-- 实现：`src/shared/race.ts`（域模型/策略/产物/事件）+ `src/main/race/`（RaceOrchestrator 纯控制流状态机（依赖注入 RaceSessionHost）/ RaceManager 组合根桥 SessionManager+IPC+races.json / racePrompts 各阶段提示词）+ `src/renderer/src/store/raceStore.ts` + `components/race/`（RaceView/RaceCircuit/RaceLane/ArtifactsPreview/JudgePanel/RaceSetup/RoleTuneDialog/EliminateButton/modelCatalogs）；Composer ⚔ 入口；设计文档 `docs/大模型赛马方案.md`
+- **赛后统计（📊 统计卡）**：赛马结束（done）后完成横幅下展示 —— 标题行总用时 + 总 token（↑上行/↓下行），明细表逐环节（双规划/交叉反驳/裁判融合/执行/独立审计/修复回环）列出 用时、Σ token、↑上行、↓下行（列顺序固定：Σ 在 ↑/↓ 之前）；数据源 = RaceGroup.stats 按阶段累计桶（durationMs/inputTokens/outputTokens，随 races.json 持久化 + race.stats 事件实时推）；**计时口径** = 墙钟累计（setStage 切换时结转增量，重试/回炉/audit↔repair 回环都累加；judging 含用户决策/批注等待；重启后由「▶ 继续赛马」重新起表，停机时段不计）；**token 口径** = 角色回合交卷时逐内部回合累计 usage 记入当前阶段（失败回合也记 —— token 真实烧掉了）；**kimi code 不参与 token 统计**（无真实 token 上报仅字符估算 approx，与用量页同口径，用时照常计入，卡底部常驻备注）；历史已完赛无 stats 数据时统计卡自动隐藏
+- 实现：`src/shared/race.ts`（域模型/策略/产物/事件/RaceStats 统计桶）+ `src/main/race/`（RaceOrchestrator 纯控制流状态机（依赖注入 RaceSessionHost）/ RaceManager 组合根桥 SessionManager+IPC+races.json / racePrompts 各阶段提示词）+ `src/renderer/src/store/raceStore.ts` + `components/race/`（RaceView/RaceCircuit/RaceLane/ArtifactsPreview/JudgePanel/RaceSetup/RoleTuneDialog/EliminateButton/RaceStatsCard/modelCatalogs）；Composer ⚔ 入口；设计文档 `docs/大模型赛马方案.md`
+
+### 4.21 引擎兼容性审计（优雅降级 + 全量记账）
+- **定位**：应对引擎 CLI 升级带来的协议漂移（砍方法/加事件/改格式）——原则是「对用户静默、对维护者全记账」：降级保证程序不崩（最坏丢个别功能），审计保证维护者不瞎（引擎新增能力也能从未识别消息里第一时间发现）
+- **compatAudit 单例**（`src/main/engine/compatAudit.ts`）：降级点统一入口 `record(engine, kind, detail, raw?)`，三分类 `unknown-event`（引擎发来不认识的事件/通知）/ `rejected-method`（我方调用被拒）/ `parse-error`（报文解析失败）；按指纹（engine+kind+detail）内存聚合计数，原始报文样本落 `userData/logs/compat-audit.jsonl`（每指纹只落前 3 条、单条截断 2000 字符，防高频未知事件刷爆磁盘）；`record()` 全程 try/catch，审计自身故障不反噬会话链路；重启后计数清零但 JSONL 留存全部历史
+- **四引擎插桩点**：kimi = 未知 sessionUpdate + `unstable_forkSession`/`unstable_setSessionModel` 被拒；omp = 未知 sessionUpdate + fork 被拒；codex = 未知通知/item/server request + rpc 层集中记 -32601（新增 `RpcError` 保留错误码，此前错误码被抛弃只剩文本）+ 畸形 JSON 帧（以 `{` 开头却解不动才记，banner/日志行不误报）；opencode = 未知 SSE 事件/part + fork 非 2xx + SSE 解析失败（EventHub 层）
+- **白名单防噪**：已知且刻意不渲染的类型不算漂移不入账 — kimi/omp 的 user_message_chunk/session_info_update/plan_removed；codex 的 thread/started 与各类 `*Delta` 流（后缀豁免）、item 的 userMessage/agentMessage/reasoning；opencode 的 session.status/diff/updated、part 的 step-start/snapshot/patch/file —— 保证黄点只对真正的未知行为亮
+- **UI 入口**：侧栏齿轮按钮右上角**小黄点**（有条目才亮，不弹窗不打断，悬停提示）；设置 → 模型页底部**「引擎兼容性诊断」卡**：无条目显绿色「未发现协议异常」；有条目按引擎分组列「分类徽标 + 明细（等宽字体）+ ×次数 + 最近时间」，附「打开审计日志位置」钮（openIn explorer 定位 JSONL，日志仅首条记账后存在故无条目时不给钮）
+- **数据链路**：IPC `compat:audit-get`（启动拉存量）+ 推送通道 `compat:audit`（1.5s 节流，新指纹/计数增长时整快照推）；chatStore `compatAudit` 字段为小黄点与诊断卡共同数据源；类型定义 `shared/types.ts`（CompatAuditKind/Entry/Snapshot）
+- **维护工作流**：引擎升级 → 跑一轮会话 → 黄点亮 → 诊断卡看条目（如 `codex · 方法被拒 · thread/fork ×3`）→ JSONL 取原始报文 → 只改对应 adapter；新引擎版本常规发来的新事件确认无需适配后加进白名单消音
+
+### 4.22 品牌 loading 动效体系（全应用等待态统一，2026-07-30）
+- **定位与铁律**：所有「进行中 / 等待 / 加载」指示一律用品牌组件 `src/renderer/src/components/brand.tsx`，禁止通用 spinner（lucide Loader2/图标旋转、animate-spin/animate-pulse 表达 loading、孤立无动效纯文字「加载中…」）；规范已固化为强制规则**双轨落盘**：`.qoder/rules/brand-loading.md`（Qoder 会话常驻注入）+ 根目录 `AGENTS.md`（本轮新建，codex/kimi/opencode 等其它引擎可读，含项目一句话/目录结构/常用命令/规范全文），两份内容一致、修改任意一份必须同步另一份
+- **组件选型**：行内/按钮/列表行 = `BrandSpinner size 11–18`（三星芒✦错峰轮闪）；大场面（空态/面板级等待/仪式感）= `BrandHero size≥48`（拉杆全叙事）；静态 logo = `BrandMark`；图标按钮进行态写法 `{busy ? <BrandSpinner/> : <原图标/>}`；宽≥300px 横幅禁塞 <15px 三星（退化成三个灰点无品牌辨识度）；暂停态 `spinning={false}` 定格；品牌动画**不加 prefers-reduced-motion 降级**（loading 是运行状态语义非装饰，历史决策勿「规范化」回来）
+- **BrandHero 拉霸因果时序叙事（用户拍板：拉杆拉动星芒才闪）**：3.2s 周期 = 待机全暗（0–8%）→ 拉杆下压 100°（8–16%）→ 回弹+机身抖（滚轮转，19–26%）→ 三星 31/37/43% 依次爆亮（scale 1.35）→ 齐亮至 80% → 同步熄灭（80–90%）等下一把；**关键实现约束**：「点亮错峰、熄灭同步」无法用 animation-delay 相位偏移实现（整条时间轴都会偏，熄灭窗口错开→三星永不同暗、丢失拉杆→中奖因果感），必须拆三组独立 keyframes（brand-jackpot-1/2/3，index.css）各自挂 .brand-jack-1/2/3 类；browser-use 定格采样（getAnimations + currentTime）逐帧验证全时序
+- **SVG 动效技术红线**（改 brand.tsx 时）：渐变必须 `gradientUnits="userSpaceOnUse"`（纯横/竖线段 objectBoundingBox 零面积渐变失效不渲染）；定位平移放外层 `<g transform>`、动画类只挂内层元素（CSS transform 整体覆盖元素自身 SVG transform，同层会飞回原点）
+- **全应用清扫（多轮，约 20 处）**：方法论从「关键词 grep 搜表象」升级为「从等待状态源头穷举」（useState 忙标志 / null·undefined 异步三态 / store 运行态，逐一追渲染分支，43 个 tsx 全覆盖）。代表性改点：主聊天流底部活动指示器（lucide Asterisk 旋转→BrandSpinner，shimmer 保留）· 赛马审计横幅/RightDock sidechat 等待/DiffView/RaceLane 等待输出/SettingsView 配置读取等面板级等待→BrandHero 48 · RoleTuneDialog 保存/RaceSetup 发令/MissionControl 与定时任务「立即运行」等按钮进行态→BrandSpinner · UsageQuota 悬浮窗 totals 孤立「…」占位→行内 BrandSpinner
+- **附带补齐的等待态 UX**（清扫中发现的真空白）：ScheduledView 任务列表与 FileTree 根目录增加三态区分（加载中 undefined vs 空 [] 不再闪误导性空态）；WorkspaceDialog 创建/保存与定时任务表单保存增加 busy 指示 + disabled 防连点重复提交；UsageView 趋势图数据未到达时同高（280px）BrandHero 占位防卡片塌陷
+- **豁免面（不属 loading，审过确认不改）**：状态呼吸灯（会话状态点/心跳「执行中」绿点/待回答提醒等 animate-pulse 状态指示）· ContextRing 上下文占用量表（按百分比画弧的数据仪表非转圈）· Composer「执行中…」textarea placeholder（纯字符串属性塞不进组件，运行态已由流内品牌指示器+停止钮双重表达）· TerminalPanel（xterm 光标即就绪反馈）· ArtifactsPreview（纯静态渲染冻结产物无异步）· shimmer-text 文字流光（行内极小空间可单独用）
+- 实现：`brand.tsx`（三组件）+ `styles/index.css`（brand-jackpot-1/2/3 等 keyframes）+ `.dev/brand-motion-preview.html`（动效调参预览页）；规范 `AGENTS.md` / `.qoder/rules/brand-loading.md`
+
+### 4.23 Antigravity 账号导入池与设置区块（第五引擎账号管理，2026-07-30）
+- **导入池铁律（用户拍板）**：本程序**只能使用用户显式导入的 Antigravity 账号**——列表/切号/额度扫描全部只认导入池，未导入的 cockpit 账号不列出、不切、不查（cockpit 库仅导入弹层只读扫描一次）；导入 = 拷贝凭据副本到 `userData/agy-accounts.json`（明文 JSON，用户选定；每条 `{id, email, refreshToken, idToken?, importedAt}`），**全程无 OAuth 登录流程**（refresh_token 实测不轮换可反复现刷，集成文档 §3.9）；移除只删本程序副本不碰 cockpit/keyring；凭据失效处置 = cockpit 重新登录后再导一次覆盖
+- **两条导入路径**：① cockpit 账号库勾选（候选弹层**只列未导入的账号**，已导入判定按 id 或邮箱双重匹配（文件导入的条目池内 id = 邮箱，只比 cockpit id 会漏判）；无 refresh_token 置灰不可选；全部导过时明示「已全部导入」；写入也按 id 或邮箱去重、命中保留原池内 id 只刷凭据，防同邮箱重复条目）；② 导出文件导入（支持顶层数组 `[{email, refresh_token}]`（cockpit 生态 accounts_export 格式，tags 等多余字段忽略）或 `{accounts:[…]}` 包装；字段名兼容 refresh_token/refreshToken、id_token/idToken；id_token 可缺（切号/查额都用 refresh_token 现刷）；按 email 去重覆盖且保留原池内 id；缺字段条目跳过并提示条数；格式不识别报错不动现有池；**兼任刷新凭据通道**（已导入账号不再进 cockpit 候选，重导覆盖走此路径））；文件选择框 + 解析全在主进程，renderer 不接触凭据内容；导入即拷贝，源导出文件可删
+- **设置 → 模型 →「Antigravity 账号」卡片**：头部 = 已导入计数 + 刷新额度钮（busy 态 BrandSpinner）；账号展示为**两列卡片网格**（cockpit 同款风格，用户拍板裁剪：不显示积分/标签/PRO 档位——只展示真实持有的信息）：邮箱 +「当前」徽标（或「切换」钮）+ 移除 ✕；内嵌额度面板两列只列 Claude 组的 5小时/7天两窗（Gemini 组不显示、分组名不显示，均主进程源头裁剪）：时间窗标签、剩余 %（>30% 绿 / 10–30% 橙 / <10% 红）、进度条、重置倒计时（「X天X小时后重置」）；不显示导入时间；**当前活动账号置顶 + 高亮描边**（仅展示层排序，其余保持导入顺序——与切号弹窗同一排序规则）；额度失败态兜底（单账号错误行内显示 / 整批失败提示点刷新重试，不永久停留「加载中」）
+- **手动切号（设置页）**：非当前账号卡片「切换」钮，复用切号弹窗同一 IPC（enterprise 现刷 → 构造 blob → CredWrite 覆写 keyring → 更新 google_accounts.json active），agy 下次调用即新账号；与会话内切号弹窗的区别 = 不携带「继续」会话续接（设置页无会话上下文）；切号弹窗同步改为只列导入池，空池空态指引去设置页导入
+- **agy 默认模型 + 隐藏模型管理**（同卡片内）：默认模型下拉（settings.antigravityDefaultModel，全局设置与账号解耦，composer 未显式选模型时生效，空值 = 跟随 claude-sonnet-4-6）；隐藏模型列表（settings.antigravityHiddenModels，眼睛开关，openchamber 同款黑名单机制——只影响本程序内模型选择器/赛马配置，不限制 agy 实际可用模型；已隐藏的不进默认模型候选，当前默认除外）
+- **额度链路（与推理解耦，只扫导入池）**：enterprise client 现刷 → loadCodeAssist 取 project_id → retrieveUserQuotaSummary；全部 Google 请求走 `net.fetch`（Chromium 网络栈跟随系统代理）+ 15s 超时，并行扫描 + 单账号 best-effort；响应解析已按实测结构校准（`groups[].buckets[]`：window weekly/5h 两桶各出一行、remainingFraction 换算利用率、resetTime 换算倒计时、description 尾部提取组内模型清单），未知形态降级宽松字段猜测，解析出 0 组时 compatAudit 留档原始报文供校准（不静默丢数据）；60s TTL 缓存 + in-flight 去重，导入/移除后自动失效
+- **安全边界**：凭据与切号逻辑全在主进程，renderer 只拿脱敏快照（email/id/importedAt，无 token）；OAuth client secret 不落源码（环境变量或 gitignored `.dev/agy-clients.json`）
+- **空 error_message 红条兜底（本对话新增）**：agy `error_message` step 无 text/message 时，红条不再只显孤立「模型报告错误」，而是拼 `step_index`/`state` + 精简原始 step JSON（剔除 conversation_id/text_delta/text/message 噪音、截断 500 字），暴露空错误步真实字段以便定位（`AntigravityAdapter.describeEmptyError`）
+- 实现：`src/main/engine/antigravity/agyAccounts.ts`（导入池存储/候选扫描/文件导入/切号/额度 + `queryActiveAgyQuota` 当前账号余量）+ `AntigravityAdapter.ts`（默认模型兜底 / `describeEmptyError` 空错误诊断）+ IPC `agy:accounts-list / import-candidates / accounts-import / accounts-import-file / account-remove / account-switch / quota / active-quota`（`shared/ipc.ts`、`main/ipc.ts`、preload）+ `SettingsView.tsx`（AntigravityAccountsCard：账号 / 默认模型 / 隐藏模型）+ `Composer.tsx`（ModelPicker 隐藏过滤）/ `race/modelCatalogs.ts`（赛马隐藏过滤）+ `AntigravityAccountDialog.tsx`（导入池化 + 空态指引）；方案依据 `docs/antigravity-integration.md`
+
+### 4.24 顶部钉住当前提问（QuestionPin，2026-07-30）
+- 交互：某条提问气泡**完全滚出视口上缘**后，消息区顶部浮出一颗右对齐的提问胶囊（与用户气泡同色系 `bg-bg-active`、圆角胶囊 + 描边 + 阴影、单行 truncate 摘要，与消息列同轴 max-w-3xl 右对齐呼应提问本来的位置）；点击胶囊平滑滚动回跳到该提问（与 TurnRail 跳转手感一致）
+- 接棒与防重叠（sticky 分组头手感）：下一条提问顶缘侵入胶囊占据的顶部区域（8px 边距 + 胶囊实高 + 6px 间隙）时，按侵入量 `translateY` 把胶囊往上推出视口（外层 overflow-hidden 裁切），越过顶缘后接棒换字，全程无重叠；接棒换字带 180ms 从上滑入动画（key=消息 id 触发重播），被上推期间关掉入场动画防与推出位移叠加闪跳，transition 收紧为 colors 防 transform 被过渡拖慢跟不上滚动
+- 数据安全：纯只读浮层——只读 store messages 派生，不改消息流布局、不碰任何消息数据与持久化路径
+- 测量：同 TurnRail 方案（`data-msg-id` 锚点 + `offsetTop`，scroller 为 relative 定位父）；滚动 rAF 节流 + ResizeObserver 监听内容高度变化（流式输出/折叠展开）重算，消息增删（新提问/回退截断）立即重算
+- 范围：仅主对话区 ChatView（sidechat 侧栏与赛马泳道空间小暂不启用）
+- 实现：`src/renderer/src/components/QuestionPin.tsx`（挂载于 ChatView 消息滚动区顶部浮层）+ index.css `question-pin-in` 入场动画；i18n 词条 `pinnedQuestionJump`（zh+en）
+
+### 4.25 Antigravity 额度不足自动切号（阈值驱动 + 耗尽兜底，2026-07-30）
+- **两层触发（用户拍板：阈值检测为主、耗尽报错为兜底）**：① **主动·阈值**——每个 antigravity 回合**正常收尾**后，查当前活动账号余量（`agyActiveQuota`，60s 缓存），任一时间窗（5小时/7天）剩余低于阈值即预切，赶在耗尽前换号；② **反应式·兜底**——回合真因额度**耗尽报错**时（`reportQuotaExhaustion` 确认某窗 utilization≥99.95% 后 emit 的 `error` 带结构化标记 `quotaExhausted:true`，渲染层据此识别、不靠文案字符串匹配）补切
+- **挑号策略（`pickAgySwitchTarget` 纯函数）**：三道硬门槛 = 查得到(ok) + 非当前账号 + **两个时间窗剩余都 ≥ 阈值**（任一窗低就快堵，Claude 组双窗同时约束）；合格池按「**短板窗** min(各窗剩余) 最厚」优先（可用寿命由更紧的窗决定，短板最厚 = 切过去最耐用、最不易立刻再触发——阈值+buffer 门槛天然防抖，替代「切号次数上限」）；无合格目标则**不硬切**
+- **切完接回（按会话类型分流）**：普通会话——主动切静默换 keyring（下一回合自然用新号）+ 系统公告一条，耗尽切换号后发「继续」接回；**赛马会话——换号后走 `raceResume(raceId)` 重跑当前阶段**（而非把「继续」发给编排器不监听的隐藏角色会话）；无合格目标时耗尽兜底回退**手动切号弹窗**让用户定夺，主动切则静默放弃不打扰
+- **切号弹窗触发口径变更（用户拍板）**：原「任何 antigravity 回合报错都自动弹切号窗」**删除**——切号弹窗/自动切**只在确认额度耗尽时出现**，非额度类错误（网络/工具错，切号救不了）一律不弹；手动切号弹窗的 `switchAgyAccount` 同步改为**赛马感知**（角色会话切后 `raceResume`、普通会话发「继续」），修复此前赛马场景弹窗切号接不回的缺陷
+- **并发与全局性护栏**：agy 认证真源是**全局唯一一条 keyring**（切号影响所有 antigravity 会话，见 §4.23/集成文档 §3.7），故 `agyAutoSwitchInflight` 全局互斥只允一个切换在途；赛马主动切时若**同场还有角色在跑则跳过**（避开某 agy 刚 spawn、尚未读完 keyring 的启动竞态临界区；一旦进程跑起即免疫后续切号，在途回合不受影响）
+- **会话续接无损（实测坐实，集成文档 §3.8）**：切号不丢上下文——agy 对话历史存**本地 SQLite**（按 CLI 安装存储、不按账号），续接时从本地重放整段历史发给新账号；代价 = 整段历史 token 重计入新账号（实测 input ~19k→40k），长对话轮换的额度成本已隐含在「挑短板最厚账号留 buffer」的策略里
+- **设置项**：设置 → 模型 →「Antigravity 账号」卡片内「额度不足时自动切号」开关（`settings.antigravityAutoSwitch`，**默认关**，保留手动兜底）+ 切号阈值输入（`settings.antigravityQuotaThreshold`，剩余百分比，**默认 15**，0–100 钳制）
+- 实现：`src/renderer/src/store/chatStore.ts`（`pickAgySwitchTarget` / `autoSwitchAgy` / `maybeProactiveSwitchAgy` 编排 + turn.ended 主动检测 + `case 'error'` quotaExhausted 兜底 + `switchAgyAccount` 赛马感知）+ `AntigravityAdapter.ts`（`reportQuotaExhaustion` 补 `quotaExhausted` 标记）+ `shared/types.ts`（AppSettings 两字段 + EngineEvent error 加 `quotaExhausted?`）+ `config/settings.ts`（DEFAULTS/migrate 回填钳制）+ `SettingsView.tsx`（开关 + 阈值 UI）；复用 IPC `agy:quota / active-quota / account-switch / accounts-list`、`race:resume`
 
 ## 五、关键实测结论（新对话必读的坑）
 
@@ -408,6 +482,7 @@ cyberslots/
 │  ├ engine/EngineAdapter.ts 引擎接口（prompt/cancel/setModel/setMode/fork?/compact?/steer?）
 │  ├ engine/SessionManager.ts 会话中枢（fork/forkToEngine/steer/compact/markRead/通知/contextSeed）
 │  ├ engine/changeTracker.ts + shadowGit.ts 变更台账与影子 git 快照（接受·回退 + 逐提问 marks 还原点，§4.19）
+│  ├ engine/compatAudit.ts 引擎兼容性审计单例（降级点记账：指纹聚合计数+JSONL样本+节流推送，§4.21）
 │  ├ engine/kimi/       KimiAdapter.ts resolveKimi.ts thinkSplitter.ts
 │  ├ engine/codex/      CodexAdapter.ts rpc.ts(ndjson-rpc) resolveCodex.ts
 │  ├ engine/opencode/   OpencodeAdapter.ts OpencodeServerHost.ts OpencodeEventHub.ts resolveOpencode.ts
@@ -425,12 +500,12 @@ cyberslots/
 │  ├ store/chatStore.ts 唯一状态源（事件折叠/队列/goal/effort/筛选/心跳/opencodeCatalog 懒加载）
 │  └ components/        App Sidebar NewSessionView ChatView(含rail+心跳) Composer(功能区全家桶)
 │                       ChipInput(contenteditable+文件chip) EngineIcon(引擎品牌SVG,currentColor随主题) SlashMenu(斜线命令补全弹层) OpencodeModelPicker(完整版选择器) SelectionChip(选区卡片+快照预览)
-│                       TurnRail(回合导航刻度条, codex同款, §4.15)
+│                       TurnRail(回合导航刻度条, codex同款, §4.15) QuestionPin(顶部钉住当前提问, §4.24)
 │                       mission/(MissionControl看板 SessionCard卡面直批 cronNext, §4.18)
 │                       UsageView(用量统计大窗, §4.16) UsageQuota(用量入口+悬浮小窗+余量行)
 │                       TerminalPanel(xterm内嵌终端) MessageList(工具聚合组+活动指示器, §4.3) MessageItem(思考块/编辑卡/命令条/To-dos卡/FileTypeIcon) PermissionSheet PlanWidget
 │                       UndoConfirmDialog(提问级回退确认弹窗, §4.19)
-│                       race/(RaceView赛马全屏视图 RaceCircuit赛程HUD RaceLane泳道 ArtifactsPreview产物预览 JudgePanel裁判台 RaceSetup发起面板 RoleTuneDialog调参 EliminateButton二段确认✂ modelCatalogs目录hook, §4.20) + store/raceStore.ts
+│                       race/(RaceView赛马全屏视图 RaceCircuit赛程HUD RaceLane泳道 ArtifactsPreview产物预览 JudgePanel裁判台 RaceSetup发起面板 RoleTuneDialog调参 EliminateButton二段确认✂ RaceStatsCard赛后统计卡 modelCatalogs目录hook, §4.20) + store/raceStore.ts
 │                       SettingsView(全页) ScheduledView WorkspaceDialog ErrorBoundary
 │                       workspace/(Panel FileTree(拖放导入) FilePreview(划选添加到对话) DiffView)
 ├ resources/ai-server/  内嵌代理（上游原样 + config.js shim + package.json CJS 标记）

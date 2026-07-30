@@ -7,7 +7,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import type { CyberSlotsApi } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { EngineEventEnvelope } from '@shared/types';
+import type { CompatAuditSnapshot, EngineEventEnvelope } from '@shared/types';
 import type { RaceEventEnvelope } from '@shared/race';
 
 const api: CyberSlotsApi = {
@@ -43,11 +43,21 @@ const api: CyberSlotsApi = {
   workspaceAnnounce: (workspaceId) => ipcRenderer.invoke(IPC.workspaceAnnounce, workspaceId),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
+  titleGenerate: (text) => ipcRenderer.invoke(IPC.titleGenerate, text),
   usageStats: (query) => ipcRenderer.invoke(IPC.usageStats, query),
   providerQuota: (force) => ipcRenderer.invoke(IPC.providerQuota, force),
   engineConfigsGet: () => ipcRenderer.invoke(IPC.engineConfigsGet),
   opencodeCatalogGet: (force) => ipcRenderer.invoke(IPC.opencodeCatalogGet, force),
   ompCatalogGet: (force) => ipcRenderer.invoke(IPC.ompCatalogGet, force),
+    antigravityCatalogGet: (force) => ipcRenderer.invoke(IPC.antigravityCatalogGet, force),
+    agyAccountsList: () => ipcRenderer.invoke(IPC.agyAccountsList),
+    agyImportCandidates: () => ipcRenderer.invoke(IPC.agyImportCandidates),
+    agyAccountsImport: (ids) => ipcRenderer.invoke(IPC.agyAccountsImport, ids),
+    agyAccountsImportFile: () => ipcRenderer.invoke(IPC.agyAccountsImportFile),
+    agyAccountRemove: (id) => ipcRenderer.invoke(IPC.agyAccountRemove, id),
+    agyAccountSwitch: (accountId) => ipcRenderer.invoke(IPC.agyAccountSwitch, accountId),
+    agyQuota: (force) => ipcRenderer.invoke(IPC.agyQuota, force),
+    agyActiveQuota: (force) => ipcRenderer.invoke(IPC.agyActiveQuota, force),
   themeSync: (appearance) => ipcRenderer.invoke(IPC.themeSync, appearance),
   badgeSet: (dataUrl, description) => ipcRenderer.invoke(IPC.badgeSet, dataUrl, description),
   cronList: () => ipcRenderer.invoke(IPC.cronList),
@@ -78,6 +88,12 @@ const api: CyberSlotsApi = {
       listener(envelope);
     ipcRenderer.on(IPC.engineEvent, wrapped);
     return () => ipcRenderer.removeListener(IPC.engineEvent, wrapped);
+  },
+  compatAuditGet: () => ipcRenderer.invoke(IPC.compatAuditGet),
+  onCompatAudit: (listener) => {
+    const wrapped = (_e: Electron.IpcRendererEvent, snap: CompatAuditSnapshot): void => listener(snap);
+    ipcRenderer.on(IPC.compatAudit, wrapped);
+    return () => ipcRenderer.removeListener(IPC.compatAudit, wrapped);
   },
   raceCreate: (req) => ipcRenderer.invoke(IPC.raceCreate, req),
   raceList: () => ipcRenderer.invoke(IPC.raceList),

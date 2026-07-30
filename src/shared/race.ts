@@ -102,6 +102,24 @@ export function isTerminalStage(stage: RaceStage): boolean {
 }
 
 /**
+ * 宿主对话已归档 → 赛马视为一并收纳：不进总控台泳道/待办列，
+ * 也不计入角标。赛马寄生于宿主对话（侧栏无独立入口），归档宿主
+ * 即用户对整条任务线「收起」的表达；还原宿主后赛马自动回来。
+ * 无宿主的赛马（总控台直接发起）不受影响。
+ */
+export function raceHostArchived(g: RaceGroup, archivedSessionIds: ReadonlySet<string>): boolean {
+  return g.parentSessionId != null && archivedSessionIds.has(g.parentSessionId);
+}
+
+/**
+ * 赛马正在进行（占用引擎回合或等用户决策/批注，未被打断）——
+ * 宿主对话归档拦截用：被打断的赛马已停摆，允许归档宿主一并收纳。
+ */
+export function isRaceActive(g: RaceGroup): boolean {
+  return g.stage !== 'done' && g.stage !== 'config' && !g.interrupted;
+}
+
+/**
  * Read-only permission mode per engine, mirroring the sidechat convention:
  * codex/opencode/omp use `plan` (read-only sandbox); kimi has no read-only
  * mode —— 赛马无人值守跑长链路，泳道又没有审批操作区，kimi 若用
@@ -154,6 +172,37 @@ export interface RaceAuditResult {
   issues: string[];
 }
 
+// -------------------------------------------------------------- run stats
+
+/** 有实际工作量的阶段（config/done 不计时不计量）。 */
+export type RaceWorkStage = Exclude<RaceStage, 'config' | 'done'>;
+
+/** 统计卡的阶段展示顺序（repairing 排在 auditing 之后）。 */
+export const RACE_WORK_STAGES: readonly RaceWorkStage[] = [
+  'planning',
+  'rebuttal',
+  'judging',
+  'building',
+  'auditing',
+  'repairing',
+] as const;
+
+/**
+ * 单阶段累计统计：用时为墙钟累计（重试/回炉/修复回环都累加，judging
+ * 含用户决策与批注等待）；token 为该阶段各角色回合 usage 之和。
+ * 注意：kimi code 会话无真实 token 上报（仅字符数估算），一律不参与
+ * token 统计（与主进程用量统计口径一致），用时照常计入。
+ */
+export interface RaceStageStats {
+  durationMs: number;
+  /** 上行 token（含缓存命中部分，语义同 UsageInfo.inputTokens）。 */
+  inputTokens: number;
+  /** 下行 token。 */
+  outputTokens: number;
+}
+
+export type RaceStats = Partial<Record<RaceWorkStage, RaceStageStats>>;
+
 /**
  * 双方冻结产物：plan 文档与「攻击对方/自我辩驳」正文（裁判阶段干净
  * 预览用，不含思考/工具过程噪音）。规划、反驳回合结束时由编排器
@@ -196,6 +245,8 @@ export interface RaceGroup {
   annotations: string[];
   /** Latest audit outcome (set during auditing). */
   audit?: RaceAuditResult;
+  /** 各阶段累计用时/上下行 token（kimi 会话不计 token，见 RaceStageStats）。 */
+  stats?: RaceStats;
   /** Repair loop counter and its bound (prevents infinite audit↔repair). */
   repairRound: number;
   maxRepairRounds: number;
@@ -266,6 +317,8 @@ export type RaceEvent =
   | { type: 'race.finalPlan'; version: number; text: string }
   /** Auditor returned a verdict. */
   | { type: 'race.audit'; passed: boolean; issues: string[]; repairRound: number }
+  /** 阶段用时/token 统计更新（阶段收尾或角色回合记账时推送）。 */
+  | { type: 'race.stats'; stats: RaceStats }
   /** Recoverable orchestration error (a role failed, etc.). */
   | { type: 'race.error'; message: string; role?: RaceRole }
   /** Whole race finished (audit passed or repair budget exhausted). */

@@ -3,24 +3,25 @@
  * then Chat (no workspace) or Work (bound to a project folder).
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FolderGit2, FolderOpen, MessageCircle, Layers } from 'lucide-react';
 
 import type { EngineId, WorkspaceInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
-import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
+import { EngineIcon, ENGINE_LABELS, useEngineOrder } from './EngineIcon';
 import { BrandHero, BrandSpinner } from './brand';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
-const ENGINES: Array<{ id: EngineId; hint: string }> = [
-  { id: 'codex', hint: '主引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）' },
-  { id: 'opencode', hint: '第二引擎 · HTTP · 直连 opencode 已连接的 provider（zen 免费模型免登录可用）' },
-  { id: 'kimi', hint: '第三引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）' },
-  { id: 'omp', hint: '第四引擎 · ACP · 直连 ~/.omp 配置（原生 fork/plan 沙箱，子代理/LSP 全工具面）' },
-];
+const ENGINE_HINTS: Record<EngineId, string> = {
+  codex: '主引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）',
+  opencode: '第二引擎 · HTTP · 直连 opencode 已连接的 provider（zen 免费模型免登录可用）',
+  kimi: '第三引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）',
+  omp: '第四引擎 · ACP · 直连 ~/.omp 配置（原生 fork/plan 沙箱，子代理/LSP 全工具面）',
+  antigravity: '第五引擎 · headless · agy CLI（Gemini/Claude 多模型，支持账号切换）',
+};
 
 export default function NewSessionView(): JSX.Element {
   const t = useT();
@@ -29,17 +30,28 @@ export default function NewSessionView(): JSX.Element {
   const creatingEngine = useChatStore((s) => s.creatingEngine);
   const workspaces = useChatStore((s) => s.settings?.workspaces) ?? EMPTY_WORKSPACES;
   const availability = useChatStore((s) => s.engineAvailability);
-  const [engine, setEngine] = useState<EngineId>('codex');
+  // 列表顺序跟随设置 engineOrder；默认选中排序首位引擎。
+  const engineOrder = useEngineOrder();
+  const [engine, setEngine] = useState<EngineId>(engineOrder[0] ?? 'codex');
   const [error, setError] = useState<string | null>(null);
   const [wsDialogOpen, setWsDialogOpen] = useState(false);
+  // 滑动高亮胶囊：测量选中按钮在容器内的位置，用 transform/宽度过渡实现平移而非瞬移。
+  const tabRefs = useRef<Partial<Record<EngineId, HTMLButtonElement | null>>>({});
+  const [pill, setPill] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = tabRefs.current[engine];
+    if (!el) return;
+    setPill({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight });
+  }, [engine, availability, engineOrder]);
 
   // 探测结果到达后，若当前选中引擎未安装 → 自动切到首个可用引擎，
   // 避免默认选中一个置灰项导致建会话必败。
   useEffect(() => {
     if (!availability || availability[engine]) return;
-    const first = ENGINES.find((e) => availability[e.id]);
-    if (first) setEngine(first.id);
-  }, [availability, engine]);
+    const first = engineOrder.find((id) => availability[id]);
+    if (first) setEngine(first);
+  }, [availability, engine, engineOrder]);
 
   const start = async (cwd: string, workspaceId?: string): Promise<void> => {
     setError(null);
@@ -64,25 +76,37 @@ export default function NewSessionView(): JSX.Element {
         <p className="text-ui text-ink-soft">{t('newSessionHint')}</p>
       </div>
 
-      <div className="flex items-center gap-1 rounded-xl border border-line bg-bg-panel p-1">
-        {ENGINES.map((e) => {
+      <div className="relative flex items-center gap-1 rounded-xl border border-line bg-bg-panel p-1">
+        {/* 滑动高亮胶囊：跟随选中项平移，替代逐按钮背景的瞬移切换 */}
+        {pill && (
+          <div
+            className="pointer-events-none absolute rounded-lg bg-bg shadow-sm transition-all duration-300 ease-out"
+            style={{ left: pill.left, top: pill.top, width: pill.width, height: pill.height }}
+          />
+        )}
+        {engineOrder.map((id) => {
           // 未安装置灰展示（可见不可选）；尚未探测（null）时不置灰。
-          const unavailable = availability ? !availability[e.id] : false;
+          const unavailable = availability ? !availability[id] : false;
           return (
             <button
-              key={e.id}
-              title={unavailable ? `${e.hint}（未检测到本机安装，详见设置-模型页）` : e.hint}
+              key={id}
+              ref={(el) => { tabRefs.current[id] = el; }}
+              title={unavailable ? `${ENGINE_HINTS[id]}（未检测到本机安装，详见设置-模型页）` : ENGINE_HINTS[id]}
               disabled={unavailable}
-              onClick={() => setEngine(e.id)}
-              className={`flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${unavailable
+              onClick={() => setEngine(id)}
+              className={`relative flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${unavailable
                 ? 'cursor-not-allowed text-ink-faint opacity-40'
-                : engine === e.id
-                  ? 'bg-bg font-medium text-ink shadow-sm'
+                : engine === id
+                  ? 'font-medium text-ink'
                   : 'text-ink-soft hover:text-ink'
                 }`}
             >
-              <EngineIcon engine={e.id} size={14} />
-              {ENGINE_LABELS[e.id]}
+              <EngineIcon engine={id} size={14} />
+              {/* 隐形加粗占位：预留 font-medium 宽度，选中变粗时不再挤动相邻按钮 */}
+              <span className="grid">
+                <span aria-hidden className="invisible whitespace-nowrap font-medium [grid-area:1/1]">{ENGINE_LABELS[id]}</span>
+                <span className="whitespace-nowrap [grid-area:1/1]">{ENGINE_LABELS[id]}</span>
+              </span>
             </button>
           );
         })}

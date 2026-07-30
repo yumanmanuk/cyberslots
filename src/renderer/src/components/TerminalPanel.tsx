@@ -24,7 +24,7 @@ function readTheme(): Record<string, string> {
   };
 }
 
-export default function TerminalPanel({ termId, cwd, hidden }: { termId: string; cwd: string; hidden: boolean }): JSX.Element {
+export default function TerminalPanel({ termId, cwd, width, hidden }: { termId: string; cwd: string; width: number; hidden: boolean }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -78,8 +78,9 @@ export default function TerminalPanel({ termId, cwd, hidden }: { termId: string;
   }, [termId, cwd]);
 
   // hidden 时保持挂载（xterm 缓冲保活），显示时 ResizeObserver 触发重排。
+  // 宽度由 RightDock 统一管理（dock 左缘把手拖拽）。
   return (
-    <div className={`${hidden ? 'hidden' : 'flex'} w-[440px] shrink-0 flex-col bg-bg-input`}>
+    <div className={`${hidden ? 'hidden' : 'flex'} shrink-0 flex-col bg-bg-input`} style={{ width }}>
       {/* xterm 挂载点：内边距留一点，背景由主题变量驱动 */}
       <div ref={hostRef} className="min-h-0 flex-1 overflow-hidden px-2 py-1.5" />
     </div>

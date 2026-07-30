@@ -10,7 +10,7 @@
 
 // ---------------------------------------------------------------- engines
 
-export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp';
+export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp' | 'antigravity';
 
 /** Session permission mode — union of both engines' surfaces (kimi: default/plan/auto/yolo). */
 export type PermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
@@ -203,6 +203,9 @@ export interface UsageInfo {
   totalTokens?: number;
   /** Tokens served from provider prompt cache (subset of inputTokens). */
   cachedInputTokens?: number;
+  /** 本回合内实际发生的 API 调用次数（工具循环逐次计数）。缺省 = 引擎
+   *  无逐调用信号（omp / 老数据），统计侧按 1 回合兜底。 */
+  apiCalls?: number;
   contextUsed?: number;
   contextMax?: number;
   /** 字符数估算值（kimi ACP 不推 usage 时的兜底），UI 带 ~ 标注。 */
@@ -327,7 +330,7 @@ export type EngineEvent =
       durationMs?: number;
       apiDurationMs?: number;
     }
-  | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider' };
+  | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider'; quotaExhausted?: boolean };
 
 export interface SlashCommandInfo {
   name: string;
@@ -340,6 +343,32 @@ export interface EngineEventEnvelope {
   sessionId: string;
   event: EngineEvent;
   ts: number;
+}
+
+// ------------------------------------------------------------ compat audit
+
+/** 引擎兼容性审计事件分类：降级对用户静默，对维护者全记账。
+ *  unknown-event = 引擎发来不认识的事件/通知（可能是新增能力）；
+ *  rejected-method = 我方调用被引擎拒绝（Method not found 等，可能被砍）；
+ *  parse-error = 协议流里解析失败的报文（格式漂移信号）。 */
+export type CompatAuditKind = 'unknown-event' | 'rejected-method' | 'parse-error';
+
+/** 同一指纹（kind + detail）的聚合条目 — 原始报文样本落磘 JSONL，
+ *  内存只留计数，防高频未知事件刷爆。 */
+export interface CompatAuditEntry {
+  kind: CompatAuditKind;
+  /** 指纹明细：事件名 / 方法名 / 解析场景。 */
+  detail: string;
+  count: number;
+  firstTs: number;
+  lastTs: number;
+}
+
+/** compat:audit-get 返回体，也是 compat:audit 推送体。 */
+export interface CompatAuditSnapshot {
+  engines: Partial<Record<EngineId, CompatAuditEntry[]>>;
+  /** JSONL 审计日志绝对路径（UI「打开日志位置」用）。 */
+  logFile: string;
 }
 
 // ------------------------------------------------------------- settings
@@ -508,11 +537,100 @@ export interface RouteSupport {
   reason?: string;
 }
 
+/** Antigravity CLI (`agy`) 只读快照（静态探测，不进会话）。永不写入。 */
+export interface AntigravityConfigSnapshot {
+  installed: boolean;
+  version?: string;
+  cliPath?: string;
+  /** cockpit 账号池目录（~/.antigravity_cockpit/accounts）存在性 — 仅展示。 */
+  configPath?: string;
+  configExists?: boolean;
+  error?: string;
+}
+
+/** `agy models` 两列文本解析后的单个模型条目（slug 即 --model 参数值）。 */
+export interface AntigravityModelEntry {
+  slug: string;
+  displayName?: string;
+  /** 思考档位（claude 系支持 low/medium/high；gemini flash slug 已含档位）。 */
+  efforts?: string[];
+}
+
+export interface AntigravityCatalog {
+  models: AntigravityModelEntry[];
+  error?: string;
+}
+
+/** 单个 Antigravity 账号（本程序导入池；凭据副本存 userData/agy-accounts.json）。 */
+export interface AgyAccount {
+  id: string;
+  email: string;
+  name?: string;
+  lastUsed?: number;
+  /** 导入时间戳。 */
+  importedAt?: number;
+}
+
+/** 导入池快照 + 当前活动账号。accounts 仅含用户显式导入的账号 —
+ *  未导入的 cockpit 账号本程序不列出、不切号、不查额度。 */
+export interface AgyAccountsSnapshot {
+  accounts: AgyAccount[];
+  /** 当前 keyring/google_accounts 侧的活动邮箱。 */
+  active?: string;
+  /** cockpit 侧记录的当前账号 id（活动邮箱匹配不上时的回退）。 */
+  cockpitCurrentId?: string;
+  error?: string;
+}
+
+/** 导入弹层里的 cockpit 候选账号（只读扫描，仅导入时用）。 */
+export interface AgyImportCandidate {
+  id: string;
+  email: string;
+  name?: string;
+  /** 已在导入池中。 */
+  imported: boolean;
+  /** cockpit 账号文件里是否有 refresh_token（无则不可导入）。 */
+  hasToken: boolean;
+}
+
+/** 单个「分组周额度」（Gemini 组 / Claude+GPT 组）。 */
+export interface AgyQuotaGroup {
+  group: string;
+  /** 已用百分比 0–100。 */
+  utilization: number;
+  /** 距周额度重置的剩余秒数。 */
+  resetsInSeconds?: number;
+  /** 组内模型名（展示用）。 */
+  models?: string[];
+}
+
+/** 单个账号的额度查询结果（走 cockpit 链路，与推理解耦）。 */
+export interface AgyQuotaInfo {
+  email: string;
+  accountId: string;
+  ok: boolean;
+  error?: string;
+  groups: AgyQuotaGroup[];
+  queriedAt: number;
+}
+
+/** 「当前活动账号」的额度（用量小窗/大窗常显）。只查 keyring 侧活动账号，
+ *  1 次网络往返，区别于 AgyQuotaInfo[]（扫全账号、切号弹窗用）。 */
+export interface AgyActiveQuota {
+  /** 当前活动邮箱（google_accounts.json active）；无则 undefined。 */
+  email?: string;
+  ok: boolean;
+  error?: string;
+  groups: AgyQuotaGroup[];
+  queriedAt: number;
+}
+
 export interface EngineConfigsSnapshot {
   kimi: KimiConfigSnapshot;
   codex: CodexConfigSnapshot;
   opencode: OpencodeConfigSnapshot;
   omp: OmpConfigSnapshot;
+  antigravity: AntigravityConfigSnapshot;
   routeSupport: { kimi: RouteSupport; codex: RouteSupport };
 }
 
@@ -572,6 +690,18 @@ export interface ContextFallbackRule {
   to: string;
 }
 
+/** 会话标题生成方式：program = 截取首条消息前 24 字；ai = 调用
+ *  OpenAI 兼容接口生成短标题（失败自动回退截取式）。 */
+export interface TitleGenSettings {
+  mode: 'program' | 'ai';
+  /** OpenAI 兼容 API base，如 https://api.openai.com/v1。 */
+  baseUrl: string;
+  /** 密钥随 settings 同步仅供设置页编辑；实际请求只在主进程发起。 */
+  apiKey: string;
+  /** 模型名，如 gpt-4o-mini。 */
+  model: string;
+}
+
 export interface AppSettings {
   /** 明暗模式：浅色 / 深色 / 跟随系统。 */
   themeMode: ThemeMode;
@@ -586,6 +716,8 @@ export interface AppSettings {
    *  不压缩而是热切到命中 to 的可用模型继续任务。默认内置 k3 256k → k3。 */
   contextFallbackRules: ContextFallbackRule[];
   notifications: NotificationSettings;
+  /** 会话标题生成设置。 */
+  titleGen: TitleGenSettings;
   workspaces: WorkspaceInfo[];
   /** 赛马默认配置（各角色引擎/模型/思考档 + 第三选手开关）。 */
   race: RaceSettings;
@@ -594,6 +726,22 @@ export interface AppSettings {
   /** opencode 隐藏模型黑名单（slug = providerID/modelID）。默认全显示，
    *  只影响本程序内的选择器/赛马配置展示 — 不写 opencode 配置文件。 */
   opencodeHiddenModels: string[];
+  /** antigravity 新会话的默认模型 slug（空 = 用适配器内置默认 claude-sonnet-4-6）。
+   *  仅作用于「未显式选模型」的新会话；已有会话与显式选择不受影响。 */
+  antigravityDefaultModel?: string;
+  /** antigravity 隐藏模型黑名单（slug）。默认全显示，只影响本程序内的
+   *  模型选择器/赛马配置展示 — 不限制 agy 实际可用模型。 */
+  antigravityHiddenModels: string[];
+  /** 额度不足时自动切换 antigravity 账号（默认关）。开启后：回合结束
+   *  后主动检测当前账号余量，低于阈值就换到有 buffer 的账号（普通会话
+   *  静默换、赛马换后 raceResume）；真耗尽报错时作兜底。 */
+  antigravityAutoSwitch: boolean;
+  /** 自动切号额度阈值（剩余百分比 0–100）。任一时间窗剩余低于此
+   *  值即视为不足；挑目标账号时要求两个窗都 ≥ 此值（buffer 门槛防拖抽）。 */
+  antigravityQuotaThreshold: number;
+  /** 引擎选择列表的展示顺序（新建会话、侧栏快捷创建、切换引擎、
+   *  赛马角色下拉统一生效）。缺失/非法项由读取端剔除并补全到末尾。 */
+  engineOrder: EngineId[];
 }
 
 // ------------------------------------------------------------ cron tasks

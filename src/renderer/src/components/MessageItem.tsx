@@ -103,12 +103,13 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
 
 /** 用户提问气泡 + hover 回退入口（Claude Code 的 Undo changes up to
  *  this point 同款）：确认弹窗列出将被一并撤销的文件变更；确认后
- *  还原文件、截断消息，并把提问回填输入框。 */
+ *  还原文件、截断消息，并把提问回填输入框。另附 hover 复制提问按钮。 */
 function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'user' }>; sessionId: string }): JSX.Element {
   const t = useT();
   const status = useChatStore((s) => s.sessions.find((m) => m.id === sessionId)?.status);
   const sending = useChatStore((s) => !!s.sending[sessionId]);
   const [undoOpen, setUndoOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   // undefined = 预览加载中；null = 无快照；[] = 无文件变更。
   const [preview, setPreview] = useState<SessionChangeEntry[] | null | undefined>(undefined);
   // 赛马角色会话：提问由编排器发出，回退会截断角色历史/还原文件，
@@ -126,19 +127,36 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
     void window.cyberslots.sessionUndoPreview(sessionId, msg.id).then(setPreview).catch(() => setPreview(null));
   };
 
+  const copyQuestion = (): void => {
+    if (!msg.text) return;
+    void navigator.clipboard.writeText(msg.text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
   return (
     <div className="group/user flex items-start justify-end gap-2">
-      {/* 回退入口悬浮在气泡左侧（截图同款位置），不占纵向空间。 */}
-      {canUndo && (
+      {/* 复制提问 + 回退入口悬浮在气泡左侧（截图同款位置），纵向堆叠：复制在上、回退在下。 */}
+      <div className="mt-1.5 flex shrink-0 flex-col items-start gap-0.5">
         <button
-          onClick={openUndo}
-          title={t('undoToHere')}
-          className="mt-1.5 flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/user:opacity-100"
+          onClick={copyQuestion}
+          title={copied ? t('copied') : t('copyQuestion')}
+          className="flex items-center rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/user:opacity-100"
         >
-          <RotateCcw size={10} />
-          {t('undoToHere')}
+          {copied ? <Check size={11} className="text-ok" /> : <Copy size={11} />}
         </button>
-      )}
+        {canUndo && (
+          <button
+            onClick={openUndo}
+            title={t('undoToHere')}
+            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/user:opacity-100"
+          >
+            <RotateCcw size={10} />
+            {t('undoToHere')}
+          </button>
+        )}
+      </div>
       <div className="max-w-[80%]">
         <div className="whitespace-pre-wrap rounded-2xl bg-bg-active px-4 py-2.5 text-body">
           {msg.selections && msg.selections.length > 0 && (
@@ -500,30 +518,17 @@ export function ThinkingBlock({
 }
 
 /**
- * Compact historical record of a permission exchange. Pending requests
- * are actionable in the bottom PermissionSheet; here we only show a
- * subtle one-liner so the stream keeps its narrative.
+ * 授权交换的进行态提示。用户明确：授权结果不需展示 —— 已作答
+ * 不留痕（已在 buildStream 过滤，这里再兵底一道）。仅在等待中给一行
+ * 知情提示（品牌 spinner + 流光），真正的作答入口在底部 PermissionSheet。
  */
-function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permission' }> }): JSX.Element {
-  const title = msg.title;
-  const answered = msg.answeredOptionId !== undefined;
-  const chosen = msg.options.find((o) => o.optionId === msg.answeredOptionId);
-  const rejected = chosen ? chosen.kind.startsWith('reject') : msg.answeredOptionId === '__cancelled__';
+function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permission' }> }): JSX.Element | null {
+  if (msg.answeredOptionId !== undefined) return null;
   return (
-    <div className="flex items-center gap-2 text-ui text-ink-faint">
-      {answered ? (
-        rejected ? <X size={13} className="shrink-0 text-err" /> : <Check size={13} className="shrink-0 text-ok" />
-      ) : (
-        <BrandSpinner size={13} className="shrink-0 text-warn" />
-      )}
-      <span className="min-w-0 truncate">授权：{title}</span>
-      {answered ? (
-        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] ${rejected ? 'bg-err/10 text-err' : 'bg-ok/10 text-ok'}`}>
-          {chosen?.name ?? '已取消'}
-        </span>
-      ) : (
-        <span className="shimmer-text shrink-0 text-[11px] font-medium">Waiting for approval</span>
-      )}
+    <div className="flex items-center gap-2 text-ui" style={{ minHeight: 20 }}>
+      <BrandSpinner size={12} className="shrink-0 text-warn" />
+      <span className="shimmer-text shrink-0 text-[12px] font-medium">Waiting for approval</span>
+      <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-faint">{msg.title}</span>
     </div>
   );
 }
@@ -644,7 +649,7 @@ const TOOL_VERBS: Array<[RegExp, string]> = [
   [/generate_image/, 'Generated'],
 ];
 
-function toolLabel(msg: Extract<UnifiedMessage, { kind: 'tool_call' }>): { verb: string; object?: string } {
+export function toolLabel(msg: Extract<UnifiedMessage, { kind: 'tool_call' }>): { verb: string; object?: string } {
   const name = (msg.toolName ?? '').toLowerCase();
   const object = msg.toolKind === 'read' ? (msg.locations?.[0] ?? msg.title).split(/[\\/]/).pop() : msg.title;
   for (const [re, verb] of TOOL_VERBS) if (name && re.test(name)) return { verb, object };
@@ -661,8 +666,9 @@ function toolLabel(msg: Extract<UnifiedMessage, { kind: 'tool_call' }>): { verb:
   }
 }
 
-/** 无框工具明细行：动词 + 对象 + 命中数，进行中动词带流光，
- *  点击展开输出。既是 Explored 组的明细，也是其它工具的兑底行。 */
+/** 无框工具明细行（20px 紧凑态）：左侧 3px 状态刻度 + 动词 + 对象 +
+ *  命中数；进行中用 BrandSpinner + 动词流光（单独渲染时无组级 spinner，
+ *  这里自带），点击展开输出。既是摘要展开区的明细，也是 mcp/其它工具的兑底行。 */
 export function ToolLine({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }> }): JSX.Element {
   const [open, setOpen] = useState(false);
   const active = msg.status === 'in_progress' || msg.status === 'pending';
@@ -675,20 +681,24 @@ export function ToolLine({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_c
       <button
         onClick={() => detail && setOpen(!open)}
         className={`group flex w-full items-center gap-2 text-left ${detail ? '' : 'cursor-default'}`}
+        style={{ minHeight: 20 }}
       >
-        <span
-          className={`shrink-0 font-medium ${active ? 'shimmer-text' : failed ? 'text-err' : 'text-ink-soft'}`}
-        >
+        {active ? (
+          <BrandSpinner size={12} className="shrink-0 text-accent" />
+        ) : (
+          <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
+        )}
+        <span className={`shrink-0 text-[12px] ${active ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>
           {verb}
         </span>
         {object && object !== verb && (
-          <span className="min-w-0 truncate font-mono text-[12px] text-ink-soft">{object}</span>
+          <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-faint">{object}</span>
         )}
         {matches != null && !active && (
-          <span className="shrink-0 text-[11.5px] text-ink-faint">{matches} {matches === 1 ? 'result' : 'results'}</span>
+          <span className="shrink-0 text-[10.5px] tabular-nums text-ink-faint/80">{matches}</span>
         )}
-        {failed && <span className="shrink-0 text-[11.5px] text-err">Failed</span>}
-        {msg.status === 'canceled' && <span className="shrink-0 text-[11.5px] text-ink-faint">Canceled</span>}
+        {failed && <span className="shrink-0 text-[10.5px] text-err">failed</span>}
+        {msg.status === 'canceled' && <span className="shrink-0 text-[10.5px] text-ink-faint">canceled</span>}
         {detail &&
           (open ? (
             <ChevronDown size={12} className="shrink-0 text-ink-faint" />

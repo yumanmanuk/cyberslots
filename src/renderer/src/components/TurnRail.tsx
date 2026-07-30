@@ -220,28 +220,49 @@ export default function TurnRail({
 
 // ---------------------------------------------------------------- helpers
 
-/** 每轮问答 = 一条 user 消息 + 同 turnId 的首条 text 回答。
- *  乐观写入的 user 消息（turnId=-1）与引擎 user.echo 会重复，按文本去重。 */
+/** 每轮问答 = 一条 user 消息 + 同 turnId 的首条 text 回答（turn.started 回填后的新数据）。
+ *  turnId 缺失时（乐观 -1 / 修复前的持久化旧历史 / steer·cron 的 echo 固定为 0）退化为
+ *  位置配对：该提问之后、下一个提问之前的首条 text —— 对全历史稳健。
+ *  乐观写入的 user 消息（turnId=-1）与引擎 user.echo 会重叠，按文本去重。 */
 function collectTurns(messages: UnifiedMessage[]): Turn[] {
   const firstText = new Map<number, string>();
-  for (const m of messages) {
-    if (m.kind === 'text' && !firstText.has(m.turnId)) firstText.set(m.turnId, m.text);
+  const entries: { msg: Extract<UnifiedMessage, { kind: 'user' }>; pos: number }[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    if (m.kind === 'text') {
+      if (!firstText.has(m.turnId)) firstText.set(m.turnId, m.text);
+    } else if (m.kind === 'user') {
+      entries.push({ msg: m, pos: i });
+    }
   }
-  const users = messages.filter((m): m is Extract<UnifiedMessage, { kind: 'user' }> => m.kind === 'user');
-  return users
-    .filter((m) => !(m.turnId === -1 && users.some((x) => x.turnId >= 0 && x.text === m.text)))
-    .map((m) => {
-      const answer = m.turnId >= 0 ? firstText.get(m.turnId) : undefined;
-      const heading = answer ? firstHeading(answer) : undefined;
-      let snippet = answer ? plainText(answer) : '';
-      if (heading && snippet.startsWith(heading)) snippet = snippet.slice(heading.length).trim();
-      return {
-        id: m.id,
-        question: m.text.replace(/\s+/g, ' ').trim(),
-        heading,
-        snippet: snippet.slice(0, 180) || undefined,
-      };
+  const all = entries.map((e) => e.msg);
+  const turns: Turn[] = [];
+  for (let e = 0; e < entries.length; e++) {
+    const { msg, pos } = entries[e]!;
+    if (msg.turnId === -1 && all.some((x) => x.turnId >= 0 && x.text === msg.text)) continue;
+    let answer = msg.turnId >= 0 ? firstText.get(msg.turnId) : undefined;
+    if (!answer) {
+      // 位置兜底：该提问之后、下一个提问之前的首条 text。
+      const end = e + 1 < entries.length ? entries[e + 1]!.pos : messages.length;
+      for (let i = pos + 1; i < end; i++) {
+        const x = messages[i]!;
+        if (x.kind === 'text') {
+          answer = x.text;
+          break;
+        }
+      }
+    }
+    const heading = answer ? firstHeading(answer) : undefined;
+    let snippet = answer ? plainText(answer) : '';
+    if (heading && snippet.startsWith(heading)) snippet = snippet.slice(heading.length).trim();
+    turns.push({
+      id: msg.id,
+      question: msg.text.replace(/\s+/g, ' ').trim(),
+      heading,
+      snippet: snippet.slice(0, 180) || undefined,
     });
+  }
+  return turns;
 }
 
 /** markdown → 纯文本（缩略卡摘要用，够用即可不求完备） */

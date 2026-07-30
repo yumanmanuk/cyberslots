@@ -20,6 +20,8 @@ export interface ChipInputHandle {
   focus(): void;
   /** 在当前光标处插入一个文件/文件夹引用胶囊（显示名，序列化为 `名(路径)`）。 */
   insertFileChip(name: string, path: string, dir?: boolean): void;
+  /** 在当前光标处插入代码选区引用胶囊（显示 `文件名 #L起-止`，序列化为 `名#L…(路径)`）。 */
+  insertSelectionChip(sel: { id: string; fileName: string; rangeLabel: string; path: string }): void;
   /** 整体替换为纯文本并把光标移到末尾（斜线命令菜单插入触发词）。 */
   setPlainText(v: string): void;
 }
@@ -30,6 +32,8 @@ interface Props {
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void;
   /** 处理粘贴的图片项；返回 true 表示已消费（阻止默认粘贴）。 */
   onImagePaste?: (items: DataTransferItem[]) => boolean;
+  /** 编辑导致选区胶囊增减后回报当前存活的选区 id（Composer 据此同步删除 store 快照）。 */
+  onSelChipsChange?: (ids: string[]) => void;
   placeholder?: string;
   className?: string;
 }
@@ -58,7 +62,7 @@ function serialize(root: Node): string {
 }
 
 const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
-  { value, onChange, onKeyDown, onImagePaste, placeholder, className },
+  { value, onChange, onKeyDown, onImagePaste, onSelChipsChange, placeholder, className },
   ref,
 ) {
   const elRef = useRef<HTMLDivElement>(null);
@@ -66,6 +70,65 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
   const syncEmpty = (): void => {
     const el = elRef.current;
     if (el) el.dataset.empty = el.textContent || el.querySelector('[data-chip]') ? 'false' : 'true';
+  };
+
+  /** 序列化 + 空态 + 选区胶囊存活名单一次性同步给父组件。 */
+  const emit = (): void => {
+    const el = elRef.current;
+    if (!el) return;
+    onChange(serialize(el));
+    syncEmpty();
+    onSelChipsChange?.(
+      Array.from(el.querySelectorAll<HTMLElement>('[data-selid]')).map((n) => n.dataset.selid!),
+    );
+  };
+
+  // 记住输入框内最后的光标位置：焦点移去文件预览等外部区域后，
+  // 「添加到对话」仍能回插到原光标处（而非永远追加到末尾）。
+  const lastRange = useRef<Range | null>(null);
+  useEffect(() => {
+    const remember = (): void => {
+      const el = elRef.current;
+      const sel = window.getSelection();
+      if (el && sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+        lastRange.current = sel.getRangeAt(0).cloneRange();
+      }
+    };
+    document.addEventListener('selectionchange', remember);
+    return () => document.removeEventListener('selectionchange', remember);
+  }, []);
+
+  /** 插入点：当前光标在框内 → 用之；否则用记忆的最后光标；再兑底末尾。 */
+  const resolveInsertRange = (): Range => {
+    const el = elRef.current!;
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) return sel.getRangeAt(0);
+    const saved = lastRange.current;
+    if (saved && el.contains(saved.startContainer)) return saved.cloneRange();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    return range;
+  };
+
+  /** 把胶囊插到插入点，光标落在胶囊后的空格之后。 */
+  const insertChipNode = (chip: HTMLElement): void => {
+    const el = elRef.current;
+    if (!el) return;
+    // 先解析插入点再 focus — focus 可能把光标重置到开头。
+    const range = resolveInsertRange();
+    el.focus();
+    range.deleteContents();
+    const space = document.createTextNode('\u00A0');
+    range.insertNode(space);
+    range.insertNode(chip);
+    range.setStartAfter(space);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    lastRange.current = range.cloneRange();
+    emit();
   };
 
   // 外部 value 变更（清空 / 回填）→ 纯文本渲染；与当前序列化一致则不动，
@@ -82,19 +145,6 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
   useImperativeHandle(ref, () => ({
     focus: () => elRef.current?.focus(),
     insertFileChip: (name, path, dir) => {
-      const el = elRef.current;
-      if (!el) return;
-      el.focus();
-      const sel = window.getSelection();
-      let range: Range;
-      if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
-        range = sel.getRangeAt(0);
-      } else {
-        range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false);
-      }
-      range.deleteContents();
       const chip = document.createElement('span');
       chip.dataset.chip = '1';
       chip.dataset.name = name;
@@ -105,16 +155,25 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
       chip.className = 'oc-file-chip';
       chip.textContent = name;
       chip.title = path;
-      const space = document.createTextNode('\u00A0');
-      range.insertNode(space);
-      range.insertNode(chip);
-      // 光标移到插入内容之后。
-      range.setStartAfter(space);
-      range.collapse(true);
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-      onChange(serialize(el));
-      syncEmpty();
+      insertChipNode(chip);
+    },
+    insertSelectionChip: ({ id, fileName, rangeLabel, path }) => {
+      const chip = document.createElement('span');
+      chip.dataset.chip = '1';
+      // 序列化为 `名#L起-止(路径)` — 复用文件胶囊的 serialize 分支。
+      chip.dataset.name = `${fileName}${rangeLabel}`;
+      chip.dataset.path = path;
+      chip.dataset.selid = id;
+      chip.contentEditable = 'false';
+      chip.className = 'oc-file-chip oc-sel-chip';
+      chip.title = `${path} ${rangeLabel}`;
+      const nameEl = document.createElement('span');
+      nameEl.textContent = fileName;
+      const rangeEl = document.createElement('span');
+      rangeEl.className = 'oc-sel-range';
+      rangeEl.textContent = rangeLabel;
+      chip.append(nameEl, rangeEl);
+      insertChipNode(chip);
     },
     setPlainText: (v) => {
       const el = elRef.current;
@@ -127,16 +186,12 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
       range.collapse(false);
       sel?.removeAllRanges();
       sel?.addRange(range);
-      onChange(serialize(el));
-      syncEmpty();
+      emit();
     },
   }));
 
   const onInput = (): void => {
-    const el = elRef.current;
-    if (!el) return;
-    onChange(serialize(el));
-    syncEmpty();
+    emit();
   };
 
   const onCopyCut = (e: React.ClipboardEvent<HTMLDivElement>): void => {

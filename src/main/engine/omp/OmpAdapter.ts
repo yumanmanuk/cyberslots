@@ -51,6 +51,7 @@ import type {
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { ThinkSplitter } from '../thinkSplitter';
 import { killEngineTree } from '../killTree';
+import { compatAudit } from '../compatAudit';
 import { resolveOmpCli } from './resolveOmp';
 
 const INIT_TIMEOUT_MS = 30_000;
@@ -354,7 +355,9 @@ export class OmpAdapter implements EngineAdapter {
       );
       const forkedId = String((res as { sessionId?: unknown }).sessionId ?? '');
       return forkedId ? { engineSessionId: forkedId } : null;
-    } catch {
+    } catch (err) {
+      // omp 实报 fork 能力（probe ⑧）— 被拒即协议漂移信号，入账。
+      compatAudit.record('omp', 'rejected-method', 'unstable_forkSession', errorMessage(err));
       return null;
     }
   }
@@ -478,6 +481,10 @@ export class OmpAdapter implements EngineAdapter {
         return;
       }
       default:
+        // user_message_chunk 等已知无 UI 影响的 kind 静默；真正未知的进审计。
+        if (!['user_message_chunk', 'session_info_update', 'plan_removed'].includes(u.sessionUpdate)) {
+          compatAudit.record('omp', 'unknown-event', `sessionUpdate:${u.sessionUpdate}`, u);
+        }
         return;
     }
   }

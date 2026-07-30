@@ -15,7 +15,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { EngineId, PermissionMode } from '@shared/types';
+import type { EngineId, PermissionMode, UsageInfo } from '@shared/types';
 import type {
   RaceAdoptStrategy,
   RaceArtifacts,
@@ -25,6 +25,7 @@ import type {
   RaceRole,
   RaceRoleConfig,
   RaceStage,
+  RaceWorkStage,
   RacerRole,
 } from '@shared/race';
 import { RACER_ROLES, resolveRoleMode } from '@shared/race';
@@ -67,8 +68,9 @@ export interface RaceSessionHost {
   transcript(sessionId: string): string;
   /** A textual digest of the builder's file changes (for the auditor). */
   changesDigest(sessionId: string): Promise<string>;
-  /** Subscribe to one turn completion on a session; returns unsubscribe. */
-  onTurnEnded(sessionId: string, cb: (stopReason: string) => void): () => void;
+  /** Subscribe to one turn completion on a session; returns unsubscribe.
+   *  usage 为本次交卷所含全部内部回合的 token 用量累计（可缺省）。 */
+  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo) => void): () => void;
   /** Push a race-level event to the renderer. */
   emit(raceId: string, event: RaceEvent): void;
   /** Persist the current set of race groups. */
@@ -93,6 +95,9 @@ export class RaceOrchestrator {
   /** 代际计数：重跑规划（restartPlanning）会 bump，旧阶段链收尾时
    *  发现代际不符 → 静默退出，不报错不推进（防旧链尸变干扰新链）。 */
   private readonly gen = new Map<string, number>();
+  /** 当前阶段的计时起点（raceId → ms）：阶段切换时结转墙钟增量进
+   *  stats；仅内存态，重启后由 resume 重新起表（停机时段不计时）。 */
+  private readonly stageEnteredAt = new Map<string, number>();
 
   constructor(private readonly host: RaceSessionHost, persisted?: RaceGroup[]) {
     for (const g of persisted ?? []) this.groups.set(g.id, g);
@@ -149,6 +154,7 @@ export class RaceOrchestrator {
     const cfg = g.roles.judge;
     const art = g.artifacts ?? {};
     const plan = await this.runTurnWithRetry(
+      g,
       judgeId,
       withGuard(
         judgeFusePrompt(
@@ -164,7 +170,7 @@ export class RaceOrchestrator {
         ),
         this.needsGuard('judge', cfg),
       ),
-      cfg.effort,
+      cfg,
     );
     g.finalPlan = plan;
     g.finalPlanVersion = 1;
@@ -186,9 +192,10 @@ export class RaceOrchestrator {
     const judgeId = await this.ensureRole(g, 'judge');
     const cfg = g.roles.judge;
     const plan = await this.runTurnWithRetry(
+      g,
       judgeId,
       withGuard(judgeRevisePrompt(g.finalPlan ?? '', annotation), this.needsGuard('judge', cfg)),
-      cfg.effort,
+      cfg,
     );
     g.finalPlan = plan;
     g.finalPlanVersion += 1;
@@ -325,6 +332,11 @@ export class RaceOrchestrator {
     // 此时无需恢复，直接忽略（防误点/重启横幅残留的重复触发）。
     if ((g.stage === 'planning' || g.stage === 'rebuttal') && this.chainActive.has(g.id)) return;
     g.interrupted = false;
+    // 重启后计时表已丢 → 从继续时刻重新起表（停机时段不计用时）；
+    // 本进程内表还活着（错误重试路径）则不重置，墙钟连续累计。
+    if (this.isWorkStage(g.stage) && !this.stageEnteredAt.has(g.id)) {
+      this.stageEnteredAt.set(g.id, Date.now());
+    }
     this.touch(g);
     void this.safe(raceId, async () => {
       switch (g.stage) {
@@ -482,7 +494,7 @@ export class RaceOrchestrator {
     if (!cfg) return;
     let out: string;
     try {
-      out = await this.runTurnWithRetry(sessionId, text, cfg.effort);
+      out = await this.runTurnWithRetry(g, sessionId, text, cfg);
     } catch (err) {
       // 回合进行中被剔除，或被主动打断（剔除唤醒/重跑规划叫停）
       // → 都是预期内，静默退场不上浮（新代链/推进者会接管）。
@@ -551,7 +563,7 @@ export class RaceOrchestrator {
     const builderId = await this.ensureRole(g, 'builder');
     const cfg = g.roles.builder;
     // Builder writes — no read-only guard.
-    await this.runTurnWithRetry(builderId, builderPrompt(g.finalPlan ?? ''), cfg.effort);
+    await this.runTurnWithRetry(g, builderId, builderPrompt(g.finalPlan ?? ''), cfg);
     await this.runAuditing(g);
   }
 
@@ -562,9 +574,10 @@ export class RaceOrchestrator {
     const auditorId = await this.ensureRole(g, 'auditor');
     const cfg = g.roles.auditor;
     const out = await this.runTurnWithRetry(
+      g,
       auditorId,
       withGuard(auditPrompt(g.finalPlan ?? '', digest), this.needsGuard('auditor', cfg)),
-      cfg.effort,
+      cfg,
     );
     const verdict = parseAuditVerdict(out);
     g.audit = verdict;
@@ -585,7 +598,7 @@ export class RaceOrchestrator {
     this.setStage(g, 'repairing');
     const builderId = g.sessions.builder!;
     const cfg = g.roles.builder;
-    await this.runTurnWithRetry(builderId, repairPrompt(issues), cfg.effort);
+    await this.runTurnWithRetry(g, builderId, repairPrompt(issues), cfg);
     await this.runAuditing(g);
   }
 
@@ -623,26 +636,28 @@ export class RaceOrchestrator {
 
   /** 瞬时错误自动重试一次（用户主动中止/打断/剔除不重试 —— 对
    *  被剔者重发 prompt 是灾难）；仍失败才上浮 race.error 交给用户。 */
-  private async runTurnWithRetry(sessionId: string, text: string, effort?: string): Promise<string> {
+  private async runTurnWithRetry(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig): Promise<string> {
     try {
-      return await this.runTurn(sessionId, text, effort);
+      return await this.runTurn(g, sessionId, text, cfg);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // 用户主动中止/打断/被主动唤醒（剔除或重跑规划）不自动重试。
       if (msg.includes('cancelled') || msg.includes('interrupted') || msg.includes('superseded')) throw err;
       await new Promise((r) => setTimeout(r, 1500));
-      return this.runTurn(sessionId, text, effort);
+      return this.runTurn(g, sessionId, text, cfg);
     }
   }
 
   /** Prompt a session and resolve with its transcript once the turn ends.
    *  等待登记到 pendingTurns：剔除僵死选手时可主动唤醒（reject），
    *  否则阶段链会永远挂在一个不再产生任何事件的会话上。 */
-  private runTurn(sessionId: string, text: string, effort?: string): Promise<string> {
+  private runTurn(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const off = this.host.onTurnEnded(sessionId, (stopReason) => {
+      const off = this.host.onTurnEnded(sessionId, (stopReason, usage) => {
         this.pendingTurns.delete(sessionId);
         off();
+        // 成败失败都记账 —— 异常收束的回合 token 也真实烧掉了。
+        this.recordUsage(g, cfg.engine, usage);
         // 出错/被中止的回合不算产出 —— 阻断阶段推进，交给用户重试。
         if (stopReason === 'error' || stopReason === 'cancelled' || stopReason === 'interrupted') {
           reject(new Error(`角色回合异常结束（${stopReason}），可重试当前阶段（可先调整选手配置）`));
@@ -656,7 +671,7 @@ export class RaceOrchestrator {
         // 消费方（runRacerTurn）一律静默，不弹横幅。
         reject(new Error('角色回合等待被打断（superseded：剔除或重跑）'));
       });
-      this.host.prompt(sessionId, text, effort).catch((err) => {
+      this.host.prompt(sessionId, text, cfg.effort).catch((err) => {
         this.pendingTurns.delete(sessionId);
         off();
         reject(err instanceof Error ? err : new Error(String(err)));
@@ -670,9 +685,56 @@ export class RaceOrchestrator {
   }
 
   private setStage(g: RaceGroup, stage: RaceStage): void {
+    this.settleStageTimer(g); // 先结转上一阶段的墙钟增量
     g.stage = stage;
+    if (this.isWorkStage(stage)) this.stageEnteredAt.set(g.id, Date.now());
+    else this.stageEnteredAt.delete(g.id);
     this.touch(g);
     this.host.emit(g.id, { type: 'race.stage', stage });
+  }
+
+  // ------------------------------------------------------ stats bookkeeping
+
+  private isWorkStage(stage: RaceStage): stage is RaceWorkStage {
+    return stage !== 'config' && stage !== 'done';
+  }
+
+  /** 结转当前阶段的墙钟增量进 stats（阶段切换/收尾时调用）。 */
+  private settleStageTimer(g: RaceGroup): void {
+    const started = this.stageEnteredAt.get(g.id);
+    if (started === undefined || !this.isWorkStage(g.stage)) return;
+    this.stageEnteredAt.delete(g.id);
+    this.bumpStats(g, g.stage, { durationMs: Date.now() - started });
+  }
+
+  /** 角色回合 token 记账。kimi code 会话无真实 token 上报（仅字符数
+   *  估算 approx），与主进程用量统计同口径 —— 一律不参与统计。 */
+  private recordUsage(g: RaceGroup, engine: EngineId, usage?: UsageInfo): void {
+    if (engine === 'kimi' || !usage || usage.approx) return;
+    if (!this.isWorkStage(g.stage)) return;
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
+    if (!inputTokens && !outputTokens) return;
+    this.bumpStats(g, g.stage, { inputTokens, outputTokens });
+  }
+
+  /** 往某阶段的累计桶加增量，随后持久化并推 race.stats。 */
+  private bumpStats(
+    g: RaceGroup,
+    stage: RaceWorkStage,
+    delta: { durationMs?: number; inputTokens?: number; outputTokens?: number },
+  ): void {
+    const prev = g.stats?.[stage] ?? { durationMs: 0, inputTokens: 0, outputTokens: 0 };
+    g.stats = {
+      ...g.stats,
+      [stage]: {
+        durationMs: prev.durationMs + (delta.durationMs ?? 0),
+        inputTokens: prev.inputTokens + (delta.inputTokens ?? 0),
+        outputTokens: prev.outputTokens + (delta.outputTokens ?? 0),
+      },
+    };
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.stats', stats: g.stats });
   }
 
   private touch(g: RaceGroup): void {

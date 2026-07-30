@@ -4,6 +4,7 @@ import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { useChatStore } from './store/chatStore';
 import { useRaceStore } from './store/raceStore';
 import type { ResolvedMode, ThemeMode } from '@shared/types';
+import { raceHostArchived } from '@shared/race';
 import { useT } from './i18n';
 import Sidebar from './components/Sidebar';
 import { BrandMark } from './components/brand';
@@ -14,6 +15,7 @@ import SettingsView from './components/SettingsView';
 import UsageView from './components/UsageView';
 import ScheduledView from './components/ScheduledView';
 import ArchivedView from './components/ArchivedView';
+import AntigravityAccountDialog from './components/AntigravityAccountDialog';
 import RaceView from './components/race/RaceView';
 import RaceSetup from './components/race/RaceSetup';
 import MissionControl from './components/mission/MissionControl';
@@ -35,9 +37,11 @@ function useTaskbarBadge(): void {
   const sessions = useChatStore((s) => s.sessions);
   const races = useRaceStore((s) => s.races);
   useEffect(() => {
+    // 宿主已归档的赛马不计入角标（与总控台/侧栏口径一致）。
+    const archivedIds = new Set(sessions.filter((m) => m.archived).map((m) => m.id));
     const count =
       sessions.filter((m) => !m.archived && !m.raceId && (m.status === 'awaiting' || m.status === 'error')).length +
-      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt).length;
+      Object.values(races).filter((g) => g.stage === 'judging' && !g.adopt && !raceHostArchived(g, archivedIds)).length;
     if (count === 0) {
       void window.cyberslots.badgeSet(null, '');
       return;
@@ -165,8 +169,11 @@ export default function App(): JSX.Element {
           </>
         )}
 
-        {/* 主内容「浮层」— 左上大圆角，靠色块与画布分层，不用分隔线 */}
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[20px] bg-bg shadow-sm">
+        {/* 主内容「浮层」— 左上大圆角，靠色块与画布分层，不用分隔线。
+            overflow-clip（非 hidden）：纯裁剪、禁止程序化滚动 —— 窄窗口下
+            scrollIntoView/焦点追踪曾把本容器横向滚出错位死态（右侧 dock
+            看得见但点击全部落空，实测踩坑） */}
+        <main className="flex min-w-0 flex-1 flex-col overflow-clip rounded-tl-[20px] bg-bg shadow-sm">
           <ErrorBoundary>
             {activeRaceId ? (
               <RaceView raceId={activeRaceId} />
@@ -186,6 +193,7 @@ export default function App(): JSX.Element {
       <ScheduledView />
       <ArchivedView />
       <RaceSetup />
+      <AntigravityAccountDialog />
     </div>
   );
 }

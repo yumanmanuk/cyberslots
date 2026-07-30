@@ -6,7 +6,7 @@
  */
 
 import { RotateCcw, Square } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { BrandHero, BrandSpinner } from '../brand';
 
@@ -69,6 +69,30 @@ export default function RaceLane({
     !!sessionId &&
     (status === undefined || status === 'running' || status === 'awaiting' || status === 'starting');
   const done = finished ?? !running;
+  // 另一侧空窗：回合正常收笔（status→idle）与产物落盘（race.artifacts）
+  // 是两条 IPC 链路，前者先到会闪一帧「已停止」再翻「已冲线」。正常
+  // 收笔给一小段宽限期继续算忙碌；宽限内产物仍未落盘（真异常）才落停。
+  // 用户 ■ 中止（stopReason=cancelled）不进宽限，立即显示已停止。
+  const lastStopReason = useMemo(() => {
+    if (!messages) return undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m?.kind === 'turn_end') return m.stopReason;
+    }
+    return undefined;
+  }, [messages]);
+  const settling = running && !done && !busy && status === 'idle' && lastStopReason !== 'cancelled';
+  const [graceBusy, setGraceBusy] = useState(false);
+  useEffect(() => {
+    if (!settling) {
+      setGraceBusy(false);
+      return;
+    }
+    setGraceBusy(true);
+    const t = window.setTimeout(() => setGraceBusy(false), 2000);
+    return () => window.clearTimeout(t);
+  }, [settling]);
+  const showBusy = busy || graceBusy;
   const toneText = tone === 'a' ? 'text-accent' : tone === 'b' ? 'text-warn' : 'text-ink-soft';
   const toneBorder = tone === 'a' ? 'border-accent' : tone === 'b' ? 'border-warn' : 'border-line';
 
@@ -95,7 +119,7 @@ export default function RaceLane({
         <div className="ml-auto flex items-center gap-1 text-[11px] text-ink-faint">
           {done ? (
             '已冲线 🏁'
-          ) : busy ? (
+          ) : showBusy ? (
             <>
               <BrandSpinner size={11} /> 进行中
               {onStop && sessionId && (
@@ -137,7 +161,7 @@ export default function RaceLane({
         {!sessionId || !visible?.length ? (
           <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 text-[12px] text-ink-faint">
             {/* 泳道级等待按规范用 BrandHero；（无输出）是终态非 loading，保持纯文字 */}
-            {busy ? (
+            {showBusy ? (
               <>
                 <BrandHero size={48} />
                 等待输出…

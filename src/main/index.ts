@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 
 import { SettingsStore } from './config/settings';
 import { SessionManager } from './engine/SessionManager';
+import { compatAudit } from './engine/compatAudit';
 import { CronService } from './cron/CronService';
 import { RaceManager } from './race/RaceManager';
 import { AiServerHost } from './proxy/AiServerHost';
@@ -92,6 +93,7 @@ function createWindow(appSettings: AppSettings): void {
   sessions?.attach(mainWindow.webContents);
   terminal?.attach(mainWindow.webContents);
   race?.attach(mainWindow.webContents);
+  compatAudit.attach(mainWindow.webContents);
 
   if (isDev) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL!);

@@ -15,15 +15,18 @@ import { BrandSpinner } from '../brand';
 import type { UnifiedMessage } from '@shared/types';
 import type { SessionChangeEntry } from '@shared/ipc';
 import { useChatStore } from '../../store/chatStore';
-import FileTree from './FileTree';
+import FileTree, { ownerRoot } from './FileTree';
 import FilePreview from './FilePreview';
 import DiffView from './DiffView';
 
 interface Props {
   sessionId: string;
-  root: string;
+  /** workspace 全部根目录（首个为 primary）；普通项目为单元素。 */
+  roots: string[];
   /** Controlled tab — owned by RightDock's unified tab bar. */
   tab: PanelTab;
+  /** 文件树列宽 — 由 RightDock 统一管理（dock 左缘把手拖拽）。 */
+  treeWidth: number;
   changes: SessionChangeEntry[];
   changesNonce: number;
   agents: AgentEntry[];
@@ -35,7 +38,7 @@ export type PanelTab = 'files' | 'changes' | 'agents';
 
 // 变更清单改由主进程台账（ChangeTracker）驱动，条目类型 = SessionChangeEntry。
 
-export default function WorkspacePanel({ sessionId, root, tab, changes, changesNonce, agents, onRefreshChanges }: Props): JSX.Element {
+export default function WorkspacePanel({ sessionId, roots, tab, treeWidth, changes, changesNonce, agents, onRefreshChanges }: Props): JSX.Element {
   const [openFile, setOpenFile] = useState<string | null>(null);
   const [openDiff, setOpenDiff] = useState<string | null>(null);
 
@@ -73,15 +76,15 @@ export default function WorkspacePanel({ sessionId, root, tab, changes, changesN
               }
             />
           ) : (
-            <FilePreview path={openFile!} root={root} sessionId={sessionId} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
+            <FilePreview path={openFile!} root={ownerRoot(openFile!, roots)} sessionId={sessionId} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
           )}
         </aside>
       )}
 
-      <aside className="flex w-[300px] shrink-0 flex-col bg-bg-panel/60">
+      <aside className="flex shrink-0 flex-col bg-bg-panel/60" style={{ width: treeWidth }}>
         <div className="min-h-0 flex-1">
           {tab === 'files' ? (
-            <FileTree root={root} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
+            <FileTree roots={roots} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
           ) : tab === 'changes' ? (
             <ChangesList
               changes={changes}

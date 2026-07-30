@@ -11,6 +11,7 @@
  * 进程退出由 host.onExit 通知 adapter，hub 不负责懒重启 server。
  */
 
+import { compatAudit } from '../compatAudit';
 import type { OpencodeServerHost } from './OpencodeServerHost';
 
 export interface OpencodeSseEvent {
@@ -137,6 +138,8 @@ export class OpencodeEventHub {
     try {
       evt = JSON.parse(data) as OpencodeSseEvent;
     } catch {
+      // SSE data 帧解不动 = server 版本换了输出格式，留账后丢弃。
+      compatAudit.record('opencode', 'parse-error', 'sse-malformed-json', data);
       return;
     }
     if (!evt || typeof evt.type !== 'string') return;

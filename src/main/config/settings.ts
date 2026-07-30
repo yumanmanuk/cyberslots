@@ -9,7 +9,18 @@ import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { AppSettings, ContextFallbackRule } from '@shared/types';
+import type { AppSettings, ContextFallbackRule, EngineId } from '@shared/types';
+
+const ENGINE_IDS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity'];
+
+/** 引擎顺序消毒：剔非法 id + 去重 + 把缺失引擎补到末尾（新版本
+ *  加引擎后老配置自动补全，不会掉项）。 */
+function sanitizeEngineOrder(raw: unknown): EngineId[] {
+  const stored = Array.isArray(raw)
+    ? raw.filter((x): x is EngineId => ENGINE_IDS.includes(x as EngineId))
+    : [];
+  return [...new Set([...stored, ...ENGINE_IDS])];
+}
 
 const DEFAULTS: AppSettings = {
   themeMode: 'light',
@@ -20,9 +31,15 @@ const DEFAULTS: AppSettings = {
   autoCompactRatio: 90,
   contextFallbackRules: [{ match: 'k3 256k', to: 'k3' }],
   notifications: { taskComplete: true, question: true, error: true },
+  titleGen: { mode: 'program', baseUrl: '', apiKey: '', model: '' },
   workspaces: [],
   routing: { kimi: false, codex: false },
   opencodeHiddenModels: [],
+  antigravityDefaultModel: '',
+  antigravityHiddenModels: [],
+  antigravityAutoSwitch: false,
+  antigravityQuotaThreshold: 15,
+  engineOrder: [...ENGINE_IDS],
   race: {
     enableRacerC: false,
     roles: {
@@ -57,11 +74,23 @@ function migrate(stored: Record<string, unknown>): AppSettings {
           .filter((r) => r.match && r.to)
       : DEFAULTS.contextFallbackRules,
     notifications: { ...DEFAULTS.notifications, ...(s.notifications ?? {}) },
+    titleGen: { ...DEFAULTS.titleGen, ...(s.titleGen ?? {}) },
     workspaces: s.workspaces ?? [],
     routing: { ...DEFAULTS.routing, ...(s.routing ?? {}) },
     opencodeHiddenModels: Array.isArray(s.opencodeHiddenModels)
       ? s.opencodeHiddenModels.filter((x): x is string => typeof x === 'string')
       : [],
+    antigravityDefaultModel:
+      typeof s.antigravityDefaultModel === 'string' ? s.antigravityDefaultModel : DEFAULTS.antigravityDefaultModel,
+    antigravityHiddenModels: Array.isArray(s.antigravityHiddenModels)
+      ? s.antigravityHiddenModels.filter((x): x is string => typeof x === 'string')
+      : [],
+    antigravityAutoSwitch: typeof s.antigravityAutoSwitch === 'boolean' ? s.antigravityAutoSwitch : DEFAULTS.antigravityAutoSwitch,
+    antigravityQuotaThreshold:
+      typeof s.antigravityQuotaThreshold === 'number'
+        ? Math.max(0, Math.min(100, Math.round(s.antigravityQuotaThreshold)))
+        : DEFAULTS.antigravityQuotaThreshold,
+    engineOrder: sanitizeEngineOrder(s.engineOrder),
     race: {
       enableRacerC: s.race?.enableRacerC ?? DEFAULTS.race.enableRacerC,
       roles: { ...DEFAULTS.race.roles, ...(s.race?.roles ?? {}) },

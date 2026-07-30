@@ -10,8 +10,10 @@ import { useRaceStore } from './raceStore';
 
 import type {
   AppSettings,
+  AgyQuotaInfo,
   CodeSelection,
   CodexCatalogModel,
+  CompatAuditSnapshot,
   ContextFallbackRule,
   CronTask,
   EngineConfigsSnapshot,
@@ -29,6 +31,7 @@ import type {
   WorkspaceInfo,
 } from '@shared/types';
 import type { SessionCreateRequest } from '@shared/ipc';
+import { isRaceActive } from '@shared/race';
 import { serializeSelections, selectionRangeLabel } from '../selections';
 
 export interface SidebarFilter {
@@ -122,6 +125,9 @@ interface ChatState {
   /** omp 模型目录（懒加载 — `omp models --json`，无凭据时为空目录）。 */
   ompCatalog: OmpCatalog | null;
   loadOmpCatalog(force?: boolean): Promise<void>;
+  /** 引擎兼容性审计快照（未知事件/被拒方法/解析失败）— 齿轮小黄点
+   *  与设置页诊断卡的数据源；null = 尚未拉取。 */
+  compatAudit: CompatAuditSnapshot | null;
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
   addWorkspace(name: string, folders: string[]): Promise<WorkspaceInfo>;
@@ -144,6 +150,12 @@ interface ChatState {
   setPlanPreview(sessionId: string, messageId: string | undefined): void;
   forkToEngine(id: string, engine: SessionMeta['engine']): Promise<void>;
   compactSession(): Promise<void>;
+  /** Antigravity 切号弹窗目标会话 id（null = 关闭）。低额/无额时自动置位。 */
+  agySwitchFor: string | null;
+  openAgySwitch(sessionId: string): void;
+  closeAgySwitch(): void;
+  /** 切换 Antigravity 账号（覆写 keyring）；continueSessionId 非空则切后自动发“继续”接回任务。 */
+  switchAgyAccount(accountId: string, continueSessionId?: string): Promise<{ email: string }>;
   sendPrompt(text: string, attachments?: string[], selections?: CodeSelection[]): Promise<void>;
   sendPromptTo(
     sessionId: string,
@@ -208,6 +220,7 @@ const emptyUi = (): SessionUiState => ({
 });
 
 let unsubscribe: (() => void) | undefined;
+let unsubscribeCompat: (() => void) | undefined;
 
 /** loadOpencodeCatalog 的 in-flight 标记（模块级，不入 store）。 */
 let opencodeCatalogLoading = false;
@@ -225,6 +238,10 @@ const persistLastRun = new Map<string, number>();
  *  update_goal 工具再写收尾总结），公告推迟到 turn.ended 再插，才不会
  *  插队在最终输出之前。 */
 const pendingGoalDone = new Map<string, UnifiedMessage>();
+/** 用户主动点过停止的会话 — 下一个 turn.ended 不再自动派发排队消息/
+ *  自动压缩（引擎的 stopReason 不统一：opencode 中止后仍报 end_turn，
+ *  只看 stopReason 挡不住「点了停止任务还在跑」）。 */
+const stopRequested = new Set<string>();
 const PERSIST_DEBOUNCE = 400;
 // 连续流式（每个 delta 都重置防抖）时最长 2s 强制落盘一次，
 // 把「崩溃/热重启丢失的尾部输出」窗口从「整段回合」压到 ~2s。
@@ -303,6 +320,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   opencodeCatalog: null,
   ompCatalog: null,
   engineAvailability: null,
+  agySwitchFor: null,
+  compatAudit: null,
 
   /** 懒加载 opencode 模型目录（in-flight 去重；失败结果也缓存，避免风暴重试）。 */
   async loadOpencodeCatalog(force) {
@@ -347,6 +366,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             codex: snap.codex.exists,
             opencode: snap.opencode.installed,
             omp: snap.omp.installed,
+            antigravity: snap.antigravity.installed,
           },
         });
         return snap;
@@ -369,6 +389,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
     });
+    // 兼容性审计：启动时拉一次存量（主进程内存态），后续增量走推送。
+    void window.cyberslots.compatAuditGet().then((snap) => set({ compatAudit: snap })).catch(() => undefined);
+    unsubscribeCompat?.();
+    unsubscribeCompat = window.cyberslots.onCompatAudit((snap) => set({ compatAudit: snap }));
     // 退出/刷新前把挂起的消息落盘写完，尽量不丢正在执行任务的尾部。
     window.addEventListener('beforeunload', () => flushAllPersist(get));
   },
@@ -408,7 +432,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async createSession(req) {
-    // 任何会话导航都退出赛马全屏视图（赛马继续后台跑，Composer ⚔ 可回），
+    // 任何会话导航都退出赛马全屏视图（赛马继续后台跑，Composer 🏇 可回），
     // 否则 RaceView 压在 ChatView 上，侧栏点击看起来全部失灵。
     useRaceStore.getState().closeRace();
     set({ creating: true, creatingEngine: req.engine });
@@ -566,6 +590,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   async sendPromptTo(sessionId, text, attachments, enginePrefix, selections) {
     const { swarmBoost, efforts } = get();
+    // 用户主动发新消息 = 解除「停止」态 — 消账，免得回合已结束后
+    // 才点的停止残留标记，误伤下个正常回合的队列派发。
+    stopRequested.delete(sessionId);
     const typedText = text;
     // 选区引用序列化后注在正文最前（上下文在前、提问在后；
     // 引擎前缀/机器人指令仍保持最前）。
@@ -594,10 +621,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const session = get().sessions.find((s) => s.id === sessionId);
     if (session && session.title === '新会话') {
       const title = typedText.slice(0, 24) || (selections?.length ? `${selections[0]!.fileName} ${selectionRangeLabel(selections[0]!)}` : '') || '新会话';
-      void window.cyberslots.sessionRename(sessionId, title);
-      set((s) => ({
-        sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, title } : m)),
-      }));
+      autoTitleSession(get, set, sessionId, typedText, title);
     }
     try {
       await window.cyberslots.sessionPrompt({
@@ -610,6 +634,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } finally {
       set((s) => ({ sending: { ...s.sending, [sessionId]: false } }));
     }
+  },
+
+  openAgySwitch(sessionId) {
+    set({ agySwitchFor: sessionId });
+  },
+  closeAgySwitch() {
+    set({ agySwitchFor: null });
+  },
+  async switchAgyAccount(accountId, continueSessionId) {
+    const res = await window.cyberslots.agyAccountSwitch(accountId);
+    set({ agySwitchFor: null });
+    // 切号后接回任务：赛马角色会话走 raceResume（重跑当前阶段，而非
+    // 把「继续」发给编排器不监听的隐藏角色会话）；普通会话发「继续」
+    // —— agy 从本地库重放整段历史给新账号，跨账号续接不丢上下文
+    // （实测坐实，见 docs/antigravity-integration.md §3.8）。
+    if (continueSessionId) {
+      const meta = get().sessions.find((m) => m.id === continueSessionId);
+      if (meta?.raceId) void window.cyberslots.raceResume(meta.raceId);
+      else void get().sendPromptTo(continueSessionId, '继续');
+    }
+    return res;
   },
 
   addSelection(sessionId, sel) {
@@ -633,11 +678,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   async cancel() {
     const { activeSessionId } = get();
-    if (activeSessionId) await window.cyberslots.sessionCancel(activeSessionId);
+    if (activeSessionId) await get().cancelSession(activeSessionId);
   },
 
   async cancelSession(sessionId) {
-    await window.cyberslots.sessionCancel(sessionId);
+    // 先记账再发请求：中断落地时（turn.ended）据此按「用户停止」收尾。
+    stopRequested.add(sessionId);
+    try {
+      await window.cyberslots.sessionCancel(sessionId);
+    } catch (err) {
+      // 中止被引擎拒绝/请求失败必须显性化 — 静默吞掉的话「点停止没反应」无从排查。
+      announceSystem(sessionId, `⚠ 中止失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   },
 
   async undoToMessage(sessionId, messageId) {
@@ -811,11 +863,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 首条消息即会话标题（与普通提问同规则）。
     const session = get().sessions.find((s) => s.id === activeSessionId);
     if (session && session.title === '新会话') {
-      const title = objective.slice(0, 24) || '新会话';
-      void window.cyberslots.sessionRename(activeSessionId, title);
-      set((s) => ({
-        sessions: s.sessions.map((m) => (m.id === activeSessionId ? { ...m, title } : m)),
-      }));
+      autoTitleSession(get, set, activeSessionId, objective, objective.slice(0, 24) || '新会话');
     }
     try {
       await window.cyberslots.sessionGoalSet(activeSessionId, objective);
@@ -849,6 +897,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async archiveSession(id, archived) {
+    // 拦截兜底：进行中的会话 / 名下有进行中赛马的宿主不可归档
+    // （UI 入口已禁用/跳过，这里防未来新入口绕过；还原不拦）。
+    if (archived) {
+      const meta = get().sessions.find((m) => m.id === id);
+      const busy =
+        meta?.status === 'running' ||
+        meta?.status === 'starting' ||
+        Object.values(useRaceStore.getState().races).some((g) => g.parentSessionId === id && isRaceActive(g));
+      if (busy) return;
+    }
     await window.cyberslots.sessionSetArchived(id, archived);
     set((s) => ({
       sessions: s.sessions.map((m) => (m.id === id ? { ...m, archived, unread: archived ? false : m.unread } : m)),
@@ -911,8 +969,112 @@ export function announceSystem(sessionId: string, text: string): void {
   schedulePersist(useChatStore.getState, sessionId);
 }
 
+// ---------------------------------------------- antigravity 额度自动切号
+
+/** 自动切号全局互斥：keyring 是全局唯一一条，多路触发（多个失败回合/
+ *  主动+兜底并发）只允许一个切换在途，其余静默跳过。 */
+let agyAutoSwitchInflight = false;
+
+/** 从额度快照挑一个可切换的目标账号。三道硬门槛：查得到(ok) + 非当前账号
+ *  + 两个时间窗剩余都 ≥ 阈值（任一窗低就快堵，Claude 组双窗同时约束）。
+ *  合格池按「短板窗」min(各窗剩余) 最厚优先 —— 可用寿命由更紧的窗决定，
+ *  短板最厚 = 切过去最耐用、最不易立刻再触发。无合格返回 undefined。 */
+export function pickAgySwitchTarget(
+  quotas: AgyQuotaInfo[],
+  currentEmail: string | undefined,
+  threshold: number,
+): AgyQuotaInfo | undefined {
+  const minRemain = (q: AgyQuotaInfo): number => Math.min(...q.groups.map((g) => 100 - g.utilization));
+  const eligible = quotas.filter(
+    (q) => q.ok && q.email !== currentEmail && q.groups.length > 0 && q.groups.every((g) => 100 - g.utilization >= threshold),
+  );
+  if (eligible.length === 0) return undefined;
+  return [...eligible].sort((a, b) => minRemain(b) - minRemain(a))[0];
+}
+
+/** 自动切号编排：挑号 → 覆写 keyring → 按会话类型接回。
+ *  - reason='exhausted'（兜底，回合已因额度失败）：切后接回任务 —— 赛马
+ *    走 raceResume 重跑当前阶段，普通会话发「继续」；无合格目标则回退
+ *    手动切号弹窗让用户定夺（等重置 or 挑个凑合的）。
+ *  - reason='threshold'（主动，回合正常收尾）：只静默换 keyring（任务没失败，
+ *    下一回合自然用新号），无合格目标则静默放弃、不打扰。 */
+async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' | 'threshold'): Promise<void> {
+  if (agyAutoSwitchInflight) return;
+  const meta = get().sessions.find((m) => m.id === sessionId);
+  if (!meta || meta.engine !== 'antigravity') return;
+  const threshold = get().settings?.antigravityQuotaThreshold ?? 15;
+  agyAutoSwitchInflight = true;
+  try {
+    const [snap, quotas] = await Promise.all([window.cyberslots.agyAccountsList(), window.cyberslots.agyQuota(true)]);
+    const target = pickAgySwitchTarget(quotas, snap.active, threshold);
+    if (!target) {
+      // 无合格目标：耗尽兜底 → 打开手动弹窗（switchAgyAccount 已赛马感知）；主动 → 静默放弃。
+      if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
+      return;
+    }
+    const from = snap.active ?? '?';
+    await window.cyberslots.agyAccountSwitch(target.accountId);
+    if (reason === 'exhausted') {
+      if (meta.raceId) {
+        useChatStore.setState({ agySwitchFor: null });
+        void window.cyberslots.raceResume(meta.raceId);
+      } else {
+        announceSystem(sessionId, `🔀 额度耗尽，已自动切换账号：${from} → ${target.email}，正在继续任务…`);
+        void get().sendPromptTo(sessionId, '继续');
+      }
+    } else if (!meta.raceId) {
+      // 主动预切：赛马靠编排器下一回合自然用新号，不插播公告；普通会话公告一条。
+      announceSystem(sessionId, `🔀 额度将尽（低于 ${threshold}%），已自动切换账号：${from} → ${target.email}`);
+    }
+  } catch {
+    if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
+  } finally {
+    agyAutoSwitchInflight = false;
+  }
+}
+
+/** 主动阈值切号：回合正常收尾后查当前活动账号余量，任一窗低于阈值就预切。
+ *  赛马场景下若同场还有角色在跑则跳过（避免并行回合中途换全局 keyring；
+ *  主动切是「未耗尽的预切」，晚一回合无害，交给下次收尾或兜底）。 */
+async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<void> {
+  const meta = get().sessions.find((m) => m.id === sessionId);
+  if (!meta || meta.engine !== 'antigravity') return;
+  if (meta.raceId) {
+    const siblingRunning = get().sessions.some(
+      (m) => m.raceId === meta.raceId && m.id !== sessionId && (m.status === 'running' || m.status === 'starting'),
+    );
+    if (siblingRunning) return;
+  }
+  const threshold = get().settings?.antigravityQuotaThreshold ?? 15;
+  try {
+    const q = await window.cyberslots.agyActiveQuota();
+    if (!q.ok || q.groups.length === 0) return;
+    if (q.groups.some((g) => 100 - g.utilization < threshold)) await autoSwitchAgy(get, sessionId, 'threshold');
+  } catch {
+    /* 主动检测失败不打扰 */
+  }
+}
+
+
 function mutateUi(set: SetFn, sessionId: string, fn: (ui: SessionUiState) => SessionUiState): void {
   set((s) => ({ ui: { ...s.ui, [sessionId]: fn(s.ui[sessionId] ?? emptyUi()) } }));
+}
+
+/** 首条消息自动命名：先立即落截取式标题（侧栏不空窗）；设置为 AI
+ *  生成时再异步调主进程生成语义标题覆盖。期间用户手动改名则放弃
+ *  覆盖；AI 未配置/失败静默保留截取式标题，不阻塞发送链路。 */
+function autoTitleSession(get: () => ChatState, set: SetFn, sessionId: string, sourceText: string, fallback: string): void {
+  const rename = (title: string): void => {
+    void window.cyberslots.sessionRename(sessionId, title);
+    set((s) => ({ sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, title } : m)) }));
+  };
+  rename(fallback);
+  if (get().settings?.titleGen?.mode !== 'ai' || !sourceText.trim()) return;
+  void window.cyberslots.titleGenerate(sourceText).then((ai) => {
+    if (!ai) return;
+    const cur = get().sessions.find((s) => s.id === sessionId);
+    if (cur && cur.title === fallback) rename(ai);
+  });
 }
 
 /** "X 秒" under a minute, otherwise "X 分 Y 秒" (en: "Xs" / "Xm Ys"). */
@@ -928,7 +1090,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
   // Any engine event counts as liveness — feeds the stall detector.
   mutateUi(set, sessionId, (ui) => ({ ...ui, lastActivityAt: Date.now() }));
   switch (event.type) {
-    case 'session.status':
+    case 'session.status': {
       // 仅真正开跑才刷新 updatedAt — 预热/唤醒的 starting→idle 过渡
       // 不该把会话顶到侧栏顶部（曾致快速连点会话时列表顺序乱跳）。
       set((s) => ({
@@ -938,7 +1100,25 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
             : m,
         ),
       }));
+      // 引擎回到非运行态 → 收敛仍标「进行中」的待办为 pending：模型常在
+      // 收尾时忘记再推一次 plan 更新，不收敛的话第一项会永远停在 loading
+      // （与重启恢复的 reconcilePersistedMessages 同语义；没人在跑 = 不存在
+      // 进行中）。挂在这里而非 turn.ended，是为了连 background 自发回合收尾
+      // 也一并覆盖。
+      if (event.status === 'idle' || event.status === 'error' || event.status === 'closed') {
+        let planChanged = false;
+        mutateUi(set, sessionId, (ui) => {
+          const messages = ui.messages.map((m) => {
+            if (m.kind !== 'plan' || !m.entries.some((e) => e.status === 'in_progress')) return m;
+            planChanged = true;
+            return { ...m, entries: m.entries.map((e) => (e.status === 'in_progress' ? { ...e, status: 'pending' as const } : e)) };
+          });
+          return planChanged ? { ...ui, messages } : ui;
+        });
+        if (planChanged) schedulePersist(get, sessionId);
+      }
       return;
+    }
     case 'session.meta':
       set((s) => ({
         sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, ...event.patch } : m)),
@@ -1041,12 +1221,29 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       }
       // 回合结束立即落盘（完成的产出必须持久化，不受防抖/崩溃影响）。
       flushPersist(get, sessionId);
+      // Antigravity 主动阈值切号：回合【正常收尾】且开启自动切时，检测当前账号
+      // 余量，任一时间窗低于阈值则预切到有 buffer 的账号（赛马有同场角色在跑
+      // 则跳过）。耗尽【报错】的兜底切号不在这里 —— 由 reportQuotaExhaustion 的
+      // quotaExhausted 事件驱动（见 error 分支）；非额度类错误一律不弹切号窗。
+      if (
+        event.stopReason !== 'error' &&
+        get().settings?.antigravityAutoSwitch &&
+        get().sessions.find((m) => m.id === sessionId)?.engine === 'antigravity'
+      ) {
+        void maybeProactiveSwitchAgy(get, sessionId);
+      }
+      // 用户点过停止 → 本次收尾不自动派发排队/不触自动压缩（否则刚中断就
+      // 又自起新回合，看起来就是「停不下来」）。无论哪种 stopReason 都
+      // 要消账，避免标记残留误伤后续正常回合。
+      const userStopped =
+        stopRequested.delete(sessionId) || event.stopReason === 'cancelled' || event.stopReason === 'interrupted';
       // 引擎自发回合（goal continuation / compact）结束不派发队列、不触
       // 自动压缩 — goal 可能紧接着自起下一轮；压缩回合自身结束再触压缩
       // 会成死循环。
       if (event.stopReason === 'background') return;
       // 自动派发等待队列的下一条（稍作延迟，让引擎回到 idle）。
       const queue = get().queues[sessionId] ?? [];
+      if (userStopped) return; // 排队消息保留在队列里，由用户自行删除或下次回合后再续发
       if (queue.length > 0 && event.stopReason !== 'error') {
         const [next, ...rest] = queue;
         set((s) => ({ queues: { ...s.queues, [sessionId]: rest } }));
@@ -1083,6 +1280,19 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
             void window.cyberslots.sessionCompact(sessionId);
           }
         }
+      }
+      return;
+    }
+    case 'error': {
+      // 先照常把错误落进消息流 + 持久化 + 活动摘要（与 default 同语义）。
+      mutateUi(set, sessionId, (ui) => ({ ...ui, messages: foldMessage(ui.messages, event) }));
+      schedulePersist(get, sessionId);
+      noteActivity(set, get, sessionId, event);
+      // 确认额度耗尽（reportQuotaExhaustion 的结构化标记）→ 开启自动切则自动切号接回，
+      // 否则兜底弹手动切号窗。仅此一条路径会弹切号窗 —— 非额度类错误不触发。
+      if (event.quotaExhausted && get().sessions.find((m) => m.id === sessionId)?.engine === 'antigravity') {
+        if (get().settings?.antigravityAutoSwitch) void autoSwitchAgy(get, sessionId, 'exhausted');
+        else set(() => ({ agySwitchFor: sessionId }));
       }
       return;
     }
@@ -1198,8 +1408,17 @@ function endStreaming(messages: UnifiedMessage[]): UnifiedMessage[] {
 function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMessage[] {
   const now = Date.now();
   switch (event.type) {
-    case 'turn.started':
+    case 'turn.started': {
+      // 回合号回填：乐观写入的 user 气泡（turnId=-1）此刻才拿到真实回合号，
+      // TurnRail 等按 turnId 配对提问与回答的消费者依赖它。仅在该气泡仍是
+      // 最后一条消息时回填——之后已有事件落地说明它不属于本回合（如引擎
+      // 自发的 goal/compact 回合），不要误贴。
+      const last = messages[messages.length - 1];
+      if (last && last.kind === 'user' && last.turnId === -1) {
+        return [...messages.slice(0, -1), { ...last, turnId: event.turnId }];
+      }
       return messages;
+    }
 
     case 'user.echo':
       return [

@@ -70,7 +70,9 @@ export async function writeFileChecked(path: string, text: string, root: string)
   await writeFile(path, text, 'utf8');
 }
 
-/** Porcelain git status keyed by absolute path → short code (M/A/D/?). */
+/** Porcelain git status keyed by absolute path → short code (M/A/D/U/R…)。
+ *  `??`（未跟踪）归一化为 U —— 对用户即「新增文件」，跟 VS Code 徽标一致，
+ *  避免树里出现语义不明的 `?`。 */
 export async function gitStatus(root: string): Promise<Record<string, string>> {
   try {
     const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-z'], {
@@ -83,7 +85,8 @@ export async function gitStatus(root: string): Promise<Record<string, string>> {
       if (entry.length < 4) continue;
       const code = entry.slice(0, 2).trim();
       const rel = entry.slice(3);
-      out[resolve(root, rel)] = code[0] === ' ' ? code[1]! : code[0]!;
+      const short = code[0] === ' ' ? code[1]! : code[0]!;
+      out[resolve(root, rel)] = short === '?' ? 'U' : short;
     }
     return out;
   } catch {

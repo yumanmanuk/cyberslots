@@ -5,10 +5,11 @@
  */
 
 import { ArrowLeft, CircleAlert, OctagonX } from 'lucide-react';
+import { useEffect, useState } from 'react';
 
 import { BrandHero } from '../brand';
 
-import type { RaceGroup, RaceRole, RacerRole } from '@shared/race';
+import type { RaceGroup, RaceRole, RaceStage, RacerRole } from '@shared/race';
 import { RACER_ROLES, RACE_ROLE_LABELS, RACE_STAGE_LABELS } from '@shared/race';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
@@ -17,12 +18,45 @@ import ArtifactsPreview from './ArtifactsPreview';
 import JudgePanel from './JudgePanel';
 import RaceCircuit from './RaceCircuit';
 import RaceLane from './RaceLane';
+import RaceStatsCard from './RaceStatsCard';
 import RoleTuneDialog from './RoleTuneDialog';
 
 function roleSubtitle(race: RaceGroup, role: RaceRole): string {
   const cfg = race.roles[role];
   if (!cfg) return '';
   return `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || '默认模型'}${cfg.effort ? ` · ${cfg.effort}` : ''}`;
+}
+
+/** 阶段飘字图标（与赛程电路 HUD 节点图标同谱系）。 */
+const STAGE_TOAST_ICONS: Record<RaceStage, string> = {
+  config: '⚙',
+  planning: '⚑',
+  rebuttal: '⚔',
+  judging: '⚖',
+  building: '🔨',
+  auditing: '🛡',
+  repairing: '⟲',
+  done: '🏁',
+};
+
+/** 阶段切换飘字：电路 HUD 下方居中浮层，滑入停留淡出后由
+ *  raceStore 自动清掉；key=seq 保证连续切阶段时动画重新播放。
+ *  居中靠外层 flex，动画 transform 只挂内层（不互相覆盖）。 */
+function StageToast({ raceId }: { raceId: string }): JSX.Element | null {
+  const flash = useRaceStore((s) => s.stageFlash);
+  if (!flash || flash.raceId !== raceId) return null;
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-14 z-30 flex justify-center">
+      <div
+        key={flash.seq}
+        className="race-stage-toast flex items-center gap-2 rounded-full border border-accent bg-bg-panel/95 px-4 py-1.5 text-[12.5px] font-semibold text-accent shadow-lg"
+      >
+        {flash.stage === 'done'
+          ? '🏁 赛马完成'
+          : `${STAGE_TOAST_ICONS[flash.stage]} 进入「${RACE_STAGE_LABELS[flash.stage]}」环节`}
+      </div>
+    </div>
+  );
 }
 
 export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
@@ -43,11 +77,23 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
   }
 
   const stage = race.stage;
+  // 回看态：用户从电路点入某个已到达的阶段。viewStage 仅影响本
+  // 视图展示（只读），不碰 race.stage——执行由主进程编排器跑，
+  // 与“看哪个阶段”彻底解耦，回看绝不打断执行。
+  const [viewStage, setViewStage] = useState<RaceStage | null>(null);
+  const reviewing = viewStage !== null && viewStage !== stage;
+  const shown = viewStage ?? stage;
+  // 实际阶段推进到“恰好等于正在回看的阶段”时自动归位，不抽掉用户。
+  useEffect(() => {
+    if (viewStage === stage) setViewStage(null);
+  }, [stage, viewStage]);
+
   const racing = stage === 'planning' || stage === 'rebuttal';
   const buildish = stage === 'building' || stage === 'auditing' || stage === 'repairing' || stage === 'done';
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="relative flex h-full min-h-0 flex-col">
+      <StageToast raceId={raceId} />
       {/* 顶栏 */}
       <div className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-2.5">
         <button
@@ -73,7 +119,21 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
         )}
       </div>
 
-      <RaceCircuit stage={stage} repairRound={race.repairRound} />
+      <RaceCircuit stage={stage} repairRound={race.repairRound} viewing={shown} onPick={setViewStage} />
+
+      {reviewing && (
+        <div className="mx-6 mb-2 flex items-center gap-3 rounded-lg border border-line bg-bg-input px-3 py-2 text-[12px]">
+          <span className="flex-1 text-ink-soft">
+            👁 正在回看「{RACE_STAGE_LABELS[shown]}」环节（只读）· 赛马仍在后台按实际进度继续，不受影响。
+          </span>
+          <button
+            onClick={() => setViewStage(null)}
+            className="shrink-0 rounded-lg border border-line px-3 py-1 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+          >
+            → 回到当前进度（{RACE_STAGE_LABELS[stage]}）
+          </button>
+        </div>
+      )}
 
       {race.interrupted && stage !== 'done' && (
         <div className="mx-6 mb-2 flex items-center gap-3 rounded-lg border border-warn bg-bg-input px-3 py-2 text-[12px]">
@@ -127,22 +187,29 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
           竞速 = 泳道内滚；裁判 = 产物预览弹性内滚 + 裁判台固定下部；
           执行 = 执行泳道内滚 + 审计/操作区固定。 */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-6 pb-6">
-        {racing && <DualLanes race={race} running fill />}
-
-        {stage === 'judging' && (
+        {reviewing ? (
+          <ReviewStageView race={race} stage={shown} />
+        ) : (
           <>
-            {/* 冻结产物干净预览 —— 占上部弹性空间，每栏各自内滚 */}
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <ArtifactsPreview race={race} fill />
-            </div>
-            {/* 裁判台固定下部，始终可见；评审态内容超高时自身内滚 */}
-            <div className="max-h-[56vh] shrink-0 overflow-y-auto pt-3">
-              <JudgePanel race={race} />
-            </div>
+            {racing && <DualLanes race={race} running fill />}
+
+            {stage === 'judging' && (
+              <>
+                {/* 冻结产物干净预览 —— 占上部弹性空间，每栏各自内滚 */}
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <ArtifactsPreview race={race} fill />
+                </div>
+                {/* 裁判台固定下部，始终可见；不给容器级滚动条 —— 评审态
+                    头/尾固定、方案内容区内滚（JudgePanel 内部分区滚动） */}
+                <div className="flex max-h-[56vh] min-h-0 shrink-0 flex-col overflow-hidden pt-3">
+                  <JudgePanel race={race} />
+                </div>
+              </>
+            )}
+
+            {buildish && <BuilderSection race={race} />}
           </>
         )}
-
-        {buildish && <BuilderSection race={race} />}
       </div>
 
       <RoleTuneDialog />
@@ -194,6 +261,28 @@ function DualLanes({ race, running, fill = false }: { race: RaceGroup; running: 
   );
 }
 
+/** 回看某个已完成阶段的内容（均只读，不提供任何可变操作）：
+ *  双规划/交叉反驳 → 产物干净预览（各选手方案 + 反驳）；
+ *  裁判 → 最终方案只读；执行/修复/审计 → 执行泳道 + 审计结果。 */
+function ReviewStageView({ race, stage }: { race: RaceGroup; stage: RaceStage }): JSX.Element {
+  if (stage === 'planning' || stage === 'rebuttal') {
+    return (
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <ArtifactsPreview race={race} fill />
+      </div>
+    );
+  }
+  if (stage === 'judging') {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <JudgePanel race={race} readOnly />
+      </div>
+    );
+  }
+  // building / repairing / auditing
+  return <BuilderSection race={race} review />;
+}
+
 /** 打开 Builder 会话（先刷新会话列表 —— 角色会话由主进程创建，
  *  renderer 列表未必已收录）；selectSession 会自动退出赛马视图。 */
 async function openBuilderSession(sessionId: string): Promise<void> {
@@ -203,9 +292,10 @@ async function openBuilderSession(sessionId: string): Promise<void> {
 }
 
 /** Builder 执行 + 独立审计 + 完成横幅。锁滞布局：执行泳道占满弹性
- *  高度内滚；审计卡/操作行固定下部，问题清单超长时自身内滚。 */
-function BuilderSection({ race }: { race: RaceGroup }): JSX.Element {
-  const building = race.stage === 'building' || race.stage === 'repairing';
+ *  高度内滚；审计卡/操作行固定下部，问题清单超长时自身内滚。
+ *  review=回看只读：泳道不当作运行中（无中止按钮），不重复展示完成横幅/统计。 */
+function BuilderSection({ race, review = false }: { race: RaceGroup; review?: boolean }): JSX.Element {
+  const building = !review && (race.stage === 'building' || race.stage === 'repairing');
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-3">
       <RaceLane
@@ -257,11 +347,14 @@ function BuilderSection({ race }: { race: RaceGroup }): JSX.Element {
         </div>
       )}
 
-      {race.stage === 'done' && (
-        <div className="shrink-0 rounded-2xl border border-line bg-bg-panel/70 p-4 text-[13px] text-ink">
-          {race.audit?.passed ? '🏁 赛马完成，审计通过，成果已交付。' : '🏁 赛马已结束。'}
-          <span className="ml-1 text-[12px] text-ink-faint">角色会话已保留，可在侧栏继续对话或查看变更。</span>
-        </div>
+      {race.stage === 'done' && !review && (
+        <>
+          <div className="shrink-0 rounded-2xl border border-line bg-bg-panel/70 p-4 text-[13px] text-ink">
+            {race.audit?.passed ? '🏁 赛马完成，审计通过，成果已交付。' : '🏁 赛马已结束。'}
+            <span className="ml-1 text-[12px] text-ink-faint">角色会话已保留，可在侧栏继续对话或查看变更。</span>
+          </div>
+          <RaceStatsCard race={race} />
+        </>
       )}
     </div>
   );

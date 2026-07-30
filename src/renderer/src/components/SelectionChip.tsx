@@ -34,12 +34,13 @@ export default function SelectionChip({ sel, onRemove }: Props): JSX.Element {
         onKeyDown={(e) => {
           if (e.key === 'Enter') setPreview((v) => !v);
         }}
-        className="inline-flex max-w-64 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-bg-panel px-2 py-1 text-[11.5px] transition hover:bg-bg-hover"
+        className="inline-flex max-w-64 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-bg-panel px-2 py-1.5 text-[11.5px] leading-none transition hover:bg-bg-hover"
       >
-        {sel.ext && <span className="shrink-0 font-mono text-[10px] font-semibold uppercase text-accent">{sel.ext}</span>}
-        <span className="min-w-0 truncate font-medium text-ink">{sel.fileName}</span>
-        <span className="shrink-0 font-mono text-[10.5px] text-ink-faint">{selectionRangeLabel(sel)}</span>
-        {willTruncate && <span className="shrink-0 text-[10px] text-warn">截</span>}
+        {sel.ext && <span className="shrink-0 font-mono text-[10px] font-semibold uppercase leading-none text-accent">{sel.ext}</span>}
+        {/* truncate = overflow hidden，leading-none 会削掉 g/j/p 下伸部 → 留 1.2 行高 */}
+        <span className="min-w-0 truncate font-medium leading-[1.2] text-ink">{sel.fileName}</span>
+        <span className="shrink-0 font-mono text-[10.5px] leading-none text-ink-faint">{selectionRangeLabel(sel)}</span>
+        {willTruncate && <span className="shrink-0 text-[10px] leading-none text-warn">截</span>}
         {onRemove && (
           <button
             onClick={(e) => {

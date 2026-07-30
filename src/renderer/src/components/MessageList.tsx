@@ -11,12 +11,13 @@
  *    进行态标签，指示器不再重复同一个词（避免两行 Thinking 挨着）。
  */
 
-import { useEffect, useState } from 'react';
-import { Asterisk, ChevronDown, ChevronRight, Telescope, TerminalSquare } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, ChevronRight, Telescope, TerminalSquare } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
-import MessageItem, { Collapsible, ShellCard, ThinkingBlock, ToolLine } from './MessageItem';
+import MessageItem, { Collapsible, ShellCard, ThinkingBlock, ToolLine, toolLabel } from './MessageItem';
+import { BrandSpinner } from './brand';
 
 type ToolMsg = Extract<UnifiedMessage, { kind: 'tool_call' }>;
 type ThinkMsg = Extract<UnifiedMessage, { kind: 'thinking' }>;
@@ -41,6 +42,9 @@ function buildStream(messages: UnifiedMessage[]): StreamItem[] {
   for (const m of messages) {
     // 空计划不渲染（避免空 wrapper 擑大 flex gap）。
     if (m.kind === 'plan' && m.entries.length === 0) continue;
+    // 已作答的授权/提问不留痕——授权结果不展示（只在进行中给一行知情提示），
+    // 空 wrapper 也会撑出多余 flex gap，故在建流阶段整体跳过。
+    if (m.kind === 'permission' && m.answeredOptionId !== undefined) continue;
     // todowrite/todoread 工具行不渲染 — 内容已由内联 To-dos 卡片呈现。
     if (m.kind === 'tool_call' && (m.toolName ?? '').toLowerCase().includes('todo')) continue;
     if (m.kind === 'tool_call') {
@@ -105,20 +109,21 @@ export default function MessageList({
 
 // -------------------------------------------------------------- tool group
 
-/** 可折叠工具组（explore / shell）：进行中强制展开明细，结束后复位为
- *  默认折叠（可点开）。明细行：explore 工具 → ToolLine，shell → ShellCard，
- *  思考 → ThinkingBlock（流式中仍有 8 行滚窗）。 */
+/** 工具活动组（explore / shell）—— 方案 A「定高活动窗」：
+ *  进行中固定高度（状态行 + 1px 扫描线 + 3 行历史视窗，新行从底部推入、
+ *  旧行上移到顶部被渐隐遮罩吞掉），高度恒定不随步数增长；回合结束坍缩成
+ *  单行摘要，点击展开完整历史（含各行的输出/diff 查看入口）。这样「进行
+ *  →折叠」的高度突变只发生一次且在回合边界，消除页面上下跳动。 */
 function ToolGroup({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[] }): JSX.Element {
   const tools = entries.filter((e): e is ToolMsg => e.kind === 'tool_call');
   const active = entries.some((e) =>
     e.kind === 'tool_call' ? e.status === 'in_progress' || e.status === 'pending' : e.streaming,
   );
-  const [userOpen, setUserOpen] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!active) setUserOpen(null);
-  }, [active]);
-  const open = userOpen ?? active;
 
+  // 进行中 → 定高活动窗（不可折叠、高度恒定）。
+  if (active) return <ActivityWindow gkind={gkind} entries={entries} />;
+
+  // 已完成 → 单行摘要，点击展开完整历史。
   const failed = tools.filter((m) => m.status === 'failed').length;
   let summary: string;
   if (gkind === 'shell') {
@@ -131,20 +136,157 @@ function ToolGroup({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[]
     if (searches > 0) parts.push(`${searches} ${searches === 1 ? 'search' : 'searches'}`);
     summary = `Explored ${parts.join(' · ')}`;
   }
-  const Icon = gkind === 'shell' ? TerminalSquare : Telescope;
+  return <ToolSummary Icon={gkind === 'shell' ? TerminalSquare : Telescope} summary={summary} failed={failed} entries={entries} gkind={gkind} />;
+}
 
+/** 进行中的定高活动窗：状态行（品牌 spinner + 动词流光 + 步数·用时）
+ *  + 扫描线 + 60px（3 行）视窗；视窗内容底部对齐，新行推入、旧行溢出
+ *  顶部被渐隐遮罩吞掉。只渲染尾部若干行（完整历史在折叠态可查）。 */
+function ActivityWindow({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[] }): JSX.Element {
+  const start = entries[0]?.createdAt ?? Date.now();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  // 定高遮罩视窗内无法行内展开（会被裁切），故被点开的思考正文
+  // 渲染到视窗下方（抽屉）——用户主动展开，允许的高度变化。
+  const [openThink, setOpenThink] = useState<string | null>(null);
+  const steps = entries.filter((e) => e.kind === 'tool_call').length;
+  const tail = entries.slice(-8);
+  const revealed = openThink
+    ? (entries.find((e) => e.id === openThink && e.kind === 'thinking') as ThinkMsg | undefined)
+    : undefined;
   return (
     <div className="text-ui">
-      <button onClick={() => setUserOpen(!open)} className="group flex items-center gap-1.5">
-        <Icon size={13} className={`shrink-0 ${active ? 'text-accent' : 'text-ink-faint group-hover:text-ink-soft'}`} />
-        {active ? (
-          <span className="shimmer-text font-medium">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
-        ) : (
-          <span className="text-ink-faint transition group-hover:text-ink-soft">{summary}</span>
-        )}
-        {!active && failed > 0 && (
-          <span className="shrink-0 text-[11.5px] text-err">{failed} failed</span>
-        )}
+      <div className="flex items-center gap-2" style={{ height: 22 }}>
+        <BrandSpinner size={14} className="shrink-0 text-accent" />
+        <span className="shimmer-text text-[12.5px] font-medium">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
+        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-ink-faint">
+          {steps > 0 ? `${steps} ${steps === 1 ? 'step' : 'steps'} · ` : ''}
+          {fmtElapsed(now - start)}
+        </span>
+      </div>
+      <div className="tool-scan my-[3px]" />
+      <div
+        className="overflow-hidden"
+        style={{
+          height: 60,
+          WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, #000 22px)',
+          maskImage: 'linear-gradient(to bottom, transparent 0, #000 22px)',
+        }}
+      >
+        <div className="flex min-h-full flex-col justify-end">
+          {tail.map((e) => (
+            <CompactRow
+              key={e.id}
+              entry={e}
+              expanded={openThink === e.id}
+              onToggle={() => setOpenThink((prev) => (prev === e.id ? null : e.id))}
+            />
+          ))}
+        </div>
+      </div>
+      {/* 展开的思考正文（阐述推理——真内容，区别于工具行）。 */}
+      {revealed && <ThinkingReveal text={revealed.text} streaming={revealed.streaming} />}
+    </div>
+  );
+}
+
+/** 活动窗内的单行紧凑态（20px）：3px 状态刻度 + 动词 + 对象 + 辅助数。
+ *  工具行纯知情不可展；思考行是真推理内容，带箭头可点击展开（正文在
+ *  视窗下方阐述）。 */
+function CompactRow({
+  entry,
+  expanded,
+  onToggle,
+}: {
+  entry: GroupEntry;
+  expanded?: boolean;
+  onToggle?: () => void;
+}): JSX.Element {
+  if (entry.kind === 'thinking') {
+    const running = entry.streaming;
+    const hasText = !!entry.text;
+    return (
+      <button
+        onClick={() => hasText && onToggle?.()}
+        className={`group flex w-full items-center gap-2 text-left ${hasText ? '' : 'cursor-default'}`}
+        style={{ height: 20 }}
+      >
+        <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${running ? 'bg-accent tool-tick-run' : 'bg-ink-faint/50'}`} />
+        <span className={`shrink-0 text-[12px] ${running ? 'shimmer-text font-medium' : 'text-ink-soft'}`}>Thinking</span>
+        {hasText &&
+          (expanded ? (
+            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+          ) : (
+            <ChevronRight size={12} className="shrink-0 text-ink-faint opacity-0 transition group-hover:opacity-100" />
+          ))}
+      </button>
+    );
+  }
+  const running = entry.status === 'in_progress' || entry.status === 'pending';
+  const failed = entry.status === 'failed';
+  const isShell = entry.toolKind === 'execute';
+  const label = toolLabel(entry);
+  const verb = isShell ? (running ? 'Running' : 'Ran') : label.verb;
+  const object = isShell ? entry.title : label.object;
+  const matches = entry.content?.matches;
+  return (
+    <div className="flex items-center gap-2" style={{ height: 20 }}>
+      <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${running ? 'bg-accent tool-tick-run' : failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
+      <span className={`shrink-0 text-[12px] ${running ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>{verb}</span>
+      {object && object !== verb && (
+        <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-faint">{object}</span>
+      )}
+      {matches != null && !running && (
+        <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-ink-faint/80">{matches}</span>
+      )}
+      {failed && <span className="ml-auto shrink-0 text-[10.5px] text-err">failed</span>}
+    </div>
+  );
+}
+
+/** 活动窗内思考行展开后的推理正文（视窗下方，不受遮罩限高）：
+ *  流式中自动贴底，与 ThinkingBlock 正文同样式。 */
+function ThinkingReveal({ text, streaming }: { text: string; streaming: boolean }): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (streaming && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text, streaming]);
+  return (
+    <div
+      ref={ref}
+      className="ml-[5px] mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap border-l-2 border-line pl-3.5 text-[12.5px] leading-6 text-ink-faint [overflow-wrap:anywhere]"
+    >
+      {text}
+    </div>
+  );
+}
+
+/** 完成态摘要行：图标 + 概览（Explored/Ran …），点击展开完整历史。
+ *  展开区沿用原明细：explore → ToolLine、shell → ShellCard（含输出查看）、
+ *  思考 → ThinkingBlock。 */
+function ToolSummary({
+  Icon,
+  summary,
+  failed,
+  entries,
+  gkind,
+}: {
+  Icon: typeof Telescope;
+  summary: string;
+  failed: number;
+  entries: GroupEntry[];
+  gkind: GroupKind;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="text-ui">
+      <button onClick={() => setOpen(!open)} className="group flex items-center gap-1.5">
+        <Icon size={13} className="shrink-0 text-ink-faint transition group-hover:text-ink-soft" />
+        <span className="text-ink-faint transition group-hover:text-ink-soft">{summary}</span>
+        {failed > 0 && <span className="shrink-0 text-[11.5px] text-err">{failed} failed</span>}
         {open ? (
           <ChevronDown size={12} className="shrink-0 text-ink-faint" />
         ) : (
@@ -174,6 +316,13 @@ function ToolGroup({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[]
   );
 }
 
+/** 活动窗计时：秒级用时（<60s 显 Ns，否则 Nm Ns）。 */
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 60) return `${Math.round(s)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
 // ------------------------------------------------------ activity indicator
 
 /** 流末尾是否已有可见的进行态元素（自带 Thinking/Exploring/Generating/
@@ -192,7 +341,8 @@ function hasVisibleActivity(messages: UnifiedMessage[]): boolean {
 function ActivityIndicator(): JSX.Element {
   return (
     <div className="flex items-center gap-1.5 text-ui">
-      <Asterisk size={14} className="animate-[spin_2.4s_linear_infinite] text-accent" />
+      {/* 全局进行态指示 — 规范要求品牌 spinner，不用 lucide 图标旋转 */}
+      <BrandSpinner size={14} />
       <span className="shimmer-text font-medium">Working…</span>
     </div>
   );
