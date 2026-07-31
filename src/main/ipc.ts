@@ -20,11 +20,12 @@ import { fetchOmpCatalog } from './engine/omp/resolveOmp';
 import { fetchAntigravityCatalog } from './engine/antigravity/resolveAntigravity';
 import { listAgyAccounts, listAgyImportCandidates, importAgyAccounts, importAgyAccountsFromFile, removeAgyAccount, switchAgyAccount, queryAgyQuota, queryActiveAgyQuota } from './engine/antigravity/agyAccounts';
 import { applyWindowTheme } from './windowTheme';
-import { gitStatus, importPaths, isDirectory, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
+import { detectOpeners, gitStatus, importPaths, isDirectory, listTree, openIn, readFilePreview, saveTempAttachment, writeFileChecked } from './fs/fsService';
 import { compatAudit } from './engine/compatAudit';
 import { listSlashItems } from './slash/slashService';
 import { getProviderQuotas } from './usage/providerQuota';
 import { generateTitle } from './titleGen';
+import { setMainLang } from './i18n';
 
 export function registerIpc(
   sessions: SessionManager,
@@ -87,6 +88,9 @@ export function registerIpc(
   ipcMain.handle(IPC.sessionGoalControl, (_e, sessionId: string, action: GoalControlAction) =>
     sessions.controlGoal(sessionId, action),
   );
+  ipcMain.handle(IPC.sessionSetSwarm, (_e, sessionId: string, active: boolean) =>
+    sessions.setSwarm(sessionId, active),
+  );
   ipcMain.handle(IPC.sessionMarkRead, (_e, sessionId: string) => sessions.markRead(sessionId));
   ipcMain.handle(IPC.sessionSetArchived, (_e, sessionId: string, archived: boolean) =>
     sessions.setArchived(sessionId, archived),
@@ -99,7 +103,11 @@ export function registerIpc(
   );
 
   ipcMain.handle(IPC.settingsGet, () => settings.get());
-  ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => settings.set(patch));
+  ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => {
+    const next = settings.set(patch);
+    setMainLang(next.language); // 主进程文案（错误/通知/权限选项）随界面语言即时切换
+    return next;
+  });
   // AI 生成会话标题 — key 只在主进程使用；失败返回 null 由渲染层回退。
   ipcMain.handle(IPC.titleGenerate, (_e, text: string) => generateTitle(settings.get().titleGen, text));
   // 用量统计 — 扫描各会话消息文件的 turn_end 统计行按时间桶聚合。
@@ -107,7 +115,7 @@ export function registerIpc(
   // 供应商套餐余量/余额 — key 只在主进程使用，结果不含任何密钥。
   ipcMain.handle(IPC.providerQuota, (_e, force?: boolean) => getProviderQuotas(!!force));
   // CLI 配置只读快照 — key 从不跨进 renderer（只有 hasKey 标记）。
-  ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs());
+  ipcMain.handle(IPC.engineConfigsGet, () => readEngineConfigs({ claudeCliPath: settings.get().claudeCliPath }));
   // 引擎兼容性审计快照（设置页诊断卡首次打开时拉取；增量走推送）。
   ipcMain.handle(IPC.compatAuditGet, () => compatAudit.snapshot());
   // opencode 模型目录 — 主进程代理 /config/providers（renderer 不直连
@@ -183,10 +191,11 @@ export function registerIpc(
   ipcMain.handle(IPC.fsImport, (_e, root: string, srcPaths: string[]) => importPaths(root, srcPaths));
   ipcMain.handle(IPC.fsIsDir, (_e, path: string) => isDirectory(path));
   ipcMain.handle(IPC.openIn, (_e, target: OpenTarget, path: string) => openIn(target, path));
+  ipcMain.handle(IPC.openersDetect, (_e, force?: boolean) => detectOpeners(force));
   ipcMain.handle(IPC.attachmentSaveTemp, (_e, bytes: Uint8Array, ext: string) => saveTempAttachment(bytes, ext));
 
   // 斜线命令候选（skills/commands 目录扫描，纯只读）。
-  ipcMain.handle(IPC.slashList, (_e, req: SlashListRequest) => listSlashItems(req.cwd, req.engine));
+  ipcMain.handle(IPC.slashList, (_e, req: SlashListRequest) => listSlashItems(req.cwd, req.engine, req.pushedCommands));
 
   // 面板内嵌终端：每会话一个管道式 shell（cwd = 会话目录）。
   ipcMain.handle(IPC.terminalCreate, (_e, id: string, cwd: string) => terminal.create(id, cwd));
@@ -209,6 +218,7 @@ export function registerIpc(
   );
   ipcMain.handle(IPC.raceRetryRacer, (_e, raceId: string, role: RaceRole) => race.retryRacer(raceId, role));
   ipcMain.handle(IPC.raceRevokeAdopt, (_e, raceId: string) => race.revokeAdopt(raceId));
+  ipcMain.handle(IPC.raceRerunJudge, (_e, raceId: string) => race.rerunJudge(raceId));
   ipcMain.handle(IPC.raceEliminate, (_e, raceId: string, role: RaceRole) => race.eliminateRacer(raceId, role));
   ipcMain.handle(IPC.raceRestartPlanning, (_e, raceId: string) => race.restartPlanning(raceId));
   ipcMain.handle(IPC.raceCancel, (_e, raceId: string) => race.cancel(raceId));

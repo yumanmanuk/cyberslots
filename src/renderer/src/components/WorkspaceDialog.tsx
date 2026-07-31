@@ -3,8 +3,9 @@
  * codex-desktop「创建项目」style (item 10): name field with folder
  * icon, "Source folders" list with a Primary badge on the first
  * folder, × per row, and an "添加文件夹" row at the bottom.
- * The first folder becomes the engine cwd; extra folders are announced
- * to the engine via a context prefix.
+ * The first folder becomes the engine cwd; extra folders reach engines
+ * via a context prefix (all engines) plus native multi-root channels
+ * (claude/omp --add-dir, codex writable_roots, opencode permission rules).
  */
 
 import { useEffect, useState } from 'react';

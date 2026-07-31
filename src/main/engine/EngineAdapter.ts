@@ -29,6 +29,12 @@ export interface EngineAdapter {
   /** Compact/summarize the conversation context. Optional per engine. */
   compact?(): Promise<void>;
   /**
+   * 原生斜杠命令回合（opencode POST /session/{id}/command）。仅引擎侧
+   * 不解析 prompt 文本里的斜杠、但提供专用命令端点时实现；由
+   * SessionManager.prompt 的发送侧斜杠路由调度。
+   */
+  command?(name: string, args: string): Promise<void>;
+  /**
    * Inject user input into the in-flight turn (codex turn/steer).
    * Returns false when there is no steerable active turn.
    */
@@ -39,6 +45,11 @@ export interface EngineAdapter {
    */
   setGoal?(objective: string): Promise<void>;
   controlGoal?(action: GoalControlAction): Promise<void>;
+  /**
+   * Engine-native swarm mode toggle (kimi KAP agent_config.swarm_mode)。
+   * 无原生面的引擎缺省 — UI 退回提示词引导（swarmBoost 前缀）。
+   */
+  setSwarm?(active: boolean): Promise<void>;
   /** Kill the engine process and release resources. */
   dispose(): Promise<void>;
 }

@@ -10,15 +10,17 @@
 import { Flag, X } from 'lucide-react';
 
 import { BrandSpinner } from '../brand';
+import { RaceHorse } from '../RaceHorse';
 import { useEffect, useState } from 'react';
 
 import type { EngineId, UnifiedMessage } from '@shared/types';
 import type { RaceRole, RaceRoleConfigs } from '@shared/race';
-import { RACE_ROLES, RACE_ROLE_LABELS } from '@shared/race';
+import { RACE_ROLES } from '@shared/race';
+import { raceRoleKey, useT } from '../../i18n';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS, useEngineOrder } from '../EngineIcon';
-import { EFFORT_LABELS, maxEffort, useRoleCatalogs } from './modelCatalogs';
+import { effortLabel, maxEffort, useRoleCatalogs } from './modelCatalogs';
 
 interface RoleDraft {
   engine: EngineId;
@@ -50,6 +52,7 @@ function buildContextSeed(messages: UnifiedMessage[] | undefined): string {
 }
 
 export default function RaceSetup(): JSX.Element | null {
+  const t = useT();
   const open = useRaceStore((s) => s.setupOpen);
   const closeSetup = useRaceStore((s) => s.closeSetup);
   const startRace = useRaceStore((s) => s.startRace);
@@ -145,7 +148,7 @@ export default function RaceSetup(): JSX.Element | null {
         className="flex max-h-[86vh] w-[720px] flex-col rounded-2xl border border-line bg-bg p-5 shadow-2xl"
       >
         <div className="mb-3 flex items-center justify-between">
-          <span className="flex items-center gap-2 text-sm font-semibold">🏇 发起赛马 · 竞争式规划</span>
+          <span className="flex items-center gap-2 text-sm font-semibold"><RaceHorse size={16} className="shrink-0" />{t('raceSetupTitle')}</span>
           <button onClick={closeSetup} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
             <X size={16} />
           </button>
@@ -155,16 +158,16 @@ export default function RaceSetup(): JSX.Element | null {
           autoFocus
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="描述要赛马的任务（两位选手将各自独立出方案）…"
+          placeholder={t('raceSetupPromptPlaceholder')}
           className="mb-3 min-h-24 w-full resize-y rounded-xl border border-line bg-bg-input px-3 py-2.5 text-[13px] text-ink outline-none transition placeholder:text-ink-faint focus:border-accent"
         />
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mb-1.5 grid grid-cols-[88px_1fr_1.4fr_96px] gap-2 px-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">
-            <span>角色</span>
-            <span>引擎</span>
-            <span>模型</span>
-            <span>思考深度</span>
+            <span>{t('raceColRole')}</span>
+            <span>{t('engine')}</span>
+            <span>{t('model')}</span>
+            <span>{t('effort')}</span>
           </div>
           {visibleRoles.map((role) => {
             const d = roles[role];
@@ -172,7 +175,7 @@ export default function RaceSetup(): JSX.Element | null {
             const effOpts = effortOptions(d.engine, d.modelId);
             return (
               <div key={role} className="mb-1.5 grid grid-cols-[88px_1fr_1.4fr_96px] items-center gap-2">
-                <span className="text-[12.5px] font-medium text-ink">{RACE_ROLE_LABELS[role]}</span>
+                <span className="text-[12.5px] font-medium text-ink">{t(raceRoleKey(role))}</span>
                 <select
                   value={d.engine}
                   onChange={(e) => onEngine(role, e.target.value as EngineId)}
@@ -181,7 +184,7 @@ export default function RaceSetup(): JSX.Element | null {
                   {engineOrder.map((eng) => (
                     <option key={eng} value={eng} disabled={availability ? !availability[eng] : false}>
                       {ENGINE_LABELS[eng]}
-                      {availability && !availability[eng] ? '（未安装）' : ''}
+                      {availability && !availability[eng] ? t('raceNotInstalled') : ''}
                     </option>
                   ))}
                 </select>
@@ -191,7 +194,7 @@ export default function RaceSetup(): JSX.Element | null {
                   className="min-w-0 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent"
                 >
                   {/* 目录为空时兜底「引擎默认」；当前值不在目录里时补一项避免丢选 */}
-                  {mOpts.length === 0 && <option value="">引擎默认</option>}
+                  {mOpts.length === 0 && <option value="">{t('raceEngineDefault')}</option>}
                   {d.modelId && !mOpts.some((o) => o.value === d.modelId) && (
                     <option value={d.modelId}>{d.modelId}</option>
                   )}
@@ -207,7 +210,7 @@ export default function RaceSetup(): JSX.Element | null {
                     value=""
                     className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-faint opacity-60 outline-none"
                   >
-                    <option value="">默认</option>
+                    <option value="">{t('raceEffortDefault')}</option>
                   </select>
                 ) : (
                   <select
@@ -217,7 +220,7 @@ export default function RaceSetup(): JSX.Element | null {
                   >
                     {effOpts.map((ef) => (
                       <option key={ef} value={ef}>
-                        {EFFORT_LABELS[ef] ?? ef}
+                        {effortLabel(ef)}
                       </option>
                     ))}
                   </select>
@@ -229,26 +232,26 @@ export default function RaceSetup(): JSX.Element | null {
 
         <label className="mt-2 flex cursor-pointer select-none items-center gap-2 text-[12px] text-ink-soft">
           <input type="checkbox" checked={includeC} onChange={(e) => setIncludeC(e.target.checked)} />
-          启用第三选手（选手 C 同场竞速，三方互驳；可在设置里改默认）
+          {t('raceEnableRacerC')}
         </label>
 
         {hasHistory && (
           <label className="mt-2 flex cursor-pointer select-none items-center gap-2 text-[12px] text-ink-soft">
             <input type="checkbox" checked={withContext} onChange={(e) => setWithContext(e.target.checked)} />
-            携带本对话上下文摘录（作为双选手的背景资料，注入规划回合）
+            {t('raceWithContext')}
           </label>
         )}
 
         <div className="mt-3 flex items-center gap-3">
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint" title={cwd || '草稿目录'}>
-            工作目录：{cwd || '（无 · 各角色使用草稿目录，执行者改动不落真实项目）'}
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-faint" title={cwd || t('raceDraftDir')}>
+            {t('raceCwdLabel')}{cwd || t('raceCwdNone')}
           </span>
           <button
             disabled={!prompt.trim() || starting}
             onClick={() => void fire()}
             className="flex items-center gap-1.5 rounded-xl bg-accent px-5 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-30"
           >
-            {starting ? <BrandSpinner size={13} /> : <Flag size={13} />} {starting ? '发令中…' : '发令 ▶'}
+            {starting ? <BrandSpinner size={13} /> : <Flag size={13} />} {starting ? t('raceFiring') : t('raceFire')}
           </button>
         </div>
       </div>

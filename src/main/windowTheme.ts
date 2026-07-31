@@ -7,7 +7,7 @@
 import { nativeTheme } from 'electron';
 import type { BrowserWindow } from 'electron';
 
-import type { ResolvedMode, ThemeMode, ThemePalette, WindowAppearance } from '@shared/types';
+import type { ResolvedMode, ThemeMode, WindowAppearance } from '@shared/types';
 
 interface ChromeColors {
   bg: string;
@@ -16,13 +16,10 @@ interface ChromeColors {
 
 // 顶栏/侧栏 = 画布色（--bg-canvas），原生右上角窗口控制按钮区同色 →
 // 整条顶栏无缝；主内容浮层（--bg）带左上大圆角浮在画布上。
-export const THEME_CHROME: Record<`${ThemePalette}-${ResolvedMode}`, ChromeColors> = {
-  'notion-light': { bg: '#EFECE4', symbol: '#37352F' },
-  'notion-dark': { bg: '#0F0E0E', symbol: '#CECDC3' },
-  'solarized-light': { bg: '#EEE8D5', symbol: '#586E75' },
-  'solarized-dark': { bg: '#00212B', symbol: '#93A1A1' },
-  'everforest-light': { bg: '#E5DFC5', symbol: '#5C6A72' },
-  'everforest-dark': { bg: '#232A2E', symbol: '#D3C6AA' },
+// 皮肤已收敛为单一 notion 主题，只按明暗一维映射。
+export const THEME_CHROME: Record<ResolvedMode, ChromeColors> = {
+  light: { bg: '#F0ECDF', symbol: '#37352F' },
+  dark: { bg: '#0F0E0E', symbol: '#CECDC3' },
 };
 
 export const TITLEBAR_HEIGHT = 40;
@@ -34,7 +31,7 @@ export function resolveMode(mode: ThemeMode): ResolvedMode {
 }
 
 export function chromeFor(appearance: WindowAppearance): ChromeColors {
-  return THEME_CHROME[`${appearance.palette}-${appearance.mode}`] ?? THEME_CHROME['notion-light'];
+  return THEME_CHROME[appearance.mode] ?? THEME_CHROME.light;
 }
 
 export function applyWindowTheme(win: BrowserWindow, appearance: WindowAppearance): void {

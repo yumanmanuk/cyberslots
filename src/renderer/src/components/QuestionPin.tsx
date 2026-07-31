@@ -24,6 +24,9 @@ export default function QuestionPin({
   const [pinned, setPinned] = useState<{ id: string; text: string } | null>(null);
   // 下一条提问逼近顶缘时把胶囊往上推出去的位移（≤0，sticky 分组头手感）。
   const [push, setPush] = useState(0);
+  // 滚动条占宽 — 浮层盖在含滚动条的全宽上，而消息列在客户区内居中；
+  // 右缘扣掉它才能和气泡同轴。
+  const [sbw, setSbw] = useState(0);
   const pinRef = useRef<HTMLButtonElement>(null);
 
   const userMsgs = useMemo(
@@ -54,6 +57,7 @@ export default function QuestionPin({
     // 间隙）时按侵入量上推，直到它越过顶缘接棒。
     const pinH = pinRef.current?.offsetHeight ?? 32;
     setPush(cur && nextTop != null ? Math.min(0, nextTop - (8 + pinH + 6)) : 0);
+    setSbw(scroller.offsetWidth - scroller.clientWidth);
   }, [userMsgs, scrollRef]);
 
   const updateRef = useRef(update);
@@ -96,10 +100,12 @@ export default function QuestionPin({
   };
 
   return (
-    // 与消息列同轴（mx-auto max-w-3xl px-6），胶囊右对齐呼应用户气泡位置。
+    // 与消息列同轴：px-6 必须和内容列一样加在 max-w-3xl 列内部（宽屏下外层
+    // padding 约束不到内层 768px 列，胶囊会越出气泡右缘 24px）；右缘再扣掉
+    // 滚动条宽，与客户区的居中基准对齐。胶囊右对齐呼应用户气泡位置。
     // overflow-hidden 裁掉上推时露出顶缘的部分（推出 = 滑出视口）。
-    <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center overflow-hidden px-6">
-      <div className="flex w-full max-w-3xl justify-end" style={{ transform: `translateY(${push}px)` }}>
+    <div style={{ right: sbw }} className="pointer-events-none absolute left-0 top-0 z-10 flex justify-center overflow-hidden">
+      <div className="flex w-full max-w-3xl justify-end px-6" style={{ transform: `translateY(${push}px)` }}>
         <button
           key={pinned.id}
           ref={pinRef}

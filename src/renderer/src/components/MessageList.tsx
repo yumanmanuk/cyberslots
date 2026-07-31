@@ -12,11 +12,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, Telescope, TerminalSquare } from 'lucide-react';
+import { ChevronDown, ChevronRight, Clock, Telescope, TerminalSquare } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
-import MessageItem, { Collapsible, ShellCard, ThinkingBlock, ToolLine, toolLabel } from './MessageItem';
+import MessageItem, { Collapsible, ShellCard, ThinkingBlock, ToolLine, fmtDuration, toolLabel } from './MessageItem';
 import { BrandSpinner } from './brand';
 
 type ToolMsg = Extract<UnifiedMessage, { kind: 'tool_call' }>;
@@ -42,6 +42,9 @@ function buildStream(messages: UnifiedMessage[]): StreamItem[] {
   for (const m of messages) {
     // 空计划不渲染（避免空 wrapper 擑大 flex gap）。
     if (m.kind === 'plan' && m.entries.length === 0) continue;
+    // 已定稿的空 text 段同理跳过（个别引擎回合里会留下空段，
+    // 空 md-body 也会白占一个 gap 槽位）；流式中的保留——正在往里写。
+    if (m.kind === 'text' && !m.streaming && !m.planDoc && !m.text.trim()) continue;
     // 已作答的授权/提问不留痕——授权结果不展示（只在进行中给一行知情提示），
     // 空 wrapper 也会撑出多余 flex gap，故在建流阶段整体跳过。
     if (m.kind === 'permission' && m.answeredOptionId !== undefined) continue;
@@ -77,6 +80,72 @@ function buildStream(messages: UnifiedMessage[]): StreamItem[] {
   return items;
 }
 
+// --------------------------------------------- turn-level "Worked for" fold
+
+type RenderItem = StreamItem | { type: 'worked'; turnId: number; durationMs?: number; items: StreamItem[] };
+
+const itemTurnId = (it: StreamItem): number => (it.type === 'msg' ? it.msg.turnId : it.entries[0]!.turnId);
+
+/** 过程块判定（思考 / 独立工具 / 工具组）— trailing text 分界用。 */
+const isProcessItem = (it: StreamItem): boolean =>
+  it.type === 'tools' || (it.type === 'msg' && (it.msg.kind === 'thinking' || it.msg.kind === 'tool_call'));
+
+/**
+ * 回合级二次坦缩（codex 桌面版 “Worked for Xm Xs” 同款）：只对「已有
+ * turn_end 的回合」生效 — 把该回合的过程块（思考 / 工具组 / 独立工具 /
+ * 夹在中间的陈述 text）归入一个 Worked for 折叠行；回合末尾的 trailing
+ * text（最终结论）、To-dos / Plan 文档卡、error / system / turn_end / 用户
+ * 气泡保持可见。进行中回合（无 turn_end）完全走现状渲染，折叠只在回合
+ * 边界发生一次，不破坏活动窗/流式贴底体验。
+ */
+function foldFinishedTurns(items: StreamItem[], messages: UnifiedMessage[]): RenderItem[] {
+  // 完成回合 = 存在 turn_end；同时记下其时长（Worked for 的数据源）。
+  const turnEnds = new Map<number, { durationMs?: number; createdAt: number }>();
+  for (const m of messages) {
+    if (m.kind === 'turn_end') turnEnds.set(m.turnId, { durationMs: m.durationMs, createdAt: m.createdAt });
+  }
+  if (turnEnds.size === 0) return items;
+
+  // 各回合最后一个过程块的位置 — 之后的 text 是最终结论（pinned）。
+  const lastProcessIdx = new Map<number, number>();
+  items.forEach((it, i) => {
+    if (isProcessItem(it)) lastProcessIdx.set(itemTurnId(it), i);
+  });
+
+  const collapsed = (it: StreamItem, i: number): boolean => {
+    const tid = itemTurnId(it);
+    if (!turnEnds.has(tid)) return false; // 进行中回合一律走现状。
+    if (it.type === 'tools') return true;
+    const m = it.msg;
+    if (m.kind === 'thinking' || m.kind === 'tool_call') return true;
+    // 中间陈述 text（在末个过程块之前）收进折叠；trailing / planDoc 保持可见。
+    if (m.kind === 'text' && !m.planDoc) return i < (lastProcessIdx.get(tid) ?? -1);
+    return false; // user / plan / turn_end / system / error / ask_user … 均 pinned。
+  };
+
+  const rendered: RenderItem[] = [];
+  const workedByTurn = new Map<number, Extract<RenderItem, { type: 'worked' }>>();
+  items.forEach((it, i) => {
+    if (!collapsed(it, i)) {
+      rendered.push(it);
+      return;
+    }
+    const tid = itemTurnId(it);
+    let w = workedByTurn.get(tid);
+    if (!w) {
+      const end = turnEnds.get(tid)!;
+      // 历史数据缺 durationMs → 退回「首个过程块 → turn_end」时间跨度。
+      const start = it.type === 'msg' ? it.msg.createdAt : it.entries[0]!.createdAt;
+      const fallback = end.createdAt > start ? end.createdAt - start : undefined;
+      w = { type: 'worked', turnId: tid, durationMs: end.durationMs ?? fallback, items: [] };
+      workedByTurn.set(tid, w);
+      rendered.push(w);
+    }
+    w.items.push(it);
+  });
+  return rendered;
+}
+
 export default function MessageList({
   sessionId,
   messages,
@@ -88,7 +157,7 @@ export default function MessageList({
   // 启动期已发送（prompt 在途等引擎就绪）也算进行态 — 否则用户发完
   // 首条消息到回合真正开始的 1~5s 窗口内界面像死机。
   const sending = useChatStore((s) => !!s.sending[sessionId]);
-  const items = buildStream(messages);
+  const items = foldFinishedTurns(buildStream(messages), messages);
   return (
     <>
       {items.map((it) =>
@@ -96,14 +165,58 @@ export default function MessageList({
           <div key={it.msg.id} data-msg-id={it.msg.id}>
             <MessageItem msg={it.msg} sessionId={sessionId} />
           </div>
-        ) : (
+        ) : it.type === 'tools' ? (
           <div key={it.id} data-msg-id={it.entries[0]!.id}>
             <ToolGroup gkind={it.gkind} entries={it.entries} />
+          </div>
+        ) : (
+          <div key={`worked-${it.turnId}`} data-msg-id={it.items[0]!.type === 'msg' ? (it.items[0] as Extract<StreamItem, { type: 'msg' }>).msg.id : (it.items[0] as Extract<StreamItem, { type: 'tools' }>).entries[0]!.id}>
+            <WorkedFor durationMs={it.durationMs} items={it.items} sessionId={sessionId} />
           </div>
         ),
       )}
       {(status === 'running' || status === 'awaiting' || sending) && !hasVisibleActivity(messages) && <ActivityIndicator />}
     </>
+  );
+}
+
+/** 已结束回合的过程总折叠行：一行 “Worked for Xm Xs”，点开还原现有
+ *  分组明细（Thought/Explored/Ran 两级折叠都保留）。样式对齐 ToolSummary。 */
+function WorkedFor({
+  durationMs,
+  items,
+  sessionId,
+}: {
+  durationMs?: number;
+  items: StreamItem[];
+  sessionId: string;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="text-ui">
+      <button onClick={() => setOpen(!open)} className="group flex items-center gap-1.5">
+        <Clock size={13} className="shrink-0 text-ink-faint transition group-hover:text-ink-soft" />
+        <span className="text-ink-faint transition group-hover:text-ink-soft">
+          Worked{durationMs != null && durationMs > 0 ? ` for ${fmtDuration(durationMs)}` : ''}
+        </span>
+        {open ? (
+          <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+        ) : (
+          <ChevronRight size={12} className="shrink-0 text-ink-faint opacity-0 transition group-hover:opacity-100" />
+        )}
+      </button>
+      <Collapsible open={open}>
+        <div className="mt-2 flex flex-col gap-3">
+          {items.map((it) =>
+            it.type === 'msg' ? (
+              <MessageItem key={it.msg.id} msg={it.msg} sessionId={sessionId} />
+            ) : (
+              <ToolGroup key={it.id} gkind={it.gkind} entries={it.entries} />
+            ),
+          )}
+        </div>
+      </Collapsible>
+    </div>
   );
 }
 

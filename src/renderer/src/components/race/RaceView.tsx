@@ -8,9 +8,11 @@ import { ArrowLeft, CircleAlert, OctagonX } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { BrandHero } from '../brand';
+import { RaceHorse } from '../RaceHorse';
 
 import type { RaceGroup, RaceRole, RaceStage, RacerRole } from '@shared/race';
-import { RACER_ROLES, RACE_ROLE_LABELS, RACE_STAGE_LABELS } from '@shared/race';
+import { RACER_ROLES } from '@shared/race';
+import { raceRoleKey, raceStageKey, useT } from '../../i18n';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS } from '../EngineIcon';
@@ -21,10 +23,10 @@ import RaceLane from './RaceLane';
 import RaceStatsCard from './RaceStatsCard';
 import RoleTuneDialog from './RoleTuneDialog';
 
-function roleSubtitle(race: RaceGroup, role: RaceRole): string {
+function roleSubtitle(t: ReturnType<typeof useT>, race: RaceGroup, role: RaceRole): string {
   const cfg = race.roles[role];
   if (!cfg) return '';
-  return `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || '默认模型'}${cfg.effort ? ` · ${cfg.effort}` : ''}`;
+  return `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || t('raceDefaultModel')}${cfg.effort ? ` · ${cfg.effort}` : ''}`;
 }
 
 /** 阶段飘字图标（与赛程电路 HUD 节点图标同谱系）。 */
@@ -39,30 +41,33 @@ const STAGE_TOAST_ICONS: Record<RaceStage, string> = {
   done: '🏁',
 };
 
-/** 阶段切换飘字：电路 HUD 下方居中浮层，滑入停留淡出后由
- *  raceStore 自动清掉；key=seq 保证连续切阶段时动画重新播放。
- *  居中靠外层 flex，动画 transform 只挂内层（不互相覆盖）。 */
+/** 阶段切换飘字：底部居中 snackbar（不压顶部电路 HUD / 打断横幅），
+ *  上浮停留淡出后由 raceStore 自动清掉；key=seq 保证连续切阶段时
+ *  动画重新播放。居中靠外层 flex，动画 transform 只挂内层（不互相覆盖）。 */
 function StageToast({ raceId }: { raceId: string }): JSX.Element | null {
+  const t = useT();
   const flash = useRaceStore((s) => s.stageFlash);
   if (!flash || flash.raceId !== raceId) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-14 z-30 flex justify-center">
+    <div className="pointer-events-none absolute inset-x-0 bottom-10 z-30 flex justify-center">
       <div
         key={flash.seq}
-        className="race-stage-toast flex items-center gap-2 rounded-full border border-accent bg-bg-panel/95 px-4 py-1.5 text-[12.5px] font-semibold text-accent shadow-lg"
+        className="race-stage-toast flex items-center gap-2 rounded-full border border-accent bg-bg-panel/95 px-5 py-2 text-[13.5px] font-semibold text-accent shadow-lg shadow-accent/25"
       >
         {flash.stage === 'done'
-          ? '🏁 赛马完成'
-          : `${STAGE_TOAST_ICONS[flash.stage]} 进入「${RACE_STAGE_LABELS[flash.stage]}」环节`}
+          ? t('raceToastDone')
+          : `${STAGE_TOAST_ICONS[flash.stage]} ${t('raceToastEnter', { stage: t(raceStageKey(flash.stage)) })}`}
       </div>
     </div>
   );
 }
 
 export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
+  const t = useT();
   const race = useRaceStore((s) => s.races[raceId]);
   const error = useRaceStore((s) => s.errors[raceId]);
   const closeRace = useRaceStore((s) => s.closeRace);
+  const selectSession = useChatStore((s) => s.selectSession);
   const cancelRace = useRaceStore((s) => s.cancelRace);
   const resumeRace = useRaceStore((s) => s.resumeRace);
   const openTune = useRaceStore((s) => s.openTune);
@@ -71,7 +76,7 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-[13px] text-ink-faint">
         <BrandHero size={56} />
-        加载赛马数据…
+        {t('raceLoading')}
       </div>
     );
   }
@@ -97,24 +102,32 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
       {/* 顶栏 */}
       <div className="flex shrink-0 items-center gap-3 border-b border-line px-5 py-2.5">
         <button
-          onClick={closeRace}
+          onClick={() => {
+            // 返回「对话」= 回到发起该赛马的宿主对话（selectSession 会顺带关掉赛马全屏）；
+            // 从总控台进入时底层不是宿主对话，故必须显式导航，不能只 closeRace。
+            // 宿主已不存在（删除等）才退回原关闭逻辑，避免选中一个不存在的会话。
+            const pid = race.parentSessionId;
+            if (pid && useChatStore.getState().sessions.some((m) => m.id === pid)) selectSession(pid);
+            else closeRace();
+          }}
           className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-ink"
         >
-          <ArrowLeft size={13} /> 返回对话
+          <ArrowLeft size={13} /> {t('raceBack')}
         </button>
-        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={race.prompt}>
-          🏇 {race.prompt}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[13px] font-semibold text-ink" title={race.prompt}>
+          <RaceHorse size={16} className="shrink-0" />
+          <span className="min-w-0 truncate">{race.prompt}</span>
         </span>
         <span className="rounded-full border border-line bg-accent-soft px-3 py-1 text-[11px] text-accent">
-          {RACE_STAGE_LABELS[stage]}
+          {t(raceStageKey(stage))}
         </span>
         {stage !== 'done' && (
           <button
             onClick={() => void cancelRace()}
-            title="中止赛马（角色会话与产物保留）"
+            title={t('raceCancelTitle')}
             className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-err"
           >
-            <OctagonX size={13} /> 中止
+            <OctagonX size={13} /> {t('raceCancel')}
           </button>
         )}
       </div>
@@ -124,13 +137,13 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
       {reviewing && (
         <div className="mx-6 mb-2 flex items-center gap-3 rounded-lg border border-line bg-bg-input px-3 py-2 text-[12px]">
           <span className="flex-1 text-ink-soft">
-            👁 正在回看「{RACE_STAGE_LABELS[shown]}」环节（只读）· 赛马仍在后台按实际进度继续，不受影响。
+            {t('raceReviewingBanner', { stage: t(raceStageKey(shown)) })}
           </span>
           <button
             onClick={() => setViewStage(null)}
             className="shrink-0 rounded-lg border border-line px-3 py-1 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
           >
-            → 回到当前进度（{RACE_STAGE_LABELS[stage]}）
+            {t('raceBackToCurrent', { stage: t(raceStageKey(stage)) })}
           </button>
         </div>
       )}
@@ -138,13 +151,13 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
       {race.interrupted && stage !== 'done' && (
         <div className="mx-6 mb-2 flex items-center gap-3 rounded-lg border border-warn bg-bg-input px-3 py-2 text-[12px]">
           <span className="flex-1 text-warn">
-            ⚠ 此赛马被应用重启打断（当前阶段：{RACE_STAGE_LABELS[stage]}），继续将重跑该阶段。
+            {t('raceInterruptedBanner', { stage: t(raceStageKey(stage)) })}
           </span>
           <button
             onClick={() => void resumeRace()}
             className="shrink-0 rounded-lg bg-accent px-3 py-1 text-[12px] font-semibold text-white transition hover:opacity-90"
           >
-            ▶ 继续赛马
+            {t('raceResume')}
           </button>
         </div>
       )}
@@ -159,24 +172,24 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
               {stage === 'judging' && race.adopt && !race.finalPlan && (
                 <button
                   onClick={() => void useRaceStore.getState().revokeAdopt()}
-                  title="撤回采纳决策，回到「选择采纳策略」重选"
+                  title={t('raceRevokeTitle')}
                   className="shrink-0 rounded-lg border border-line px-3 py-1 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
                 >
-                  ↩ 重新选择策略
+                  {t('raceReselectStrategy')}
                 </button>
               )}
               <button
                 onClick={openTune}
-                title="调整选手 A/B 的引擎/模型/思考档，保存后重试生效"
+                title={t('raceTuneRacersTitle')}
                 className="shrink-0 rounded-lg border border-line px-3 py-1 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
               >
-                ⚙ 调整选手
+                {t('raceTuneRacers')}
               </button>
               <button
                 onClick={() => void resumeRace()}
                 className="shrink-0 rounded-lg bg-accent px-3 py-1 text-[12px] font-semibold text-white transition hover:opacity-90"
               >
-                ↻ 重试当前阶段
+                {t('raceRetryStage')}
               </button>
             </>
           )}
@@ -222,6 +235,7 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
  *  三人以上在场时可 ✂ 剔除。被剔选手不占泳道（不展示残留卡），
  *  会话与产物仍持久化保留。 */
 function DualLanes({ race, running, fill = false }: { race: RaceGroup; running: boolean; fill?: boolean }): JSX.Element {
+  const t = useT();
   const retryRacer = useRaceStore((s) => s.retryRacer);
   const eliminateRacer = useRaceStore((s) => s.eliminateRacer);
   const art = race.artifacts ?? {};
@@ -243,8 +257,8 @@ function DualLanes({ race, running, fill = false }: { race: RaceGroup; running: 
           <div key={r} className={`flex min-w-0 flex-1 ${fill ? 'min-h-0' : ''}`}>
             {i > 0 && <div className="mr-4 w-px shrink-0 bg-line" />}
             <RaceLane
-              title={RACE_ROLE_LABELS[r]}
-              subtitle={roleSubtitle(race, r)}
+              title={t(raceRoleKey(r))}
+              subtitle={roleSubtitle(t, race, r)}
               sessionId={id}
               tone={toneOf(r)}
               running={running}
@@ -295,13 +309,14 @@ async function openBuilderSession(sessionId: string): Promise<void> {
  *  高度内滚；审计卡/操作行固定下部，问题清单超长时自身内滚。
  *  review=回看只读：泳道不当作运行中（无中止按钮），不重复展示完成横幅/统计。 */
 function BuilderSection({ race, review = false }: { race: RaceGroup; review?: boolean }): JSX.Element {
+  const t = useT();
   const building = !review && (race.stage === 'building' || race.stage === 'repairing');
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-3">
       <RaceLane
-        title="执行者"
+        title={t('raceRoleBuilder')}
         badge="🔨"
-        subtitle={roleSubtitle(race, 'builder')}
+        subtitle={roleSubtitle(t, race, 'builder')}
         sessionId={race.sessions.builder}
         tone="neutral"
         running={building}
@@ -316,27 +331,27 @@ function BuilderSection({ race, review = false }: { race: RaceGroup; review?: bo
           onClick={() => void openBuilderSession(race.sessions.builder!)}
           className="shrink-0 self-start text-[12px] text-accent transition hover:underline"
         >
-          ↗ 打开执行会话 —— 右侧「变更」面板可逐文件查看 diff / 拒绝回退
+          {t('raceOpenBuilder')}
         </button>
       )}
 
       {(race.audit || race.stage === 'auditing') && (
         <div className="max-h-[36vh] shrink-0 overflow-y-auto rounded-2xl border border-line bg-bg-panel/70 p-4">
           <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-ink">
-            🛡 独立审计
-            <span className="font-mono text-[10.5px] font-normal text-ink-faint">{roleSubtitle(race, 'auditor')}</span>
+            🛡 {t('raceStageAuditing')}
+            <span className="font-mono text-[10.5px] font-normal text-ink-faint">{roleSubtitle(t, race, 'auditor')}</span>
           </div>
           {race.stage === 'auditing' ? (
             <div className="flex flex-col items-center gap-2 py-3 text-[12px] text-ink-soft">
               {/* 面板横幅按规范用 BrandHero — 13px 三星在此场景退化成“横着动的三个点”，无品牌辨识度 */}
               <BrandHero size={48} />
-              审计中（对照最终方案复查执行改动）…
+              {t('raceAuditingBody')}
             </div>
           ) : race.audit?.passed ? (
-            <div className="text-[13px] font-semibold text-accent">✓ 审计通过 · 方案可交付</div>
+            <div className="text-[13px] font-semibold text-accent">{t('raceAuditPassed')}</div>
           ) : race.audit ? (
             <>
-              <div className="text-[13px] font-semibold text-err">✗ 未通过 · {race.audit.issues.length} 处问题</div>
+              <div className="text-[13px] font-semibold text-err">{t('raceAuditFailed', { n: race.audit.issues.length })}</div>
               <ul className="mt-2 space-y-1 text-[12px] text-ink-soft">
                 {race.audit.issues.map((it, i) => (
                   <li key={i}>· {it}</li>
@@ -350,8 +365,8 @@ function BuilderSection({ race, review = false }: { race: RaceGroup; review?: bo
       {race.stage === 'done' && !review && (
         <>
           <div className="shrink-0 rounded-2xl border border-line bg-bg-panel/70 p-4 text-[13px] text-ink">
-            {race.audit?.passed ? '🏁 赛马完成，审计通过，成果已交付。' : '🏁 赛马已结束。'}
-            <span className="ml-1 text-[12px] text-ink-faint">角色会话已保留，可在侧栏继续对话或查看变更。</span>
+            {race.audit?.passed ? t('raceDoneDelivered') : t('raceDoneEnded')}
+            <span className="ml-1 text-[12px] text-ink-faint">{t('raceDoneKept')}</span>
           </div>
           <RaceStatsCard race={race} />
         </>

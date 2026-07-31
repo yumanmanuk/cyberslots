@@ -33,6 +33,7 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { L } from '../../i18n';
 import { ThinkSplitter } from '../thinkSplitter';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
@@ -113,13 +114,13 @@ export class KimiAdapter implements EngineAdapter {
       this.emit({
         type: 'error',
         source: 'engine',
-        message: `kimi 进程意外退出 (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
+        message: `${L('kimi 进程意外退出', 'kimi process exited unexpectedly')} (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
       });
       this.emit({ type: 'session.status', status: 'error', detail: 'engine-exited' });
     });
     child.on('error', (err) => {
       if (this.disposed) return;
-      this.emit({ type: 'error', source: 'client', message: `无法启动 kimi CLI: ${err.message}` });
+      this.emit({ type: 'error', source: 'client', message: `${L('无法启动 kimi CLI', 'Failed to launch the kimi CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
 
@@ -169,7 +170,7 @@ export class KimiAdapter implements EngineAdapter {
           this.emit({
             type: 'error',
             source: 'engine',
-            message: `会话恢复失败，已新建会话继续（历史上下文不在引擎侧）: ${errorMessage(err)}`,
+            message: `${L('会话恢复失败，已新建会话继续（历史上下文不在引擎侧）', 'Session resume failed — started a new session (history context is not engine-side)')}: ${errorMessage(err)}`,
           });
         }
       }
@@ -196,8 +197,12 @@ export class KimiAdapter implements EngineAdapter {
 
   // ------------------------------------------------------------- actions
 
-  async prompt(text: string, attachments?: string[]): Promise<void> {
+  async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     const client = this.requireClient();
+    // effort → ACP thinking config option（kimi CLI 0.30 新增，id='thinking'，
+    // 值域 = off + 模型 support_efforts）；旧版/档位不在值域时静默忽略，
+    // 会话继续跑当前档 — 不因思考深度阻断提问。
+    await this.applyThinking(effort).catch(() => undefined);
     const turnId = ++this.turnId;
     this.splitter.reset();
     this.promptActive = true;
@@ -242,6 +247,27 @@ export class KimiAdapter implements EngineAdapter {
     await this.requireClient().cancel({ sessionId: this.sessionId });
   }
 
+  /** effort → ACP thinking config option（session/set_config_option）。
+   *  0.30 wire 字段名是 configId（探针实测 optionId 报 Invalid params，
+   *  scripts/probe-kimi-thinking.mjs），顺带 optionId 兼容中间版本。
+   *  被拒 = 旧版 CLI 无此选项或档位不在当前模型值域 — 留兼容账后放弃，
+   *  不降级重试（kimi 档位是 config.toml 静态声明，重试无意义）。 */
+  private async applyThinking(effort?: string): Promise<void> {
+    if (!effort) return; // 未指定 = 跟随会话当前档，不下发
+    const client = this.requireClient();
+    const set = (idField: 'configId' | 'optionId'): Promise<unknown> =>
+      client.setSessionConfigOption({ sessionId: this.sessionId, [idField]: 'thinking', value: effort } as never);
+    try {
+      await set('configId');
+    } catch {
+      try {
+        await set('optionId');
+      } catch (err) {
+        compatAudit.record('kimi', 'rejected-method', 'setSessionConfigOption(thinking)', errorMessage(err));
+      }
+    }
+  }
+
   async setModel(modelId: string): Promise<void> {
     const client = this.requireClient();
     try {
@@ -250,11 +276,12 @@ export class KimiAdapter implements EngineAdapter {
       // 降级路径本身正常（旧版无此实验方法），但要留账：新版引擎若砍掉
       // 此方法，这里是唯一能看到信号的地方。
       compatAudit.record('kimi', 'rejected-method', 'unstable_setSessionModel', errorMessage(err));
-      await client.setSessionConfigOption({
-        sessionId: this.sessionId,
-        optionId: 'model',
-        value: modelId,
-      } as never);
+      // 0.30 wire 字段名 configId；旧版 optionId — 两段式降级同 applyThinking。
+      await client
+        .setSessionConfigOption({ sessionId: this.sessionId, configId: 'model', value: modelId } as never)
+        .catch(() =>
+          client.setSessionConfigOption({ sessionId: this.sessionId, optionId: 'model', value: modelId } as never),
+        );
     }
   }
 
@@ -266,7 +293,9 @@ export class KimiAdapter implements EngineAdapter {
    *  Probed on kimi CLI 0.29.1: responds -32601 "Method not found" —
    *  callers must treat null as "unsupported" and fall back to history
    *  replay (scripts/probe-fork.mjs). Kept as the preferred path so newer
-   *  CLIs upgrade to a true engine-side fork automatically. */
+   *  CLIs upgrade to a true engine-side fork automatically.
+   *  复核 kimi-code 源码 @ 0.31.0 (071d56940)：acp-adapter 的 sessionCapabilities
+   *  仍只声明 list/resume，无 fork — 降级路径继续有效。 */
   async fork(): Promise<{ engineSessionId: string } | null> {
     const client = this.requireClient();
     try {
@@ -409,7 +438,7 @@ export class KimiAdapter implements EngineAdapter {
       kind: String(o.kind ?? 'allow_once'),
     }));
     const isQuestion = options.length > 0 && options.every((o) => QUESTION_OPTION_RE.test(o.optionId));
-    const title = p.toolCall?.title ? String(p.toolCall.title) : isQuestion ? '模型提问' : '请求授权';
+    const title = p.toolCall?.title ? String(p.toolCall.title) : isQuestion ? L('模型提问', 'Model question') : L('请求授权', 'Authorization request');
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       this.pendingPermissions.set(requestId, { resolve });
@@ -444,8 +473,10 @@ export class KimiAdapter implements EngineAdapter {
           this.emit({
             type: 'error',
             source: 'provider',
-            message:
+            message: L(
               'Kimi CLI 没有可用模型（config.toml 无 provider/模型）。请在终端运行 `kimi login` 重新登录（需会员权益有效），或在 ~/.kimi-code/config.toml 手动配置 provider 与 default_model，然后重开会话。',
+              'Kimi CLI has no usable models (no provider/models in config.toml). Run `kimi login` in a terminal to re-login (requires an active membership), or configure provider and default_model in ~/.kimi-code/config.toml manually, then reopen the session.',
+            ),
           });
         }
       } else if (id === 'mode') {
@@ -534,7 +565,7 @@ function estimateTokens(chars: number): number {
 function withTimeout<T>(promise: Promise<T>, ms: number, tag: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${tag} 超时 (${ms}ms)`)), ms);
+    timer = setTimeout(() => reject(new Error(L(`${tag} 超时 (${ms}ms)`, `${tag} timed out (${ms}ms)`))), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
 }

@@ -11,13 +11,14 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import type { RaceGroup, RacerRole } from '@shared/race';
-import { RACE_ROLE_LABELS } from '@shared/race';
+import { raceRoleKey, useT } from '../../i18n';
 import { downloadMarkdown } from '../../planDoc';
 import { useRaceStore } from '../../store/raceStore';
 import ArtifactZoom from './ArtifactZoom';
 import EliminateButton from './EliminateButton';
 
 export default function ArtifactsPreview({ race, fill = false }: { race: RaceGroup; fill?: boolean }): JSX.Element {
+  const t = useT();
   const eliminateRacer = useRaceStore((s) => s.eliminateRacer);
   const art = race.artifacts ?? {};
   // 参赛选手（2–3 位，剔除者退场）动态排列；C 用中性色。
@@ -41,11 +42,11 @@ export default function ArtifactsPreview({ race, fill = false }: { race: RaceGro
             tone={r.tone}
             plan={r.plan}
             rebuttal={r.rebuttal}
-            engineLabel={`${race.roles[r.role]!.engine} · ${race.roles[r.role]!.modelId || '默认模型'}`}
+            engineLabel={`${race.roles[r.role]!.engine} · ${race.roles[r.role]!.modelId || t('raceDefaultModel')}`}
             onEliminate={
               canEliminate ? () => void eliminateRacer(r.role as RacerRole) : undefined
             }
-            eliminateLabel={RACE_ROLE_LABELS[r.role]}
+            eliminateLabel={t(raceRoleKey(r.role))}
             fill={fill}
           />
         </div>
@@ -74,6 +75,7 @@ function RacerArtifact({
   /** 锁滞布局：方案文档区占满弹性高度内滚（替代固定 max-h）。 */
   fill?: boolean;
 }): JSX.Element {
+  const t = useT();
   const [planOpen, setPlanOpen] = useState(true);
   const [rebutOpen, setRebutOpen] = useState(false);
   /** 放大查看中的产物（null = 未放大）。 */
@@ -90,9 +92,9 @@ function RacerArtifact({
         >
           {letter}
         </span>
-        <span className="text-[13px] font-semibold text-ink">选手 {letter}</span>
+        <span className="text-[13px] font-semibold text-ink">{t('raceRacerLetter', { letter })}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint">{engineLabel}</span>
-        {onEliminate && <EliminateButton label={eliminateLabel ?? `选手 ${letter}`} onConfirm={onEliminate} />}
+        {onEliminate && <EliminateButton label={eliminateLabel ?? t('raceRacerLetter', { letter })} onConfirm={onEliminate} />}
       </div>
 
       {/* 📋 Plan 文档（markdown 预览，可下载）：fill 下占满弹性高度 */}
@@ -103,23 +105,24 @@ function RacerArtifact({
             className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-ink transition hover:text-accent"
           >
             <ChevronRight size={12} className={`shrink-0 transition-transform ${planOpen ? 'rotate-90' : ''}`} />
-            📋 方案文档
+            {t('racePlanDoc')}
           </button>
           {plan && (
             <>
+              {/* 顺序约定：放大永远贴最右（与反驳行、最终方案卡一致），下载居其左 */}
               <button
-                title="放大查看"
+                title={t('raceDownloadMd')}
+                onClick={() => downloadMarkdown(t('raceRacerPlanFile', { letter }), plan)}
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+              >
+                <Download size={12} />
+              </button>
+              <button
+                title={t('raceZoom')}
                 onClick={() => setZoom('plan')}
                 className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
               >
                 <Maximize2 size={12} />
-              </button>
-              <button
-                title="下载 md"
-                onClick={() => downloadMarkdown(`选手${letter}方案`, plan)}
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
-              >
-                <Download size={12} />
               </button>
             </>
           )}
@@ -131,7 +134,7 @@ function RacerArtifact({
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{plan}</ReactMarkdown>
               </div>
             ) : (
-              <div className="py-4 text-center text-[12px] text-ink-faint">（尚未产出）</div>
+              <div className="py-4 text-center text-[12px] text-ink-faint">{t('raceNotYet')}</div>
             )}
           </div>
         )}
@@ -145,11 +148,11 @@ function RacerArtifact({
             className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium text-ink transition hover:text-accent"
           >
             <ChevronRight size={12} className={`shrink-0 transition-transform ${rebutOpen ? 'rotate-90' : ''}`} />
-            ⚔ 反驳 · 🤝 吸纳 · 🛡 辩护
+            {t('raceRebuttalTitle')}
           </button>
           {rebuttal && (
             <button
-              title="放大查看"
+              title={t('raceZoom')}
               onClick={() => setZoom('rebuttal')}
               className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
             >
@@ -164,7 +167,7 @@ function RacerArtifact({
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{rebuttal}</ReactMarkdown>
               </div>
             ) : (
-              <div className="py-4 text-center text-[12px] text-ink-faint">（尚未产出）</div>
+              <div className="py-4 text-center text-[12px] text-ink-faint">{t('raceNotYet')}</div>
             )}
           </div>
         )}
@@ -172,10 +175,10 @@ function RacerArtifact({
 
       {/* 放大查看：标题标明归属，避免多栏对比时看串 */}
       {zoom === 'plan' && plan && (
-        <ArtifactZoom title={`📋 选手 ${letter} · 方案`} text={plan} onClose={() => setZoom(null)} />
+        <ArtifactZoom title={t('raceZoomPlanTitle', { letter })} text={plan} onClose={() => setZoom(null)} />
       )}
       {zoom === 'rebuttal' && rebuttal && (
-        <ArtifactZoom title={`⚔ 选手 ${letter} · 反驳·吸纳·辩护`} text={rebuttal} onClose={() => setZoom(null)} />
+        <ArtifactZoom title={t('raceZoomRebuttalTitle', { letter })} text={rebuttal} onClose={() => setZoom(null)} />
       )}
     </div>
   );

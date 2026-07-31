@@ -6,20 +6,36 @@
  * themes adapt automatically.
  */
 
+import { TriangleAlert } from 'lucide-react';
 import { useId, useMemo } from 'react';
 
 import type { EngineId } from '@shared/types';
+import { ENGINE_LABELS } from '@shared/types';
+import { enginePseudoWsKey, useT } from '../i18n';
 import { useChatStore } from '../store/chatStore';
 
-export const ENGINE_LABELS: Record<EngineId, string> = {
-  codex: 'Codex',
-  kimi: 'Kimi Code',
-  opencode: 'opencode',
-  omp: 'Oh My Pi',
-  antigravity: 'Antigravity',
-};
+// 引擎展示名真源已上收到 @shared/types（主进程系统公告共用），此处仅转发。
+export { ENGINE_LABELS };
 
-export const DEFAULT_ENGINE_ORDER: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity'];
+// 引擎一句话简介 / 非原生工作区提示文案已上收到 i18n 词典
+// （engineHintKey / enginePseudoWsKey），供新建会话选引擎、设置引擎总览
+// 与多目录工作区标注处按当前语言取词。
+
+export const DEFAULT_ENGINE_ORDER: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity', 'claude'];
+
+/** 「非原生工作区」琥珀警示小图标 — 多目录工作区选引擎处标注无原生多根的引擎，
+ *  悬浮显「非原生工作区 — 完整说明」；不用文字徽标以免撑宽/截断引擎名。
+ *  真多根引擎（codex/claude/omp）返回 null 不占位。 */
+export function PseudoWorkspaceBadge({ engine }: { engine: EngineId }): JSX.Element | null {
+  const t = useT();
+  const hintKey = enginePseudoWsKey(engine);
+  if (!hintKey) return null;
+  return (
+    <span title={`${t('pseudoWsBadge')} — ${t(hintKey)}`} className="shrink-0 text-warn">
+      <TriangleAlert size={12} className="block" />
+    </span>
+  );
+}
 
 /** 引擎选择列表的统一顺序：读设置 engineOrder，剔脏值并把缺失引擎
  *  补到末尾（设置未加载时回退默认顺序）。 */
@@ -44,6 +60,11 @@ const ENGINE_PATHS: Record<Exclude<EngineId, 'antigravity'>, string> = {
   // omp 品牌标识：⌥ Option 符号（omp.sh logo mark）。自绘实心笔画：
   // 左上横线接斜线下行到右下横线 + 右上独立短横线，fill 绘制跟随 currentColor。
   omp: 'M2 5h7.1l8.2 11H22v3h-6.2L7.6 8H2V5zm13 0h7v3h-7V5z',
+  // claude 品牌标识：Anthropic 旭日放射星形（simple-icons: claude 完整路径）。
+  // 不跟 currentColor，而是用品牌珊瑚橙 var(--claude-brand)（浅/深色各一档，
+  // 见 index.css）— 与官方 mark 一致且两种主题下均有足够对比。
+  claude:
+    'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z',
 };
 
 // antigravity 官方 logo：钟形拱线（Google Antigravity 品牌 mark），描边渐变
@@ -90,12 +111,16 @@ export function EngineIcon({
     );
   }
   const metallic = engine === 'opencode';
+  // claude 用品牌珊瑚橙：以 currentColor 填充 + inline color=var（比 fill=var 属性
+  // 更兼容），颜色由 index.css 的 --claude-brand 按 data-mode 自动切浅/深色。
+  const claudeColored = engine === 'claude';
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 24 24"
       fill={metallic ? `url(#${gradId})` : 'currentColor'}
+      style={claudeColored ? { color: 'var(--claude-brand)' } : undefined}
       aria-hidden="true"
       className={className}
     >

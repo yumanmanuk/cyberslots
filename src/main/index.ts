@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { SettingsStore } from './config/settings';
+import { L, setMainLang } from './i18n';
 import { SessionManager } from './engine/SessionManager';
 import { compatAudit } from './engine/compatAudit';
 import { CronService } from './cron/CronService';
@@ -15,6 +16,7 @@ import { RaceManager } from './race/RaceManager';
 import { AiServerHost } from './proxy/AiServerHost';
 import { OpencodeServerHost } from './engine/opencode/OpencodeServerHost';
 import { OpencodeEventHub } from './engine/opencode/OpencodeEventHub';
+import { KapServerHost } from './engine/kimi/KapServerHost';
 import { TerminalService } from './terminal/TerminalService';
 import { registerIpc } from './ipc';
 import { sweepOrphanEngines } from './orphanSweep';
@@ -48,11 +50,12 @@ let sessions: SessionManager | undefined;
 let cron: CronService | undefined;
 let proxy: AiServerHost | undefined;
 let opencodeHost: OpencodeServerHost | undefined;
+let kapHost: KapServerHost | undefined;
 let terminal: TerminalService | undefined;
 let race: RaceManager | undefined;
 
 function createWindow(appSettings: AppSettings): void {
-  const appearance: WindowAppearance = { palette: appSettings.themePalette, mode: resolveMode(appSettings.themeMode) };
+  const appearance: WindowAppearance = { mode: resolveMode(appSettings.themeMode) };
   const chrome = chromeFor(appearance);
   // 品牌图标（任务栏/Alt+Tab）：免安装包不跑 rcedit，靠运行时 icon 选项生效；
   // 打包后随 extraResources 落在 resources/icon.png，dev 直接读仓库 resources 目录。
@@ -64,7 +67,7 @@ function createWindow(appSettings: AppSettings): void {
     height: 900,
     minWidth: 960,
     minHeight: 600,
-    title: '赛博老虎机',
+    title: L('赛博老虎机', 'CyberSlots'),
     icon: iconPath,
     backgroundColor: chrome.bg,
     show: false,
@@ -169,12 +172,20 @@ function startApp(): void {
   });
 
   void app.whenReady().then(() => {
+    // Windows toast 通知按 AUMID 归属应用；须与 electron-builder appId 一致，
+    // 打包安装后通知才会显示「CyberSlots」名称与图标（否则是 electron.app.Electron）。
+    if (process.platform === 'win32') app.setAppUserModelId('com.yumanmanuk.cyberslots');
     const settings = new SettingsStore();
+    setMainLang(settings.get().language);
     proxy = new AiServerHost();
     opencodeHost = new OpencodeServerHost();
     const opencodeHub = new OpencodeEventHub(opencodeHost);
+    kapHost = new KapServerHost();
+    // 启动期引擎能力检测（只发现不拉起）：KAP 通道可用性入缓存 +
+    // 日志；server spawn 留到首个 kimi KAP 会话按需进行。
+    void kapHost.detectAtStartup().catch(() => undefined);
     terminal = new TerminalService();
-    sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub);
+    sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub, kapHost);
     cron = new CronService(sessions, settings);
     race = new RaceManager(sessions);
     registerIpc(sessions, settings, cron, opencodeHost, terminal, race);
@@ -199,6 +210,7 @@ function startApp(): void {
     cron?.stop();
     proxy?.stop();
     opencodeHost?.stop();
+    kapHost?.stop();
     terminal?.disposeAll();
     if (cleanedUp || !sessions) return;
     cleanedUp = true;

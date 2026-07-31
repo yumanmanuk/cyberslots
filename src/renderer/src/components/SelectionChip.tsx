@@ -12,6 +12,7 @@ import { X } from 'lucide-react';
 
 import type { CodeSelection } from '@shared/types';
 import { MAX_SELECTION_CHARS, selectionRangeLabel } from '../selections';
+import { useT } from '../i18n';
 
 interface Props {
   sel: CodeSelection;
@@ -20,6 +21,7 @@ interface Props {
 }
 
 export default function SelectionChip({ sel, onRemove }: Props): JSX.Element {
+  const t = useT();
   const lineCount = sel.endLine - sel.startLine + 1;
   const [preview, setPreview] = useState(false);
   /** 发送时将被截断（快照超过注入上限）→ 卡片上给个小标记。 */
@@ -29,7 +31,7 @@ export default function SelectionChip({ sel, onRemove }: Props): JSX.Element {
       <span
         role="button"
         tabIndex={0}
-        title={`${sel.path}\n${lineCount} 行${willTruncate ? '\n超出注入上限，发送时截断' : ''}`}
+        title={`${sel.path}\n${t('selLineCount', { n: lineCount })}${willTruncate ? `\n${t('selTruncateNote')}` : ''}`}
         onClick={() => setPreview((v) => !v)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') setPreview((v) => !v);
@@ -40,7 +42,7 @@ export default function SelectionChip({ sel, onRemove }: Props): JSX.Element {
         {/* truncate = overflow hidden，leading-none 会削掉 g/j/p 下伸部 → 留 1.2 行高 */}
         <span className="min-w-0 truncate font-medium leading-[1.2] text-ink">{sel.fileName}</span>
         <span className="shrink-0 font-mono text-[10.5px] leading-none text-ink-faint">{selectionRangeLabel(sel)}</span>
-        {willTruncate && <span className="shrink-0 text-[10px] leading-none text-warn">截</span>}
+        {willTruncate && <span className="shrink-0 text-[10px] leading-none text-warn">{t('selTruncateBadge')}</span>}
         {onRemove && (
           <button
             onClick={(e) => {

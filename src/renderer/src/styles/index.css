@@ -3,31 +3,41 @@
 @tailwind utilities;
 
 /* ============ Theme tokens ============
-   二维主题：配色主题（data-palette）× 明暗模式（data-mode）。
-   每套阅读向色板提供明、暗两个变体；:root 回退 = notion 浅色，防首屏闪烁。 */
+   单一 notion 主题 × 明暗模式（data-mode）；:root = 浅色，防首屏闪烁。
+   深浅两模式的 accent/warn 均对齐品牌黑金体系（brand.tsx）。 */
 
-:root,
-[data-palette='notion'] {
-  --bg-canvas: #efece4;
+:root {
+  /* 浅色 = 与暗色对称的「暖色相单一明度阶梯」：全部锚定 --bg 奶油色的黄相（≈48°），
+     只用小步明度差分层。禁止混入中性灰白/纯白 —— 色温打架会让卡片块状割裂 */
+  --bg-canvas: #f0ecdf;
   /* 窗口画布（标题栏+侧栏）：比浮层深一档（又有别于 hover），让左上大圆角可辨 */
   --bg: #fffcf0;
-  --bg-panel: #f7f6f3;
-  --bg-hover: #f1efe9;
-  --bg-active: #eae7de;
-  --bg-input: #ffffff;
+  --bg-panel: #f9f6ea;
+  --bg-hover: #f4f0e1;
+  --bg-active: #ece8d7;
+  --bg-input: #fffef8;
   --ink: #37352f;
   --ink-soft: #6f6c64;
   --ink-faint: #9b978c;
-  --line: #e8e5dc;
-  --accent: #c96442;
-  --accent-soft: #f3e5df;
+  --line: #e9e4d3;
+  /* 浅色深金（品牌金压深适配奶油底），与暗色香槟金同属黑金体系 */
+  --accent: #96721f;
+  --accent-soft: #f1e8cf;
   --ok: #3a8f5f;
-  --warn: #c07d18;
+  --warn: #96721f;
   --err: #c5493f;
+  /* 品牌 Hero 渐变三档 + 星芒色（brand.tsx BrandHero 经 var() 取用）：浅色版深金 */
+  --brand-hi: #c99d3f;
+  --brand-mid: #96721f;
+  --brand-lo: #5f460f;
+  --brand-star: #a9832d;
+  /* Claude 品牌珊瑚橙（Anthropic #D97757）— 浅色奶油底上压深一档提对比。
+     引擎图标专用，不随文字色，用于 EngineIcon 的 claude 分支。 */
+  --claude-brand: #c2592f;
 }
 
-[data-palette='notion'][data-mode='dark'] {
-  /* notion 暗色变体（暖调单色）：画布最暗 → 内容浮层稍亮 → 卡片再亮一级 */
+[data-mode='dark'] {
+  /* 暗色变体（暖调单色）：画布最暗 → 内容浮层稍亮 → 卡片再亮一级 */
   --bg-canvas: #0f0e0e;
   --bg: #1a1918;
   --bg-panel: #242220;
@@ -38,85 +48,19 @@
   --ink-soft: #a8a49b;
   --ink-faint: #84817a;
   --line: #34312e;
-  --accent: #d0a215;
-  --accent-soft: #33301f;
+  /* accent/warn 对齐品牌香槟金（brand.tsx 星芒 #cea54b），不再用高饱和芥末黄 #d0a215 */
+  --accent: #cea54b;
+  --accent-soft: #352e20;
   --ok: #66a06b;
-  --warn: #d0a215;
+  --warn: #cea54b;
   --err: #d14d41;
-}
-
-/* Solarized — 经典低对比护眼色板（Ethan Schoonover 规范色值） */
-[data-palette='solarized'] {
-  --bg-canvas: #eee8d5;
-  --bg: #fdf6e3;
-  --bg-panel: #f6f0dd;
-  --bg-hover: #eee8d5;
-  --bg-active: #e3dcc7;
-  --bg-input: #fffdf5;
-  --ink: #586e75;
-  --ink-soft: #657b83;
-  --ink-faint: #93a1a1;
-  --line: #e5dfcc;
-  --accent: #268bd2;
-  --accent-soft: #e4e7d4;
-  --ok: #859900;
-  --warn: #b58900;
-  --err: #dc322f;
-}
-
-[data-palette='solarized'][data-mode='dark'] {
-  --bg-canvas: #00212b;
-  --bg: #002b36;
-  --bg-panel: #073642;
-  --bg-hover: #0a4050;
-  --bg-active: #0e4a5c;
-  --bg-input: #06313d;
-  --ink: #93a1a1;
-  --ink-soft: #839496;
-  --ink-faint: #586e75;
-  --line: #0c4250;
-  --accent: #268bd2;
-  --accent-soft: #0a3648;
-  --ok: #859900;
-  --warn: #b58900;
-  --err: #dc322f;
-}
-
-/* Everforest — 森系绿，专为长时间阅读/编码设计 */
-[data-palette='everforest'] {
-  --bg-canvas: #e5dfc5;
-  --bg: #f3ead3;
-  --bg-panel: #eae4ca;
-  --bg-hover: #e3ddc3;
-  --bg-active: #d8d3ba;
-  --bg-input: #faf4de;
-  --ink: #5c6a72;
-  --ink-soft: #708089;
-  --ink-faint: #939f91;
-  --line: #dfd8be;
-  --accent: #8da101;
-  --accent-soft: #e6e7c9;
-  --ok: #8da101;
-  --warn: #dfa000;
-  --err: #f85552;
-}
-
-[data-palette='everforest'][data-mode='dark'] {
-  --bg-canvas: #232a2e;
-  --bg: #2d353b;
-  --bg-panel: #343f44;
-  --bg-hover: #3d484d;
-  --bg-active: #475258;
-  --bg-input: #323c42;
-  --ink: #d3c6aa;
-  --ink-soft: #9da9a0;
-  --ink-faint: #7a8478;
-  --line: #3d484d;
-  --accent: #a7c080;
-  --accent-soft: #3a453c;
-  --ok: #a7c080;
-  --warn: #dbbc7f;
-  --err: #e67e80;
+  /* 暗色 = Onyx 定稿香槟金，保持品牌原貌像素级不变 */
+  --brand-hi: #f6e2a4;
+  --brand-mid: #c99d3f;
+  --brand-lo: #8f681e;
+  --brand-star: #cea54b;
+  /* Claude 珊瑚橙暗色档：深底上提亮增暖，保证放射星芒醒目且不刺眼 */
+  --claude-brand: #e0785a;
 }
 
 html,
@@ -153,6 +97,11 @@ body {
 }
 [data-mode='dark'] {
   color-scheme: dark;
+}
+
+/* 数字输入框：右对齐数字与原生上下调节钮之间留出呼吸间距，避免贴死 */
+input[type='number']::-webkit-inner-spin-button {
+  margin-left: 6px;
 }
 
 /* 文本选区跟随主题色 — 浏览器默认蓝色选区与暖色系配色违和 */
@@ -211,6 +160,21 @@ body {
 
 .strip-fade-lr {
   mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}
+
+/* 纵向滚动区边缘渐隐 — 列表被上下相邻区块截断时以淡出过渡，代替硬切边，
+   同时暗示该方向还有更多内容；滚到尽头的一侧恢复实边（不虚化首/末行）。
+   类名由使用方按滚动位置动态切换（见 Sidebar 的 useEdgeFade）。 */
+.scroll-fade-t {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 100%);
+}
+
+.scroll-fade-b {
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
+
+.scroll-fade-tb {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
 }
 
 /* ChipInput（contenteditable 输入框）的文件/文件夹引用胶囊 — 行内显示，
@@ -303,6 +267,16 @@ body {
 /* Markdown body (chat stream) */
 .md-body {
   @apply text-body;
+}
+
+/* 首/末子元素外边距清零 — 块间距由消息流容器的 gap 统一管理，
+   否则正文以标题开头时（如 Worked for 折叠行下方的结论）会叠出双倍空隙。 */
+.md-body > :first-child {
+  margin-top: 0;
+}
+
+.md-body > :last-child {
+  margin-bottom: 0;
 }
 
 .md-body p {
@@ -514,8 +488,8 @@ body {
   }
 }
 
-/* 赛马阶段切换飘字：滑入 → 停留 → 淡出（总时长与 raceStore
-   STAGE_FLASH_MS 同步，动画走完 store 才清掉，不会中途硬卸） */
+/* 赛马阶段切换飘字（底部 snackbar）：自下滑入 → 停留 → 淡出（总时长
+   与 raceStore STAGE_FLASH_MS 同步，动画走完 store 才清掉，不会中途硬卸） */
 .race-stage-toast {
   animation: race-stage-toast 2.6s ease forwards;
 }
@@ -523,7 +497,7 @@ body {
 @keyframes race-stage-toast {
   0% {
     opacity: 0;
-    transform: translateY(-10px) scale(.96);
+    transform: translateY(14px) scale(.96);
   }
 
   9%,
@@ -534,7 +508,7 @@ body {
 
   100% {
     opacity: 0;
-    transform: translateY(-8px) scale(.98);
+    transform: translateY(10px) scale(.98);
   }
 }
 
@@ -574,7 +548,7 @@ body {
 /* ============ effort maxed (xhigh) — 拉满档的骰子就要发光 ============
    轨道金色流光扫过 + 滑块脉冲光环 + 档位文字渐变流光。 */
 .effort-max-fill {
-  background: linear-gradient(90deg, var(--accent) 0%, #ffd75e 25%, var(--accent) 50%, #ffd75e 75%, var(--accent) 100%);
+  background: linear-gradient(90deg, var(--accent) 0%, #f6e2a4 25%, var(--accent) 50%, #f6e2a4 75%, var(--accent) 100%);
   background-size: 200% 100%;
   animation: effort-shimmer 1.6s linear infinite;
 }
@@ -584,7 +558,7 @@ body {
 }
 
 .effort-max-label {
-  background: linear-gradient(90deg, var(--accent), #ffd75e, var(--accent));
+  background: linear-gradient(90deg, var(--accent), #f6e2a4, var(--accent));
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;

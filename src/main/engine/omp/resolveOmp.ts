@@ -15,6 +15,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { OmpCatalog, OmpConfigSnapshot, OmpModelEntry } from '@shared/types';
+import { L } from '../../i18n';
 import type { SpawnSpec } from '../kimi/resolveKimi';
 
 export function resolveOmpCli(extraArgs: string[], explicitPath?: string): SpawnSpec {
@@ -39,10 +40,13 @@ export function findOmpBinary(explicitPath?: string): string | undefined {
   return spec.shell ? undefined : spec.command;
 }
 
-// 版本探测走 spawnSync（原生 exe，~百 ms 级），进程级缓存一次。
+// 版本探测走 spawnSync（原生 exe，~百 ms 级），成功结果进程级缓存一次。
 let cachedVersion: string | null | undefined; // undefined = 未探测；null = 探测失败
+let failedAt = 0; // 失败只缓存短期（应用先启动、CLI 后安装的场景无需重启即可检出）
+const PROBE_FAIL_TTL = 30_000;
 function probeVersion(explicitPath?: string): string | undefined {
-  if (cachedVersion !== undefined) return cachedVersion ?? undefined;
+  if (typeof cachedVersion === 'string') return cachedVersion;
+  if (cachedVersion === null && Date.now() - failedAt < PROBE_FAIL_TTL) return undefined;
   try {
     const spec = resolveOmpCli(['--version'], explicitPath);
     const res = spawnSync(spec.command, spec.args, {
@@ -57,6 +61,7 @@ function probeVersion(explicitPath?: string): string | undefined {
   } catch {
     cachedVersion = null;
   }
+  if (cachedVersion === null) failedAt = Date.now();
   return cachedVersion ?? undefined;
 }
 
@@ -101,18 +106,18 @@ export function fetchOmpCatalog(explicitPath?: string): Promise<OmpCatalog> {
       } catch {
         /* ignore */
       }
-      resolve({ models: [], error: 'omp models --json 超时' });
+      resolve({ models: [], error: L('omp models --json 超时', 'omp models --json timed out') });
     }, 30_000);
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ models: [], error: `无法运行 omp CLI: ${e.message}` });
+      resolve({ models: [], error: `${L('无法运行 omp CLI', 'Failed to run the omp CLI')}: ${e.message}` });
     });
     child.on('close', () => {
       clearTimeout(timer);
       try {
         resolve({ models: normalizeCatalog(JSON.parse(out)) });
       } catch {
-        resolve({ models: [], error: err.trim().slice(0, 300) || '模型目录解析失败（可能未登录/无凭据）' });
+        resolve({ models: [], error: err.trim().slice(0, 300) || L('模型目录解析失败（可能未登录/无凭据）', 'Failed to parse the model catalog (possibly not logged in / no credentials)') });
       }
     });
   });

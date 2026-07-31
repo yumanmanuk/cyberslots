@@ -23,10 +23,12 @@ import {
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { useT } from '../i18n';
 
 type Decision = Extract<UnifiedMessage, { kind: 'permission' | 'ask_user' }>;
 
 export default function PermissionSheet({ sessionId }: { sessionId: string }): JSX.Element | null {
+  const t = useT();
   // Select the stable messages reference; derive with useMemo. Returning a
   // fresh array from the selector would loop useSyncExternalStore forever.
   const messages = useChatStore((s) => s.ui[sessionId]?.messages);
@@ -56,7 +58,7 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
         <button
           onClick={() => setIndex((i) => (i - 1 + pending.length) % pending.length)}
           className="rounded p-0.5 transition hover:bg-bg-hover hover:text-ink"
-          title="上一条"
+          title={t('prevItem')}
         >
           <ChevronLeft size={14} />
         </button>
@@ -66,7 +68,7 @@ export default function PermissionSheet({ sessionId }: { sessionId: string }): J
         <button
           onClick={() => setIndex((i) => (i + 1) % pending.length)}
           className="rounded p-0.5 transition hover:bg-bg-hover hover:text-ink"
-          title="下一条"
+          title={t('nextItem')}
         >
           <ChevronRight size={14} />
         </button>
@@ -115,6 +117,7 @@ function QuestionCard({
   onDismiss: () => void;
   onNote: (text: string) => void;
 }): JSX.Element {
+  const t = useT();
   const [note, setNote] = useState('');
   const choices = msg.options.filter((o) => !o.kind.startsWith('reject'));
   const skipOption = msg.options.find((o) => o.kind.startsWith('reject'));
@@ -131,7 +134,7 @@ function QuestionCard({
       {/* 卡片外灰色小字标签（对照截图的 "Asking questions"） */}
       <div className="mb-1.5 flex items-center gap-1.5 px-1.5 text-[11.5px] text-ink-faint">
         <MessageCircleQuestion size={12.5} />
-        模型提问
+        {t('modelQuestion')}
       </div>
       <div className="animate-[sheet-in_.18s_ease-out] rounded-2xl border border-line bg-bg-panel shadow-lg">
         {/* 头部：问题标题 + 分页器 + 关闭（取消提问） */}
@@ -140,12 +143,19 @@ function QuestionCard({
           {pager}
           <button
             onClick={onDismiss}
-            title="关闭（取消该提问）"
+            title={t('dismissQuestion')}
             className="shrink-0 rounded p-0.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
           >
             <X size={15} />
           </button>
         </div>
+
+        {/* 问题补充正文（KAP question 的 header/body）— 卡内滚动，不撑爆卡片 */}
+        {msg.body && (
+          <pre className="mx-4 mb-1.5 max-h-44 overflow-auto whitespace-pre-wrap rounded-lg bg-bg px-3 py-2 text-[12px] leading-5 text-ink-soft">
+            {msg.body}
+          </pre>
+        )}
 
         {/* 选项列表：序号圆圈 + 名称，整行点击作答，hover 浮出箭头 */}
         <div className="space-y-1 px-2.5">
@@ -173,7 +183,7 @@ function QuestionCard({
             onKeyDown={(e) => {
               if (e.key === 'Enter') submitNote();
             }}
-            placeholder="有别的想法？告诉模型怎么做…"
+            placeholder={t('askNotePlaceholder')}
             className="min-w-0 flex-1 bg-transparent text-ui outline-none placeholder:text-ink-faint"
           />
           {note.trim() ? (
@@ -182,7 +192,7 @@ function QuestionCard({
               className="flex shrink-0 items-center gap-1 rounded-full bg-accent px-3 py-1 text-[12px] font-medium text-white transition hover:opacity-90"
             >
               <SendHorizonal size={12} />
-              发送
+              {t('send')}
             </button>
           ) : (
             <button
@@ -210,6 +220,7 @@ function ApprovalCard({
   pager: ReactNode;
   onAnswer: (optionId: string) => void;
 }): JSX.Element {
+  const t = useT();
   return (
     <div className="animate-[sheet-in_.18s_ease-out] rounded-2xl border border-line bg-bg-input shadow-lg">
       <div className="flex items-center gap-2.5 px-4 pb-1 pt-3">
@@ -217,11 +228,17 @@ function ApprovalCard({
           <KeyRound size={15} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">请求授权</div>
+          <div className="text-[11px] font-medium uppercase tracking-wide text-ink-faint">{t('requestAuth')}</div>
           <div className="truncate text-sm font-medium">{msg.title}</div>
         </div>
         {pager}
       </div>
+      {/* 富确认正文（计划全文 / Goal objective / 长命令）— 卡内滚动 */}
+      {msg.body && (
+        <pre className="mx-4 mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg bg-bg px-3 py-2 text-[12px] leading-5 text-ink-soft">
+          {msg.body}
+        </pre>
+      )}
       <div className="flex flex-wrap gap-2 px-4 pb-3.5 pt-2">
         {msg.options.map((o) => {
           const rejecting = o.kind.startsWith('reject');

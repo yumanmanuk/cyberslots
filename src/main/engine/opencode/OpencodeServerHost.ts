@@ -17,6 +17,7 @@ import { createServer } from 'node:net';
 import { app } from 'electron';
 
 import type { OpencodeCatalog, OpencodeModelEntry } from '@shared/types';
+import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { resolveOpencodeCli } from './resolveOpencode';
 
@@ -110,7 +111,7 @@ export class OpencodeServerHost {
     const url = await new Promise<string>((resolve, reject) => {
       let buf = '';
       const timer = setTimeout(
-        () => reject(new Error(`opencode serve 启动超时\n${this.stderrTail.slice(-6).join('\n')}`)),
+        () => reject(new Error(`${L('opencode serve 启动超时', 'opencode serve startup timed out')}\n${this.stderrTail.slice(-6).join('\n')}`)),
         READY_TIMEOUT_MS,
       );
       child.stdout!.setEncoding('utf8');
@@ -124,11 +125,11 @@ export class OpencodeServerHost {
       });
       child.once('exit', (code) => {
         clearTimeout(timer);
-        reject(new Error(`opencode serve 提前退出 (code=${code})\n${this.stderrTail.slice(-6).join('\n')}`));
+        reject(new Error(`${L('opencode serve 提前退出', 'opencode serve exited early')} (code=${code})\n${this.stderrTail.slice(-6).join('\n')}`));
       });
       child.once('error', (err) => {
         clearTimeout(timer);
-        reject(new Error(`无法启动 opencode CLI: ${err.message}（未安装？运行 npm i -g opencode-ai）`));
+        reject(new Error(L(`无法启动 opencode CLI: ${err.message}（未安装？运行 npm i -g opencode-ai）`, `Failed to launch the opencode CLI: ${err.message} (not installed? run npm i -g opencode-ai)`)));
       });
     }).catch((err) => {
       if (this.child === child) {
@@ -155,7 +156,7 @@ export class OpencodeServerHost {
       } catch {
         /* retry */
       }
-      if (Date.now() > deadline) throw new Error('opencode serve 健康检查超时');
+      if (Date.now() > deadline) throw new Error(L('opencode serve 健康检查超时', 'opencode serve health check timed out'));
       await new Promise((r) => setTimeout(r, 250));
     }
   }

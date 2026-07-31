@@ -51,6 +51,7 @@ interface Props {
 type Mode = 'preview' | 'source' | 'edit';
 
 export default function FilePreview({ path, root, sessionId, reloadKey, onClose }: Props): JSX.Element {
+  const t = useT();
   const [text, setText] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
   const [truncated, setTruncated] = useState(false);
@@ -127,30 +128,30 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
           {fileName}
         </span>
         {isMd && mode !== 'edit' && (
-          <IconBtn title={mode === 'preview' ? '查看源码' : '预览'} onClick={() => setMode(mode === 'preview' ? 'source' : 'preview')}>
+          <IconBtn title={mode === 'preview' ? t('fpViewSource') : t('fpPreview')} onClick={() => setMode(mode === 'preview' ? 'source' : 'preview')}>
             {mode === 'preview' ? <Code2 size={13} /> : <Eye size={13} />}
           </IconBtn>
         )}
         {mode !== 'edit' ? (
-          <IconBtn title="编辑" onClick={() => setMode('edit')}>
+          <IconBtn title={t('fpEdit')} onClick={() => setMode('edit')}>
             <Pencil size={13} />
           </IconBtn>
         ) : (
-          <IconBtn title={saving ? '保存中…' : '保存 (Ctrl+S)'} onClick={() => void save()}>
+          <IconBtn title={saving ? t('fpSaving') : t('fpSave')} onClick={() => void save()}>
             {saving ? <BrandSpinner size={13} /> : <Save size={13} />}
           </IconBtn>
         )}
         <OpenInMenu path={path} />
-        <IconBtn title="关闭" onClick={onClose}>
+        <IconBtn title={t('close')} onClick={onClose}>
           <X size={13} />
         </IconBtn>
       </div>
 
-      {truncated && <div className="bg-warn/10 px-2 py-1 text-[11px] text-warn">文件过大，仅预览前 512KB</div>}
+      {truncated && <div className="bg-warn/10 px-2 py-1 text-[11px] text-warn">{t('fpTooLarge')}</div>}
       {error && <div className="bg-err/10 px-2 py-1 text-[11px] text-err">{error}</div>}
       {conflict !== null && (
         <div className="flex items-center gap-2 bg-warn/10 px-2 py-1.5 text-[11px] text-warn">
-          <span className="min-w-0 flex-1">此文件已被 AI 修改（磁盘已更新），与你未保存的编辑冲突。</span>
+          <span className="min-w-0 flex-1">{t('fpConflict')}</span>
           <button
             onClick={() => {
               setText(conflict);
@@ -159,10 +160,10 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
             }}
             className="shrink-0 rounded-md bg-warn/20 px-2 py-0.5 font-medium hover:bg-warn/30"
           >
-            加载 AI 版本
+            {t('fpLoadAiVersion')}
           </button>
           <button onClick={() => setConflict(null)} className="shrink-0 rounded-md px-2 py-0.5 hover:bg-bg-hover">
-            保留我的
+            {t('fpKeepMine')}
           </button>
         </div>
       )}
@@ -170,7 +171,7 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
       <div className="min-h-0 flex-1 overflow-auto">
         {text === null && !error ? (
           <div className="flex items-center gap-2 p-4 text-ui text-ink-faint">
-            <BrandSpinner size={12} /> 加载中…
+            <BrandSpinner size={12} /> {t('loading')}
           </div>
         ) : mode === 'edit' ? (
           <textarea
@@ -349,35 +350,36 @@ function NumberedSource({
 }
 
 const OPEN_TARGETS = [
-  { id: 'vscode' as const, label: 'VS Code', icon: Code2 },
-  { id: 'explorer' as const, label: '文件管理器', icon: FolderOpen },
-  { id: 'gitbash' as const, label: 'Git Bash', icon: FolderGit2 },
-  { id: 'wt' as const, label: 'Terminal', icon: Monitor },
-  { id: 'terminal' as const, label: 'Powershell', icon: Terminal },
-] satisfies Array<{ id: OpenTarget; label: string; icon: typeof Code2 }>;
+  { id: 'vscode' as const, labelKey: null, label: 'VS Code', icon: Code2 },
+  { id: 'explorer' as const, labelKey: 'fileManager' as const, label: '', icon: FolderOpen },
+  { id: 'gitbash' as const, labelKey: null, label: 'Git Bash', icon: FolderGit2 },
+  { id: 'wt' as const, labelKey: null, label: 'Terminal', icon: Monitor },
+  { id: 'terminal' as const, labelKey: null, label: 'Powershell', icon: Terminal },
+] satisfies Array<{ id: OpenTarget; labelKey: 'fileManager' | null; label: string; icon: typeof Code2 }>;
 
 function OpenInMenu({ path }: { path: string }): JSX.Element {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <div className="relative">
-      <IconBtn title="用外部程序打开" onClick={() => setOpen(!open)}>
+      <IconBtn title={t('railOpenIn')} onClick={() => setOpen(!open)}>
         <ExternalLink size={13} />
       </IconBtn>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-7 z-20 min-w-36 rounded-lg border border-line bg-bg-input py-1 shadow-lg">
-            {OPEN_TARGETS.map((t) => (
+            {OPEN_TARGETS.map((tg) => (
               <button
-                key={t.id}
+                key={tg.id}
                 onClick={() => {
                   setOpen(false);
-                  void window.cyberslots.openIn(t.id, path);
+                  void window.cyberslots.openIn(tg.id, path);
                 }}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui text-ink hover:bg-bg-hover"
               >
-                <t.icon size={16} className="text-ink-softer" />
-                {t.label}
+                <tg.icon size={16} className="text-ink-softer" />
+                {tg.labelKey ? t(tg.labelKey) : tg.label}
               </button>
             ))}
           </div>

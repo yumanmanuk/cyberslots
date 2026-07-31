@@ -49,6 +49,7 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { L } from '../../i18n';
 import { ThinkSplitter } from '../thinkSplitter';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
@@ -106,6 +107,10 @@ export interface OmpAdapterOptions {
   thinking?: string;
   /** spawn --tools 白名单（收敛工具面；缺省 = 全量）。 */
   tools?: string[];
+  /** 多根工作区的其余根目录 → 可重复 `--add-dir` spawn flag（omp 原生
+   *  multi-root：进路径白名单 + 系统提示词 <workspace-roots> 区块，
+   *  并随会话 header 持久化、resume 后合并恢复）。 */
+  extraDirs?: string[];
 }
 
 interface PendingPermission {
@@ -125,6 +130,8 @@ export class OmpAdapter implements EngineAdapter {
   /** 后台自发回合（异步 task/jobs 结果注入）进行中标记 + 静默收尾计时器。 */
   private backgroundTurnId = 0;
   private backgroundTimer: NodeJS.Timeout | undefined;
+  /** 最近一次 config_option_update 里的模型值域 — setModel 乐观回发用。 */
+  private modelValues: string[] = [];
   private readonly splitter = new ThinkSplitter();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly stderrTail: string[] = [];
@@ -144,6 +151,10 @@ export class OmpAdapter implements EngineAdapter {
     if (this.opts.modelId) args.push('--model', this.opts.modelId);
     if (this.opts.thinking) args.push('--thinking', this.opts.thinking);
     if (this.opts.tools?.length) args.push('--tools', this.opts.tools.join(','));
+    // 多根工作区：omp 的 ACP session/new 无多根字段，但 acp 子命令接受
+    // 进程级可重复 --add-dir（baseOptions → 该进程创建/加载的每个会话）。
+    // 本适配器每会话一个 omp 进程，故进程级即会话级。
+    for (const dir of this.opts.extraDirs ?? []) args.push('--add-dir', dir);
     const spec = resolveOmpCli(args, this.opts.cliPath);
 
     const child = spawn(spec.command, spec.args, {
@@ -168,13 +179,13 @@ export class OmpAdapter implements EngineAdapter {
       this.emit({
         type: 'error',
         source: 'engine',
-        message: `omp 进程意外退出 (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
+        message: `${L('omp 进程意外退出', 'omp process exited unexpectedly')} (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
       });
       this.emit({ type: 'session.status', status: 'error', detail: 'engine-exited' });
     });
     child.on('error', (err) => {
       if (this.disposed) return;
-      this.emit({ type: 'error', source: 'client', message: `无法启动 omp CLI: ${err.message}` });
+      this.emit({ type: 'error', source: 'client', message: `${L('无法启动 omp CLI', 'Failed to launch the omp CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
 
@@ -227,7 +238,7 @@ export class OmpAdapter implements EngineAdapter {
           this.emit({
             type: 'error',
             source: 'engine',
-            message: `会话恢复失败，已新建会话继续（历史上下文不在引擎侧）: ${errorMessage(err)}`,
+            message: `${L('会话恢复失败，已新建会话继续（历史上下文不在引擎侧）', 'Session resume failed — started a new session (history context is not engine-side)')}: ${errorMessage(err)}`,
           });
         }
       }
@@ -312,9 +323,20 @@ export class OmpAdapter implements EngineAdapter {
     const client = this.requireClient();
     try {
       await client.unstable_setSessionModel({ sessionId: this.sessionId, modelId });
-    } catch {
-      await client.setSessionConfigOption({ sessionId: this.sessionId, optionId: 'model', value: modelId } as never);
+    } catch (err) {
+      // 降级路径本身正常（旧版无此实验方法），但要留账：新版引擎若砍掉
+      // 此方法，这里是唯一能看到信号的地方。
+      compatAudit.record('omp', 'rejected-method', 'unstable_setSessionModel', errorMessage(err));
+      // 新版 pi 系 wire 字段名 configId；旧版 optionId — 两段式降级同 kimi。
+      await client
+        .setSessionConfigOption({ sessionId: this.sessionId, configId: 'model', value: modelId } as never)
+        .catch(() =>
+          client.setSessionConfigOption({ sessionId: this.sessionId, optionId: 'model', value: modelId } as never),
+        );
     }
+    // 引擎不保证回推 config_option_update（probe-omp-findings §3：运行时面
+    // 可能根本没有 model 项）— 成功后乐观回发，否则选择器停留在旧值。
+    this.emit({ type: 'models.update', current: modelId, available: this.modelValues });
   }
 
   async setMode(mode: PermissionMode): Promise<void> {
@@ -424,15 +446,20 @@ export class OmpAdapter implements EngineAdapter {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const toolName = extractToolName(u);
+        const content = mapToolContent(u);
+        // task 子代理在 omp 下强制 yolo（headless 不受主会话审批约束）——
+        // 显式标注给 UI，TaskCard 据此显「免审批」，不再对全部引擎误显。
+        const isTask = (toolName ?? '').toLowerCase() === 'task';
         this.emit({
           type: 'tool.upsert',
           turnId,
           toolCallId: String(u.toolCallId ?? ''),
           title: u.title == null ? undefined : String(u.title),
           toolKind: u.kind == null ? undefined : String(u.kind),
-          toolName: extractToolName(u),
+          toolName,
           status: u.status == null ? undefined : (mapStatus(String(u.status)) as ToolCallStatus),
-          content: mapToolContent(u),
+          content: isTask ? { ...(content ?? {}), autoApproved: true } : content,
           locations: mapLocations(u.locations),
         });
         return;
@@ -516,7 +543,7 @@ export class OmpAdapter implements EngineAdapter {
       kind: String(o.kind ?? 'allow_once'),
     }));
     const isQuestion = options.length > 0 && options.every((o) => QUESTION_OPTION_RE.test(o.optionId));
-    const title = p.toolCall?.title ? String(p.toolCall.title) : isQuestion ? '模型提问' : '请求授权';
+    const title = p.toolCall?.title ? String(p.toolCall.title) : isQuestion ? L('模型提问', 'Model question') : L('请求授权', 'Authorization request');
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       this.pendingPermissions.set(requestId, { resolve });
@@ -544,6 +571,7 @@ export class OmpAdapter implements EngineAdapter {
         ? (opt.options as Array<Record<string, unknown>>).map((o) => String(o.value ?? ''))
         : [];
       if (id === 'model') {
+        this.modelValues = values;
         this.emit({ type: 'models.update', current, available: values });
       } else if (id === 'mode') {
         this.emit({
@@ -695,7 +723,7 @@ function numOrU(v: unknown): number | undefined {
 function withTimeout<T>(promise: Promise<T>, ms: number, tag: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${tag} 超时 (${ms}ms)`)), ms);
+    timer = setTimeout(() => reject(new Error(L(`${tag} 超时 (${ms}ms)`, `${tag} timed out (${ms}ms)`))), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
 }

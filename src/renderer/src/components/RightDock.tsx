@@ -11,12 +11,12 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { Bot, ChevronDown, FileDiff, FolderTree, MessagesSquare, NotebookText, Plus, SquareTerminal, X } from 'lucide-react';
+import { ChevronDown, FileDiff, FolderTree, MessagesSquare, NotebookText, Plus, SquareTerminal, X } from 'lucide-react';
 
 import type { SessionMeta } from '@shared/types';
 import { useChatStore, type TerminalTab } from '../store/chatStore';
 import { useT } from '../i18n';
-import WorkspacePanel, { useAgentActivity, useChangedFiles, type PanelTab } from './workspace/WorkspacePanel';
+import WorkspacePanel, { useChangedFiles, type PanelTab } from './workspace/WorkspacePanel';
 import SideChatPanel from './SideChatPanel';
 import TerminalPanel from './TerminalPanel';
 import PlanDocPanel from './PlanDocPanel';
@@ -108,12 +108,11 @@ export default function RightDock({
     return r ? { position: 'fixed', top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) } : {};
   };
 
-  // 变更/Agents 数据提升到此处：tab 徽标与内容面板共用一份（避免双拉取）。
+  // 变更数据提升到此处：tab 徽标与内容面板共用一份（避免双拉取）。
   const [changesNonce, setChangesNonce] = useState(0);
   const changes = useChangedFiles(sessionId, changesNonce);
-  const agents = useAgentActivity(sessionId);
 
-  const isPanelTab = activeTab === 'files' || activeTab === 'changes' || activeTab === 'agents';
+  const isPanelTab = activeTab === 'files' || activeTab === 'changes';
 
   // 面板宽度状态：拖动中直接改 state（无过渡），松手持久化。
   const [widths, setWidths] = useState<Record<PanelKind, number>>(() => ({
@@ -137,7 +136,6 @@ export default function RightDock({
     tabs.push(
       { id: 'files', icon: <FolderTree size={13} />, label: t('tabFiles') },
       { id: 'changes', icon: <FileDiff size={13} />, label: changes.length > 0 ? `${t('tabChanges')} ${changes.length}` : t('tabChanges') },
-      { id: 'agents', icon: <Bot size={13} />, label: agents.length > 0 ? `${t('tabAgents')} ${agents.length}` : t('tabAgents') },
     );
   }
   for (const tm of terms) {
@@ -344,7 +342,6 @@ export default function RightDock({
             treeWidth={widths.ws}
             changes={changes}
             changesNonce={changesNonce}
-            agents={agents}
             onRefreshChanges={() => setChangesNonce((n) => n + 1)}
           />
         )}

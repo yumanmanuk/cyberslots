@@ -121,13 +121,17 @@ export function isRaceActive(g: RaceGroup): boolean {
 
 /**
  * Read-only permission mode per engine, mirroring the sidechat convention:
- * codex/opencode/omp use `plan` (read-only sandbox); kimi has no read-only
- * mode —— 赛马无人值守跑长链路，泳道又没有审批操作区，kimi 若用
- * `default`（手动审批）弹权限请求会永久挂起（审批死锁），故强制
- * `auto` 自动批准，只读约束由 READONLY_GUARD 提示词护栏兑底。
+ * codex/opencode/omp/claude use `plan` (read-only sandbox); kimi 与 antigravity
+ * 没有可用的只读沙箱 —— 赛马无人值守跑长链路，泳道又没有审批操作区：
+ * kimi 用 `default`（手动审批）会永久挂起（审批死锁）；agy headless
+ * 的 plan/default 不带 --dangerously-skip-permissions，工具调用被软拒，
+ * 选手连文件都读不了，只会产出一句「让我获取访问权限」就交卷。
+ * 两者都强制 `auto` 自动批准，只读约束由 READONLY_GUARD 提示词护栏兑底。
+ * claude 的 plan 是引擎级真只读沙箱（且适配器在非 default 模式自动放行
+ * can_use_tool，不会死锁），故与 codex 同走 plan。
  */
 export function readOnlyMode(engine: EngineId): PermissionMode {
-  return engine === 'kimi' ? 'auto' : 'plan';
+  return engine === 'kimi' || engine === 'antigravity' ? 'auto' : 'plan';
 }
 
 /** Resolve the effective permission mode for a role at spawn time. */

@@ -71,7 +71,6 @@ export default function App(): JSX.Element {
   const dashboardOpen = useChatStore((s) => s.dashboardOpen);
   const activeRaceId = useRaceStore((s) => s.activeRaceId);
   const themeMode = useChatStore((s) => s.settings?.themeMode);
-  const themePalette = useChatStore((s) => s.settings?.themePalette);
   const mode = useResolvedMode(themeMode ?? 'light');
   const sidebarCollapsed = useChatStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useChatStore((s) => s.toggleSidebar);
@@ -90,19 +89,17 @@ export default function App(): JSX.Element {
   }, []);
 
   // 主题属性挂 <html>（而非根 div）：portal 到 body 的弹层（WorkspaceDialog 等）
-  // 也能继承主题 CSS 变量；未加载完成前走 CSS :root 回退（notion 浅色），不闪烁。
+  // 也能继承主题 CSS 变量；未加载完成前走 CSS :root 回退（浅色），不闪烁。
   useEffect(() => {
-    const el = document.documentElement;
-    el.dataset.palette = themePalette ?? 'notion';
-    el.dataset.mode = mode;
-  }, [themePalette, mode]);
+    document.documentElement.dataset.mode = mode;
+  }, [mode]);
 
   // 已解析外观推送主进程 → 原生标题栏/窗口底色同步（含 OS 明暗切换）；
   // 设置未加载完成前不推，避免默认值盖掉建窗时从配置文件读到的正确配色。
   useEffect(() => {
-    if (!themeMode || !themePalette) return;
-    void window.cyberslots.themeSync({ palette: themePalette, mode });
-  }, [themeMode, themePalette, mode]);
+    if (!themeMode) return;
+    void window.cyberslots.themeSync({ mode });
+  }, [themeMode, mode]);
 
   // 折叠态：悬停左缘热区 → 浮出侧栏；移开延迟收起；常驻展开走标题栏固定按钮。
   const peekEnter = (): void => {
@@ -120,8 +117,9 @@ export default function App(): JSX.Element {
       <header className="drag flex h-10 shrink-0 items-center gap-2 px-3">
         {/* 品牌占标题栏最左（Windows 应用图标惯例位，品牌优先）；
             折叠按钮紧随其后 — 品牌宽度恒定，按钮在两种状态下位置依然不变，图标交叉旋转淡入淡出 */}
-        <span className="flex items-center gap-1.5 text-[12px] font-semibold tracking-wide text-ink-soft">
-          <BrandMark size={15} className="text-accent" />
+        <span className="flex items-center gap-2 text-[12px] font-semibold tracking-wide text-ink-soft">
+          {/* ≥20px 才会画出窗内三星芒/出币槽细节 —— 品牌识别位用完整形态 */}
+          <BrandMark size={26} className="text-accent" />
           {t('appName')}
         </span>
         <button

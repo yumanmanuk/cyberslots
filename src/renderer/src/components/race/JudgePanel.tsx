@@ -7,11 +7,14 @@
 
 import { Check, Maximize2, PenLine, Square } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import { BrandHero, BrandSpinner } from '../brand';
 
 import type { RaceAdoptStrategy, RaceGroup, RacerRole } from '@shared/race';
-import { RACER_ROLES, RACE_ADOPT_LABELS, adoptLabel } from '@shared/race';
+import { RACER_ROLES } from '@shared/race';
+import { adoptStrategyLabel, useT } from '../../i18n';
 import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS } from '../EngineIcon';
 import ArtifactZoom from './ArtifactZoom';
@@ -20,6 +23,7 @@ import RaceLane from './RaceLane';
 const LETTER: Record<RacerRole, 'A' | 'B' | 'C'> = { racerA: 'A', racerB: 'B', racerC: 'C' };
 
 export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup; readOnly?: boolean }): JSX.Element {
+  const t = useT();
   const revokeAdopt = useRaceStore((s) => s.revokeAdopt);
   // 裁判回合可手动中止（中止后走错误横幅的「↻ 重试当前阶段」重跑）。
   const stopJudge = race.sessions.judge
@@ -31,7 +35,7 @@ export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup
     if (race.finalPlan) return <ReviewStep race={race} readOnly />;
     return (
       <div className="mx-auto w-full max-w-2xl rounded-2xl border border-line bg-bg-panel/70 p-5 text-center text-[12px] text-ink-faint">
-        （裁判环节尚未产出最终方案）
+        {t('raceJudgeNoFinal')}
       </div>
     );
   }
@@ -40,7 +44,7 @@ export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup
     return (
       <Working
         race={race}
-        label={`裁判正在按「${adoptLabel(race.adopt.strategy)}」出方案…`}
+        label={t('raceJudgeWorking', { strategy: adoptStrategyLabel(t, race.adopt.strategy) })}
         onStop={stopJudge}
         onRevoke={() => void revokeAdopt()}
       />
@@ -51,6 +55,7 @@ export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup
 /** ④a 采纳决策：先由你定方向；对各方方案不满意可回退重跑双规划。
  *  策略集按在场选手动态生成（剔除者退场：剔 B 后剩 A+C → 只列 A/C 策略）。 */
 function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
+  const t = useT();
   const adopt = useRaceStore((s) => s.adopt);
   const openTune = useRaceStore((s) => s.openTune);
   const restartPlanning = useRaceStore((s) => s.restartPlanning);
@@ -61,11 +66,20 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
     ...letters.map((l) => `adopt${l}` as RaceAdoptStrategy),
     ...letters.map((l) => `prefer${l}` as RaceAdoptStrategy),
   ];
+  const judge = race.roles.judge;
   return (
     <div className="mx-auto min-h-0 w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-bg-panel/70 p-5">
-      <div className="mb-1 text-[14px] font-semibold">⚖ 采纳决策 · 由你定方向</div>
+      <div className="mb-1 flex items-baseline gap-2 text-[14px] font-semibold">
+        {t('raceAdoptTitle')}
+        {judge && (
+          <span className="font-mono text-[10.5px] font-normal text-ink-faint">
+            {t('raceJudgePrefix')}{ENGINE_LABELS[judge.engine]} · {judge.modelId || t('raceDefaultModel')}
+            {judge.effort ? ` · ${judge.effort}` : ''}
+          </span>
+        )}
+      </div>
       <div className="mb-4 text-[12px] text-ink-faint">
-        读完各选手的方案与反驳/辩护后，选择采纳策略；裁判将严格按你的决策产出最终方案。
+        {t('raceAdoptDesc')}
       </div>
       <div className={`mb-3 grid gap-2 ${letters.length > 2 ? 'grid-cols-3' : 'grid-cols-2'}`}>
         {strategies.map((st) => (
@@ -77,31 +91,31 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
               : 'border-line bg-bg-input text-ink-soft hover:bg-bg-hover hover:text-ink'
               }`}
           >
-            {RACE_ADOPT_LABELS[st]}
+            {adoptStrategyLabel(t, st)}
           </button>
         ))}
       </div>
       <textarea
         value={comment}
         onChange={(e) => setComment(e.target.value)}
-        placeholder="评语（可选）：给裁判的指导意见，如「保留 A 的回滚设计，B 的第 2 步太激进不要」…"
+        placeholder={t('raceAdoptCommentPlaceholder')}
         className="mb-3 min-h-16 w-full resize-y rounded-xl border border-line bg-bg-input px-3 py-2 text-[12.5px] text-ink outline-none transition placeholder:text-ink-faint focus:border-accent"
       />
       <div className="flex items-center justify-between">
         <div className="flex gap-2">
           <button
             onClick={openTune}
-            title="调整各选手的引擎/模型/思考档（配合重跑生效）"
+            title={t('raceTuneAllTitle')}
             className="rounded-xl border border-line bg-bg-input px-3 py-2 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
           >
-            ⚙ 调整选手
+            {t('raceTuneRacers')}
           </button>
           <button
             onClick={() => void restartPlanning()}
-            title="清空各方方案与反驳，重新双规划（会重新消耗回合）"
+            title={t('raceRestartPlanningTitle')}
             className="rounded-xl border border-line bg-bg-input px-3 py-2 text-[12px] text-ink-soft transition hover:border-warn hover:text-warn"
           >
-            ↩ 对方案不满意，重跑规划
+            {t('raceRestartPlanning')}
           </button>
         </div>
         <button
@@ -109,7 +123,7 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
           onClick={() => strategy && void adopt(strategy, comment.trim() || undefined)}
           className="rounded-xl bg-accent px-5 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90 disabled:opacity-30"
         >
-          提交决策，让裁判出方案 →
+          {t('raceSubmitDecision')}
         </button>
       </div>
     </div>
@@ -118,53 +132,63 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
 
 /** ④c 方案评审：批注修订循环 + 定稿。 */
 function ReviewStep({ race, stopJudge, readOnly = false }: { race: RaceGroup; stopJudge?: () => void; readOnly?: boolean }): JSX.Element {
+  const t = useT();
   const revise = useRaceStore((s) => s.revise);
   const finalize = useRaceStore((s) => s.finalize);
+  const openTune = useRaceStore((s) => s.openTune);
+  const rerunJudge = useRaceStore((s) => s.rerunJudge);
   const [note, setNote] = useState('');
-  // 提交批注后进入「修订中」，新版本号到达时解除；修订回合被中止/
-  // 报错（错误横幅出现）也要解除，否则永远卡在转圈态。
-  const [revising, setRevising] = useState(false);
+  // 提交批注（revise）/重新出方案（rework）后进入等待态，新版本号到达
+  // 时解除；回合被中止/报错（错误横幅出现）也要解除，否则永远卡在转圈态。
+  const [pending, setPending] = useState<'revise' | 'rework' | null>(null);
   const [seenVersion, setSeenVersion] = useState(race.finalPlanVersion);
   const [zoomed, setZoomed] = useState(false);
   const error = useRaceStore((s) => (s.activeRaceId ? s.errors[s.activeRaceId] : undefined));
   useEffect(() => {
     if (race.finalPlanVersion !== seenVersion) {
       setSeenVersion(race.finalPlanVersion);
-      setRevising(false);
+      setPending(null);
     }
   }, [race.finalPlanVersion, seenVersion]);
   useEffect(() => {
-    if (error) setRevising(false);
+    if (error) setPending(null);
   }, [error]);
 
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
-      {/* 最终方案卡：header 固定，方案内容区内滚（占满剩余高度） */}
-      <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-line border-l-2 border-l-accent bg-bg-panel/70 p-5">
+      {/* 最终方案卡：header 固定，方案内容区内滚（占满剩余高度）。
+          重新出方案（rework）期间隐藏——新方案将 v+1 整体覆盖，旧内容
+          此时已过期，留着只会误导（批注修订 revise 是增量改，保留作基准）。 */}
+      {pending !== 'rework' && (
+      <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-line bg-bg-panel/70 p-5">
         <div className="mb-2 flex shrink-0 items-center gap-2">
-          <span className="text-[14px] font-semibold">📋 最终方案</span>
+          <span className="text-[14px] font-semibold">{t('raceFinalPlan')}</span>
           <span className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[10.5px] text-ink-faint">
             v{race.finalPlanVersion}
           </span>
           {race.adopt && (
-            <span className="text-[11px] text-ink-faint">策略：{adoptLabel(race.adopt.strategy)}</span>
+            <span className="text-[11px] text-ink-faint">{t('raceStrategyLabel', { strategy: adoptStrategyLabel(t, race.adopt.strategy) })}</span>
           )}
           <button
-            title="放大查看"
+            title={t('raceZoom')}
             onClick={() => setZoomed(true)}
             className="ml-auto rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
           >
             <Maximize2 size={13} />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-ink-soft">
-          {race.finalPlan}
+        {/* 与选手方案预览同款 markdown 渲染（md-body），不展示原文 */}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="md-body text-[13px]">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{race.finalPlan ?? ''}</ReactMarkdown>
+          </div>
         </div>
       </div>
+      )}
 
       {zoomed && race.finalPlan && (
         <ArtifactZoom
-          title={`⚖ 裁判方案 v${race.finalPlanVersion}`}
+          title={t('raceJudgePlanTitle', { v: race.finalPlanVersion })}
           text={race.finalPlan}
           onClose={() => setZoomed(false)}
         />
@@ -172,37 +196,63 @@ function ReviewStep({ race, stopJudge, readOnly = false }: { race: RaceGroup; st
 
       {race.annotations.length > 0 && (
         <div className="mt-3 shrink-0 rounded-r-lg border-l-2 border-warn bg-bg-input px-3 py-2 text-[12px] text-ink-soft">
-          ✂ 最近批注：{race.annotations[race.annotations.length - 1]}
+          {t('raceRecentAnnotation', { note: race.annotations[race.annotations.length - 1] ?? '' })}
         </div>
       )}
 
-      {revising ? (
-        <Working race={race} label="裁判正在按批注修订方案…" onStop={stopJudge} />
+      {pending ? (
+        <Working
+          race={race}
+          label={
+            pending === 'revise'
+              ? t('raceJudgeRevising')
+              : t('raceJudgeRework', { strategy: race.adopt ? adoptStrategyLabel(t, race.adopt.strategy) : t('raceExistingStrategy') })
+          }
+          onStop={stopJudge}
+        />
       ) : readOnly ? null : (
         <div className="mt-4 shrink-0">
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="在此批注 / 提出修改意见（如：第 3 步缺少并发锁，请补充）…"
+            placeholder={t('raceReviseCommentPlaceholder')}
             className="min-h-16 w-full resize-y rounded-xl border border-line bg-bg-input px-3 py-2 text-[12.5px] text-ink outline-none transition placeholder:text-ink-faint focus:border-accent"
           />
-          <div className="mt-2 flex justify-end gap-2">
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              onClick={openTune}
+              title={t('raceTuneJudgeTitle')}
+              className="rounded-xl border border-line bg-bg-input px-3 py-2 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+            >
+              {t('raceTuneRoles')}
+            </button>
+            <button
+              onClick={() => {
+                setPending('rework');
+                void rerunJudge();
+              }}
+              title={t('raceRerunJudgeTitle')}
+              className="rounded-xl border border-line bg-bg-input px-3 py-2 text-[12px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+            >
+              {t('raceRerunJudge')}
+            </button>
+            <div className="flex-1" />
             <button
               disabled={!note.trim()}
               onClick={() => {
-                setRevising(true);
+                setPending('revise');
                 void revise(note.trim());
                 setNote('');
               }}
               className="flex items-center gap-1.5 rounded-xl border border-line bg-bg-input px-4 py-2 text-[12.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink disabled:opacity-30"
             >
-              <PenLine size={13} /> 按批注让裁判修订
+              <PenLine size={13} /> {t('raceReviseBtn')}
             </button>
             <button
               onClick={() => void finalize()}
               className="flex items-center gap-1.5 rounded-xl bg-accent px-5 py-2 text-[12.5px] font-semibold text-white transition hover:opacity-90"
             >
-              <Check size={14} /> 定稿，交付执行
+              <Check size={14} /> {t('raceFinalize')}
             </button>
           </div>
         </div>
@@ -224,10 +274,11 @@ function Working({
   onStop?: () => void;
   onRevoke?: () => void;
 }): JSX.Element {
+  const t = useT();
   const sessionId = race.sessions.judge;
   const cfg = race.roles.judge;
   const subtitle = cfg
-    ? `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || '默认模型'}${cfg.effort ? ` · ${cfg.effort}` : ''}`
+    ? `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || t('raceDefaultModel')}${cfg.effort ? ` · ${cfg.effort}` : ''}`
     : '';
   return (
     <div className="mx-auto mt-4 flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-1">
@@ -236,20 +287,20 @@ function Working({
         {label}
         {onRevoke && (
           <button
-            title="反悔了？叫停裁判并回到「选择采纳策略」重选（策略与评语重新填）"
+            title={t('raceRevokeWorkingTitle')}
             onClick={onRevoke}
             className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-ink"
           >
-            ↩ 重新选择策略
+            {t('raceReselectStrategy')}
           </button>
         )}
         {onStop && (
           <button
-            title="中止裁判当前回合（随后可在错误横幅点「↻ 重试当前阶段」重跑）"
+            title={t('raceStopJudgeTitle')}
             onClick={onStop}
             className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-faint transition hover:border-err hover:text-err"
           >
-            <Square size={10} fill="currentColor" /> 中止
+            <Square size={10} fill="currentColor" /> {t('raceCancel')}
           </button>
         )}
       </div>
@@ -257,7 +308,7 @@ function Working({
           会话未建好前给大场面等待（按规范用 BrandHero） */}
       {sessionId ? (
         <RaceLane
-          title="裁判"
+          title={t('raceRoleJudge')}
           badge="⚖"
           subtitle={subtitle}
           sessionId={sessionId}
@@ -269,7 +320,7 @@ function Working({
       ) : (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-line bg-bg-panel/70 py-8 text-[12px] text-ink-faint">
           <BrandHero size={48} />
-          裁判会话创建中…
+          {t('raceJudgeCreating')}
         </div>
       )}
     </div>

@@ -118,7 +118,9 @@ function ArchivedRow({ meta, onOpen }: { meta: SessionMeta; onOpen: () => void }
 
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
-  if (diff < 60_000) return '刚刚';
+  // 非响应式读语言：本视图随 settings 变更重渲染，相对时间随之刷新。
+  const lang = useChatStore.getState().settings?.language ?? 'zh';
+  if (diff < 60_000) return lang === 'zh' ? '刚刚' : 'now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
   return `${Math.floor(diff / 86_400_000)}d`;

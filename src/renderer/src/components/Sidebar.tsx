@@ -19,14 +19,13 @@ import {
   FolderGit2,
   FolderOpen,
   FolderPlus,
+  GitBranch,
   Languages,
   LayoutDashboard,
   Moon,
-  MoreHorizontal,
   Pencil,
   Plus,
   Settings,
-  SquareTerminal,
   Trash2,
 } from 'lucide-react';
 
@@ -36,9 +35,11 @@ import type { AppLanguage, AppSettings, EngineId, SessionMeta, WorkspaceInfo } f
 import { isRaceActive, raceHostArchived } from '@shared/race';
 import { useT, type MsgKey } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
-import { EngineIcon, ENGINE_LABELS, useEngineOrder } from './EngineIcon';
+import { OpenInList } from './OpenInRail';
+import { EngineIcon, ENGINE_LABELS, PseudoWorkspaceBadge, useEngineOrder } from './EngineIcon';
 import { UsageQuickButton } from './UsageQuota';
 import { BrandMark, BrandSpinner } from './brand';
+import DotMenu from './DotMenu';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
 
@@ -60,6 +61,38 @@ function useEscClose(open: boolean, onClose: () => void): void {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
+}
+
+/** 滚动区边缘渐隐 — 按滚动位置返回 mask 类名：某方向还有内容才淡出，
+ *  滚到尽头恢复实边（不虚化首/末行）。同时监听滚动、容器尺寸与
+ *  子节点增删（展开/收起分组也会改变可滚高度）。 */
+function useEdgeFade(): { ref: React.RefObject<HTMLElement>; cls: string } {
+  const ref = useRef<HTMLElement>(null);
+  const [edges, setEdges] = useState({ top: false, bottom: false });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = (): void => {
+      // 4px 容差 — 避免亚像素滚动/缩放下在临界点反复闪烁。
+      const top = el.scrollTop > 4;
+      const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 4;
+      setEdges((prev) => (prev.top === top && prev.bottom === bottom ? prev : { top, bottom }));
+    };
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const mo = new MutationObserver(update);
+    mo.observe(el, { childList: true, subtree: true });
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, []);
+  const cls =
+    edges.top && edges.bottom ? 'scroll-fade-tb' : edges.top ? 'scroll-fade-t' : edges.bottom ? 'scroll-fade-b' : '';
+  return { ref, cls };
 }
 
 export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element {
@@ -91,6 +124,7 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
 
   // 分组头“+”快捷创建 — 先选引擎再建会话，避免进会话后切引擎产生分支
   const createSession = useChatStore((s) => s.createSession);
+  const listFade = useEdgeFade();
   const quickNewChat = (engine: EngineId): void => void createSession({ engine, cwd: '' });
   const quickNewProject = async (engine: EngineId): Promise<void> => {
     const dir = await window.cyberslots.dialogPickFolder();
@@ -110,15 +144,16 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
             useRaceStore.getState().closeRace();
             useChatStore.setState({ activeSessionId: null, dashboardOpen: false });
           }}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-input px-3 py-2 text-ui text-ink-soft shadow-sm transition hover:bg-bg-hover hover:text-ink"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-panel px-3 py-2 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink"
         >
           <Plus size={14} /> {t('newSession')}
         </button>
-        {/* 总控制台入口 — 待办数角标常驻可见 */}
+        {/* 总控制台入口 — 幽灵图标钮（与筛选/设置等侧栏图标同风格，
+            不和「新会话」主按钮抢卡片样式）；待办数角标常驻可见 */}
         <button
           title={t('mcTitle')}
           onClick={() => useChatStore.getState().openDashboard()}
-          className="relative flex shrink-0 items-center justify-center rounded-xl border border-line bg-bg-input p-2 text-ink-soft shadow-sm transition hover:bg-bg-hover hover:text-ink"
+          className="relative flex shrink-0 items-center justify-center rounded-lg p-2 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
         >
           <LayoutDashboard size={15} />
           {inboxCount > 0 && (
@@ -133,8 +168,8 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
         <FilterMenu />
       </div>
 
-      {/* 分组滚动区 */}
-      <nav className="scroll-quiet flex-1 overflow-y-auto px-2 pb-2">
+      {/* 分组滚动区 — 上下边缘按滚动位置渐隐，与底部功能区淡出衔接而非硬切 */}
+      <nav ref={listFade.ref} className={`scroll-quiet flex-1 overflow-y-auto px-2 pb-2 ${listFade.cls}`}>
         <GroupHeader label={t('workspaces')} addTitle={t('newWorkspace')} onAdd={() => setWsDialog({ open: true, editing: null })} />
         {groups.workspaces.length === 0 && <EmptyHint />}
         {groups.workspaces.map(({ workspace, sessions: list }) => (
@@ -156,8 +191,8 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
 
         <GroupHeader label={t('chats')} addTitle={t('newChat')} onAddEngine={quickNewChat} />
         {groups.chats.length === 0 && <EmptyHint />}
-        {arrange(groups.chats).map(({ meta, depth }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
+        {arrange(groups.chats).map(({ meta, depth, chain }) => (
+          <SessionRow key={meta.id} meta={meta} depth={depth} chain={chain} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
         ))}
       </nav>
 
@@ -181,8 +216,9 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
           </button>
         )}
         <div className="mt-1 flex items-center justify-between px-2.5 pt-1">
-          <span className="flex items-center gap-1.5 text-[11px] text-ink-faint">
-            <BrandMark size={13} />
+          <span className="flex items-center gap-2 text-[11px] text-ink-faint">
+            {/* ≥20px 完整形态 + accent 金色 —— 否则退化成认不出的灰色小方框 */}
+            <BrandMark size={24} className="text-accent" />
             {t('appName')}
           </span>
           <div className="flex items-center gap-0.5">
@@ -263,21 +299,55 @@ function applyFilter(sessions: SessionMeta[], f: SidebarFilter): SessionMeta[] {
   return [...out].sort((a, b) => (f.sort === 'created' ? b.createdAt - a.createdAt : b.updatedAt - a.updatedAt));
 }
 
-/** Order sessions so fork branches nest right under their parent. */
-function arrange(sessions: SessionMeta[]): Array<{ meta: SessionMeta; depth: number }> {
-  const byParent = new Map<string, SessionMeta[]>();
-  const ids = new Set(sessions.map((s) => s.id));
-  const roots: SessionMeta[] = [];
+/** Order sessions so fork branches nest right under their parent.
+ *  引擎切换链（chained）先折叠：父会话隐进最新叶子的「历史引擎分支」
+ *  展开区，同一条对话在侧栏永远只占一行（视觉连续）。 */
+interface ArrangedRow {
+  meta: SessionMeta;
+  depth: number;
+  /** 被折叠进本行的引擎切换祖先（近 → 远），展开后可点回无损续聊。 */
+  chain?: SessionMeta[];
+}
+
+function arrange(sessions: SessionMeta[]): ArrangedRow[] {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  // 有 chained 子分支的会话被其叶子接管，不再单独占行。
+  const hidden = new Set<string>();
   for (const s of sessions) {
+    if (s.chained && s.parentId && byId.has(s.parentId)) hidden.add(s.parentId);
+  }
+  const chains = new Map<string, SessionMeta[]>();
+  const visible: SessionMeta[] = [];
+  for (const s of sessions) {
+    if (hidden.has(s.id)) continue;
+    // 沿 chained 链向上收集被折叠的祖先（近 → 远）。
+    const chain: SessionMeta[] = [];
+    let cursor: SessionMeta | undefined = s;
+    while (cursor?.chained && cursor.parentId) {
+      const parent = byId.get(cursor.parentId);
+      if (!parent) break;
+      chain.push(parent);
+      cursor = parent;
+    }
+    if (chain.length) chains.set(s.id, chain);
+    // 叶子在缩进树中顶替链根的位置：parentId 越过被折叠的祖先。
+    const effectiveParent = chain.length ? chain[chain.length - 1]!.parentId : s.parentId;
+    visible.push(effectiveParent === s.parentId ? s : { ...s, parentId: effectiveParent });
+  }
+
+  const byParent = new Map<string, SessionMeta[]>();
+  const ids = new Set(visible.map((s) => s.id));
+  const roots: SessionMeta[] = [];
+  for (const s of visible) {
     if (s.parentId && ids.has(s.parentId)) {
       byParent.set(s.parentId, [...(byParent.get(s.parentId) ?? []), s]);
     } else {
       roots.push(s);
     }
   }
-  const out: Array<{ meta: SessionMeta; depth: number }> = [];
+  const out: ArrangedRow[] = [];
   const walk = (meta: SessionMeta, depth: number): void => {
-    out.push({ meta, depth });
+    out.push({ meta, depth, chain: chains.get(meta.id) });
     for (const child of byParent.get(meta.id) ?? []) walk(child, Math.min(depth + 1, 3));
   };
   for (const r of roots) walk(r, 0);
@@ -323,17 +393,20 @@ function GroupHeader({
 }
 
 /** 快捷创建的引擎选择 — 建会话时定引擎，避免进会话后切引擎走 forkToEngine 产生分支。
- *  列表顺序跟随设置 engineOrder。 */
+ *  列表顺序跟随设置 engineOrder。multiRootBadge = 目标是多目录工作区，
+ *  无原生多根的引擎（opencode/kimi/antigravity）行尾挂「非原生工作区」徽标。 */
 function EnginePick({
   title,
   onPick,
   btnClass,
   iconSize,
+  multiRootBadge,
 }: {
   title?: string;
   onPick: (engine: EngineId) => void;
   btnClass: string;
   iconSize: number;
+  multiRootBadge?: boolean;
 }): JSX.Element {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -364,7 +437,7 @@ function EnginePick({
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div
-            className={`absolute right-0 z-20 w-36 rounded-xl border border-line bg-bg-input py-1 shadow-lg ${dropUp ? 'bottom-6' : 'top-6'}`}
+            className={`absolute right-0 z-20 ${multiRootBadge ? 'w-44' : 'w-36'} rounded-xl border border-line bg-bg-input py-1 shadow-lg ${dropUp ? 'bottom-6' : 'top-6'}`}
           >
             <MenuSection label={t('pickEngine')} />
             {engineOrder.map((id) => {
@@ -374,7 +447,7 @@ function EnginePick({
                 <button
                   key={id}
                   disabled={unavailable}
-                  title={unavailable ? '未检测到本机安装，详见设置-模型页' : undefined}
+                  title={unavailable ? t('engineNotDetectedTitle') : undefined}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     setOpen(false);
@@ -384,7 +457,8 @@ function EnginePick({
                     }`}
                 >
                   <EngineIcon engine={id} size={13} />
-                  {ENGINE_LABELS[id]}
+                  <span className="min-w-0 flex-1 truncate">{ENGINE_LABELS[id]}</span>
+                  {multiRootBadge && <PseudoWorkspaceBadge engine={id} />}
                 </button>
               );
             })}
@@ -447,21 +521,6 @@ function WorkspaceGroup({
           items={[
             { icon: <Pencil size={13} />, label: t('manageWorkspace'), onClick: onEdit },
             {
-              icon: <SquareTerminal size={13} />,
-              label: t('openTerminal'),
-              onClick: () => void window.cyberslots.openIn('terminal', workspace.folders[0] ?? ''),
-            },
-            {
-              icon: <Folder size={13} />,
-              label: t('openInEditor'),
-              onClick: () => void window.cyberslots.openIn('vscode', workspace.folders[0] ?? ''),
-            },
-            {
-              icon: <FolderOpen size={13} />,
-              label: t('openInExplorer'),
-              onClick: () => void window.cyberslots.openIn('explorer', workspace.folders[0] ?? ''),
-            },
-            {
               icon: <Archive size={13} />,
               label: t('archiveAllChats'),
               confirmLabel: t('confirmArchive'),
@@ -477,17 +536,24 @@ function WorkspaceGroup({
               onClick: () => void removeWorkspace(workspace.id),
             },
           ]}
+          footer={(close) => (
+            <>
+              <div className="px-3 pb-0.5 pt-1 text-[10.5px] tracking-wide text-ink-faint">{t('railOpenIn')}</div>
+              <OpenInList folders={workspace.folders} onPick={close} />
+            </>
+          )}
         />
         <EnginePick
           title={t('newSession')}
           onPick={(engine) => void createSession({ engine, cwd: '', workspaceId: workspace.id })}
           btnClass="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ink group-hover:opacity-100"
           iconSize={14}
+          multiRootBadge={workspace.folders.length > 1}
         />
       </div>
       {expanded &&
-        arrange(sessions).map(({ meta, depth }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth + 1} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
+        arrange(sessions).map(({ meta, depth, chain }) => (
+          <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
         ))}
     </div>
   );
@@ -551,11 +617,14 @@ function ProjectGroup({
         <DotMenu
           items={[
             { icon: <FolderPlus size={13} />, label: t('convertToWorkspace'), onClick: () => void convert() },
-            { icon: <SquareTerminal size={13} />, label: t('openTerminal'), onClick: () => void window.cyberslots.openIn('terminal', cwd) },
-            { icon: <Folder size={13} />, label: t('openInEditor'), onClick: () => void window.cyberslots.openIn('vscode', cwd) },
-            { icon: <FolderOpen size={13} />, label: t('openInExplorer'), onClick: () => void window.cyberslots.openIn('explorer', cwd) },
             { icon: <Archive size={13} />, label: t('archiveAllChats'), confirmLabel: t('confirmArchive'), onClick: () => void archiveAll() },
           ]}
+          footer={(close) => (
+            <>
+              <div className="px-3 pb-0.5 pt-1 text-[10.5px] tracking-wide text-ink-faint">{t('railOpenIn')}</div>
+              <OpenInList folders={[cwd]} onPick={close} />
+            </>
+          )}
         />
         <EnginePick
           title={t('newSession')}
@@ -565,16 +634,22 @@ function ProjectGroup({
         />
       </div>
       {expanded &&
-        arrange(sessions).map(({ meta, depth }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth + 1} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
+        arrange(sessions).map(({ meta, depth, chain }) => (
+          <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
         ))}
     </div>
   );
 }
 
-function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void }): JSX.Element {
+function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta; depth: number; active: boolean; onClick: () => void; chain?: SessionMeta[] }): JSX.Element {
   const t = useT();
   const archiveSession = useChatStore((s) => s.archiveSession);
+  const selectSession = useChatStore((s) => s.selectSession);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  // 引擎切换链展开态：折叠的祖先分支（切换前的原生上下文，可点回无损续聊）。
+  const [chainOpen, setChainOpen] = useState(false);
+  // 另：当前活动会话是本行的隐藏祖先时自动展开，否则高亮无处落脚。
+  const ancestorActive = !!chain?.some((a) => a.id === activeSessionId);
   // 反应式拦截态：会话在跑 / 名下有进行中赛马（选择器返回布尔，不产生新引用）。
   const raceBusy = useRaceStore((s) => Object.values(s.races).some((g) => g.parentSessionId === meta.id && isRaceActive(g)));
   const blocked = meta.status === 'running' || meta.status === 'starting' || raceBusy;
@@ -596,42 +671,77 @@ function SessionRow({ meta, depth, active, onClick }: { meta: SessionMeta; depth
   };
 
   return (
-    <div
-      onClick={onClick}
-      style={{ paddingLeft: `${8 + depth * 14}px` }}
-      className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2 text-ui text-ink ${active ? 'bg-bg-active' : 'hover:bg-bg-hover'
-        }`}
-    >
-      <span className="min-w-0 flex-1 truncate">{meta.title}</span>
-      {/* 右侧状态位（codex 风）：运行中灰色菜单 / 待回答黄色问号 /
-          报错红色叹号 / 未读（已完成未查看）金色实心点；否则显相对时间。 */}
-      <span className="flex shrink-0 items-center group-hover:hidden">
-        <RowIndicator meta={meta} />
-      </span>
-      <button
-        title={blocked ? t('archiveBlockedBusy') : confirming ? t('confirmArchive') : t('archive')}
-        onClick={onArchive}
-        disabled={blocked}
-        onMouseLeave={() => {
-          clearTimeout(timer.current);
-          setConfirming(false);
-        }}
-        className={`hidden rounded-md p-0.5 transition group-hover:block ${blocked
-            ? 'cursor-not-allowed text-ink-faint opacity-40'
-            : confirming
-              ? 'block bg-warn/15 text-warn'
-              : 'text-ink-faint hover:text-ink'
+    <>
+      <div
+        onClick={onClick}
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        className={`group flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-2 text-ui text-ink ${active ? 'bg-bg-active' : 'hover:bg-bg-hover'
           }`}
       >
-        {confirming ? <Check size={13} /> : <Archive size={13} />}
-      </button>
-    </div>
+        <span className="min-w-0 flex-1 truncate">{meta.title}</span>
+        {/* 引擎切换链入口：常驻小徽标（分支数），点开展示被折叠的历史引擎分支。 */}
+        {chain && chain.length > 0 && (
+          <button
+            title={chainOpen || ancestorActive ? t('chainCollapse') : t('chainExpand')}
+            onClick={(e) => {
+              e.stopPropagation();
+              setChainOpen(!chainOpen);
+            }}
+            className={`flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] tabular-nums transition ${chainOpen || ancestorActive ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-active hover:text-ink'
+              }`}
+          >
+            <GitBranch size={11} />
+            {chain.length}
+          </button>
+        )}
+        {/* 右侧状态位（codex 风）：运行中灰色菜单 / 待回答黄色问号 /
+            报错红色叹号 / 未读（已完成未查看）金色实心点；否则显相对时间。 */}
+        <span className="flex shrink-0 items-center group-hover:hidden">
+          <RowIndicator meta={meta} />
+        </span>
+        <button
+          title={blocked ? t('archiveBlockedBusy') : confirming ? t('confirmArchive') : t('archive')}
+          onClick={onArchive}
+          disabled={blocked}
+          onMouseLeave={() => {
+            clearTimeout(timer.current);
+            setConfirming(false);
+          }}
+          className={`hidden rounded-md p-0.5 transition group-hover:block ${blocked
+              ? 'cursor-not-allowed text-ink-faint opacity-40'
+              : confirming
+                ? 'block bg-warn/15 text-warn'
+                : 'text-ink-faint hover:text-ink'
+            }`}
+        >
+          {confirming ? <Check size={13} /> : <Archive size={13} />}
+        </button>
+      </div>
+      {/* 展开的历史引擎分支（近 → 远）：每行 = 切换前的原生会话，点击回到
+          该引擎的完整原生上下文无损续聊。 */}
+      {chain && (chainOpen || ancestorActive) &&
+        chain.map((a) => (
+          <div
+            key={a.id}
+            onClick={() => selectSession(a.id)}
+            style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}
+            title={t('chainBranchHint')}
+            className={`flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2 text-[11.5px] ${a.id === activeSessionId ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+              }`}
+          >
+            <EngineIcon engine={a.engine} size={12} />
+            <span className="min-w-0 flex-1 truncate">{ENGINE_LABELS[a.engine]}</span>
+            <span className="shrink-0 text-[10px] tabular-nums">{timeAgo(a.updatedAt)}</span>
+          </div>
+        ))}
+    </>
   );
 }
 
 /** 行尾状态指示（取代左侧小图标）：spinner=运行 / 黄问号=等回答 /
  *  红叹号=报错 / 金点=未读；空闲已读显示相对时间。 */
 function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
+  const t = useT();
   switch (meta.status) {
     case 'running':
     case 'starting':
@@ -642,7 +752,7 @@ function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
     case 'error':
       return <CircleAlert size={13} className="shrink-0 text-err" />;
     default:
-      if (meta.unread) return <span title="任务已完成，未查看" className="h-2 w-2 shrink-0 rounded-full bg-accent" />;
+      if (meta.unread) return <span title={t('unreadDoneTitle')} className="h-2 w-2 shrink-0 rounded-full bg-accent" />;
       return <span className="text-[10px] tabular-nums text-ink-faint">{timeAgo(meta.updatedAt)}</span>;
   }
 }
@@ -725,12 +835,6 @@ const MODE_ITEMS: Array<{ id: AppSettings['themeMode']; key: MsgKey }> = [
   { id: 'system', key: 'modeSystem' },
 ];
 
-const PALETTE_ITEMS: Array<{ id: AppSettings['themePalette']; key: MsgKey }> = [
-  { id: 'notion', key: 'paletteNotion' },
-  { id: 'solarized', key: 'paletteSolarized' },
-  { id: 'everforest', key: 'paletteEverforest' },
-];
-
 const LANG_ITEMS: Array<{ id: AppLanguage; key: MsgKey }> = [
   { id: 'zh', key: 'langZh' },
   { id: 'en', key: 'langEn' },
@@ -740,7 +844,7 @@ function GearMenu(): JSX.Element {
   const t = useT();
   const settings = useChatStore((s) => s.settings);
   const saveSettings = useChatStore((s) => s.saveSettings);
-  // 兼容性审计有条目 → 齿轮上小黄点（不打断的诊断入口，详情在设置→模型）。
+  // 兼容性审计有条目 → 齿轮上小黄点（不打断的诊断入口，详情在设置→引擎对应子页）。
   const hasCompatIssues = useChatStore((s) =>
     Object.values(s.compatAudit?.engines ?? {}).some((list) => (list?.length ?? 0) > 0),
   );
@@ -750,7 +854,7 @@ function GearMenu(): JSX.Element {
   return (
     <div className="relative">
       <button
-        title={hasCompatIssues ? `${t('settings')}（引擎兼容性诊断有新条目）` : t('settings')}
+        title={hasCompatIssues ? `${t('settings')}${t('compatNewEntries')}` : t('settings')}
         onClick={() => setOpen(!open)}
         className="relative rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
       >
@@ -772,22 +876,12 @@ function GearMenu(): JSX.Element {
               ))}
             </SubMenu>
             <SubMenu icon={<Moon size={13} />} label={t('theme')} align="bottom">
-              <MenuSection label={t('themeMode')} />
               {MODE_ITEMS.map((m) => (
                 <MenuCheck
                   key={m.id}
                   label={t(m.key)}
                   checked={settings?.themeMode === m.id}
                   onClick={() => void saveSettings({ themeMode: m.id })}
-                />
-              ))}
-              <MenuSection label={t('themePalette')} />
-              {PALETTE_ITEMS.map((p) => (
-                <MenuCheck
-                  key={p.id}
-                  label={t(p.key)}
-                  checked={settings?.themePalette === p.id}
-                  onClick={() => void saveSettings({ themePalette: p.id })}
                 />
               ))}
             </SubMenu>
@@ -845,84 +939,11 @@ function SubMenu({ icon, label, align = 'top', children }: {
   );
 }
 
-// ------------------------------------------------------------ tiny menu
-
-interface DotMenuItem {
-  icon: React.ReactNode;
-  label: string;
-  danger?: boolean;
-  disabled?: boolean;
-  title?: string;
-  /** 需二次确认：首次点击变确认态（图标换勾 + 换文案），再点才执行。 */
-  confirmLabel?: string;
-  onClick: () => void;
-}
-
-function DotMenu({ items }: { items: DotMenuItem[] }): JSX.Element {
-  const [open, setOpen] = useState(false);
-  // 记录当前处于确认态的项（按 label 区分）；关菜单即重置。
-  const [confirming, setConfirming] = useState<string | null>(null);
-  useEscClose(open, () => setOpen(false));
-  const close = (): void => {
-    setOpen(false);
-    setConfirming(null);
-  };
-  return (
-    <div className="relative">
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          if (open) close();
-          else setOpen(true);
-        }}
-        className="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ink group-hover:opacity-100"
-      >
-        <MoreHorizontal size={14} />
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={close} />
-          <div className="absolute right-0 top-7 z-20 w-44 rounded-xl border border-line bg-bg-input py-1 shadow-lg">
-            {items.map((item) => {
-              const inConfirm = item.confirmLabel != null && confirming === item.label;
-              return (
-                <button
-                  key={item.label}
-                  disabled={item.disabled}
-                  title={item.title}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (item.confirmLabel && !inConfirm) {
-                      setConfirming(item.label);
-                      return;
-                    }
-                    close();
-                    item.onClick();
-                  }}
-                  onMouseLeave={() => {
-                    if (inConfirm) setConfirming(null);
-                  }}
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-ui transition ${item.disabled
-                    ? 'cursor-not-allowed text-ink-faint/50'
-                    : inConfirm
-                      ? 'bg-warn/15 text-warn'
-                      : `hover:bg-bg-hover ${item.danger ? 'text-err' : 'text-ink'}`
-                    }`}
-                >
-                  {inConfirm ? <Check size={13} /> : item.icon} {inConfirm ? item.confirmLabel : item.label}
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
-  if (diff < 60_000) return '刚刚';
+  // 非响应式读语言：语言切换会重渲染侧栏（settings 订阅），相对时间随之刷新。
+  const lang = useChatStore.getState().settings?.language ?? 'zh';
+  if (diff < 60_000) return lang === 'zh' ? '刚刚' : 'now';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
   return `${Math.floor(diff / 86_400_000)}d`;

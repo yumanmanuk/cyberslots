@@ -7,6 +7,8 @@
 import { Scissors } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+import { useT } from '../../i18n';
+
 export default function EliminateButton({
   label,
   onConfirm,
@@ -15,6 +17,7 @@ export default function EliminateButton({
   label: string;
   onConfirm: () => void;
 }): JSX.Element {
+  const t = useT();
   const [armed, setArmed] = useState(false);
   useEffect(() => {
     if (!armed) return;
@@ -26,8 +29,8 @@ export default function EliminateButton({
     <button
       title={
         armed
-          ? '再次点击确认剔除（不可逆）'
-          : `剔除${label}（不可逆）：退出后续回合，其方案不进入裁判；剩余选手继续比赛`
+          ? t('raceEliminateArmedTitle')
+          : t('raceEliminateTitle', { label })
       }
       onClick={(e) => {
         e.stopPropagation();
@@ -43,7 +46,7 @@ export default function EliminateButton({
           : 'border-line text-ink-faint hover:border-err/50 hover:text-err'
         }`}
     >
-      <Scissors size={10} /> {armed ? '确认剔除?' : '剔除'}
+      <Scissors size={10} /> {armed ? t('raceEliminateConfirm') : t('raceEliminate')}
     </button>
   );
 }

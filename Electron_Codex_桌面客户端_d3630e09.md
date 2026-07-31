@@ -2,7 +2,13 @@
 
 > 本文件是后续新对话的**唯一总指引**（as-built 版）：记录已定决策、已实现功能、关键实测结论、代码地图、遗留项与后续路线。
 > 历史决策依据见 `d:\ai-agent\handoff.md`；阶段 0 实测报告见 `cyberslots/docs/phase0-findings.md`。
-> 最后更新：2026-07-30 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+> 最后更新：2026-07-31 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+>
+> 🆕 **2026-07-31 追加（kimi KAP 双通道——kimi web REST+WS 首选 + ACP 降级兜底，本轮主体功能，详见 §4.26）**：kimi 会话优先走 **KimiKapAdapter（KAP：`kimi web` kap-server，REST `/api/v1` + WebSocket，背后 agent-core-v2）**，全面补齐 ACP 通道缺失/模拟的能力：**原生 goal**（profile.agent_config.goal_objective/goal_control + goal.updated，含自发续跑）· **原生 steer**（prompts:steer）· **原生 fork**（:fork 真分支）· **原生 compact**（:compact + 四态事件）· **plan_mode** · **原生 swarm_mode**（会话级开关，取代提示词软引导；Composer ⚡ 按能力分流）· **子代理/Swarm 可视化**（subagent.* → 每人一张任务卡卡内进度行，TUI 并行网格桌面等价物）· **真实 usage**（turn.step.completed 逐调用累计，不再字符估算）· **独立 thinking.delta** · **斜杠命令**（/compact + skill :activate，含内置 skills）· **计划面板**（TodoList display → plan.update）· **附件真上传**（POST /files 拿 file_id）· **多问题逐问全量回答** · **plan_review/goal_start 富确认卡**（permission body 卡内滚动看计划全文）。**选路铁律**：会话粒度一选定终身（kimiChannel），KAP 起不来才降级 ACP（只启动时降、不回合热切），旧 ACP 历史会话粘性不迁（跨代际 v1/v2 resume 必丢上下文）。**KapServerHost** 单例发现优先于 spawn（复用用户已跑 `kimi web` + server.token bearer）；**启动能力检测** detectKap 入 engineConfigs 快照；**会话能力快照** SessionMeta.capabilities 经 session.meta patch 驱动 UI 门控（同一引擎不同通道能力不同）。⚠ kap-server 是 private 0.1.0、WS 刚经 v2 breaking，**无对外稳定承诺**，靠 ACP 兜底 + 兼容审计；全部按源码核实，**尚未真机联调**。新增依赖 `ws`。
+>
+> 🆕 **2026-07-31 追加（输入框未发送草稿按会话保留，详见 §4.4）**：输入框里打了字没发送就切走会话，切回时草稿原样恢复——按会话隔离不串台（切到别的对话不跟随）；实现为草稿提升到 store（ChatView 按 key=activeSessionId 整树重建，Composer 本地 state 必丢）：卸载时写回 `drafts[sessionId]`、挂载时作 text 初值恢复；发送后为空串不残留旧草稿；sidechat 分支面板同机制；纯内存无持久化，**重启 app 不保留（刻意）**。
+>
+> 🆕 **2026-07-31 追加（多根 workspace 硬放行补齐 omp/opencode，详见 §4.1 / §4.12 / §4.14 / §4.17）**：逐引擎源码实证后把工作区额外目录的硬放行通道从 codex/claude 扩展到 omp 与 opencode——**omp 升真多根**：spawn `omp acp` 时逐目录追加可重复 `--add-dir`（ACP session/new 无多根字段但 acp 子命令收进程级 flag；每会话一进程故进程级即会话级），目录进 omp 路径白名单 + 系统提示词 `<workspace-roots>` 区块并随会话 header 持久化 · **opencode 会话级权限预放行**：引擎侧无多根概念（根外访问触发 external_directory 审批默认 ask），建会 body 携 `{permission:'external_directory', pattern:'<dir>/*', action:'allow'}` 规则预批（resume 路径改 PATCH 合并；旧版 server 不认字段退回空 body 重试），免逐次弹权限卡 · 顺手防御 opencode 1.18.x 权限事件契约漂移（permission.updated→asked、permissionID/response→requestID/reply 双版本兼容） · **kimi 维持提示注入**（已验证 `kimi acp` 不收 --add-dir、ACP 无多根字段，内核只认项目根 `.kimi-code/local.toml`，写它会侵入用户项目文件故不采用） · SessionManager 的 extraRoots 计算提升到 buildAdapter 顶部四引擎统一消费（现读 settings，目录增删后懒唤醒/重启自动生效），contextSeed 认知通道全引擎保留互补 · **「伪多根」徽标提示**：多目录工作区选引擎处（侧栏 EnginePick / 新会话页 workspace 行 / Composer 换引擎菜单）给无原生多根的引擎（opencode/kimi/antigravity）挂琥珀色小徽标 + 悬浮详情，选前即知伪 workspace。
 >
 > 🆕 **2026-07-30 追加（顶部钉住当前提问 QuestionPin，详见 §4.24）**：滚动时把「当前提问」钉在消息区顶部——提问气泡完全滚出视口上缘后，顶部浮出右对齐提问胶囊（用户气泡同色系单行摘要，点击平滑回跳该提问）· 下一条提问逼近顶缘时按 **sticky 分组头手感把胶囊顶出视口**（translateY 上推 + overflow-hidden 裁切）、越过顶缘后接棒换字，两者永不重叠 · 纯只读浮层不改消息流布局与数据，测量方式同 TurnRail（data-msg-id + offsetTop，滚动 rAF 节流 + ResizeObserver 兑底流式/折叠高度变化）。
 >
@@ -47,6 +53,8 @@
 > 🆕 **2026-07-29 追加（右侧 rail 交互修正，参考 codex）**：**rail 图标列常驻、不再可折叠**（删除 rail 折叠态 + 右缘悬浮把手/悬停 peek 浮出）· rail **顶部首个按钮**折叠/展开的是**整个右侧面板区**（开着显 PanelRightClose、收起显 PanelRightOpen，按钮激活态高亮、固定占位不随开/收位移）· 展开回最近激活 tab；chat 会话无 tab 时直接新开一个 sidechat 分支 · 折叠时若停在 plan tab 同步清 planPreview 标记防自动重弹 · 移除 store `railCollapsed`/`toggleRail`（localStorage 键 `cs.railCollapsed` 废止）。
 >
 > 🆕 **2026-07-29 追加（模型提问卡改版，仿 ChatGPT「Asking questions」，详见 §4.3）**：ask_user 底部弹层重做为深色圆角卡——卡外灰色小字标签「模型提问」；卡内 = 问题标题（加粗）+ `< 1 / N >` 分页器（多条待处理授权/提问间循环切换，授权卡标题行同获分页器，取代原「N 项等待」徽章）+ × 关闭（取消提问）；选项由按钮排改**纵向列表**（序号圆圈 + 名称加粗截断 + hover 浮出箭头，整行点击作答）；底部新增补充说明输入行（回形针图标；回车/「发送」提交 = 取消当前提问 + 文本经新 `enqueueTo(sessionId,…)` 排入该会话队列、回合结束自动派发；有文本时 Skip 自动切换为发送钮）+ 圆角 Skip 钮（reject 类选项不进列表、映射至此，如 kimi 桥接自带 `q0_skip`）。
+>
+> 🆕 **2026-07-31 追加（kimi 思考深度接入）**：kimi CLI 0.30 ACP 新增 `thinking` config option（探针 `scripts/probe-kimi-thinking.mjs` 实测：wire 字段名为 **configId**，非 SDK 旧版 optionId）—— kimi 会话的思考深度选择器落地：档位值域来自 `~/.kimi-code/config.toml` 模型条目声明（capabilities 含 thinking 才出控件；值域 = off + support_efforts，always_thinking 模型无 off 行；overrides 子块优先）· 下发路径 = 每次 prompt 前 `setSessionConfigOption(configId='thinking')`，被拒降级 optionId 再被拒留兼容账静默放弃 · 主 Composer / sidechat / 赛马六角色配置与调参弹窗同步启用（无档位声明的 kimi 模型控件仍隐藏/禁用）。
 >
 > 🆕 **2026-07-29 追加（主题系统重构：明暗模式 × 配色主题）**：扁平三态主题拆为**二维主题**——`themeMode`（浅色 / 深色 / 跟随系统）× `themePalette`（Notion 米白 / Solarized 暖阳 / Everforest 森林，均为阅读向色板，每套含明暗两个变体）· 跟随系统 = 渲染进程 matchMedia 实时监听 + 主进程 nativeTheme 建窗解析 · 主题属性挂 `<html>`（data-palette/data-mode），body 级 portal 弹层（WorkspaceDialog 等）同样继承主题变量 · 原生标题栏按 6 组 palette-mode 配色联动 · 设置页拆「明暗模式」「配色主题」两个选项，侧栏齿轮子菜单分组单选 · 旧 `theme` 字段自动迁移（notion/light→浅色+notion，dark→深色+notion）。
 >
@@ -94,10 +102,12 @@
 Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
    ←IPC(typed, shared/ipc.ts)→ Main (Node)
         ├ SessionManager ── 会话生命周期/持久化/未读/通知/fork/steer/compact
-        │    ├ KimiAdapter   → spawn `kimi acp`（ACP stdio）
+        │    ├ KimiAdapter   → spawn `kimi acp`（ACP stdio，降级兜底通道）
+        │    ├ KimiKapAdapter → 共享单例 `kimi web`（KAP：REST /api/v1 + WebSocket，首选通道，§4.26）
         │    ├ CodexAdapter  → spawn `codex app-server`（ndjson JSON-RPC v2）
         │    ├ OpencodeAdapter → 共享单例 `opencode serve`（HTTP REST + SSE 事件流）
         │    └ OmpAdapter    → spawn `omp acp`（ACP stdio，同 kimi 基建；approval/思考档走 spawn flag）
+        ├ KapServerHost ── 懒启动单例 `kimi web`（发现优先于 spawn：复用已跑实例 + server.token bearer；§4.26）
         ├ OpencodeServerHost ── 懒启动单例 serve（自选空闲端口 + 随机 Basic 密码）
         ├ OpencodeEventHub ── 每 directory 一条 SSE，按 sessionID 分发到 adapter
         ├ TerminalService ── 每会话一个真 PTY（@lydell/node-pty ConPTY），面板内嵌终端后端
@@ -123,7 +133,8 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 每个分组标题 hover 浮现 + 号：新建 Chat / 新建 Project 会话（弹目录选择）/ 新建工作区
 - 每个 Workspace/Project 会话行 hover 右侧浮现 + 号：一键在该工作区/项目目录下开新会话；+ 固定行内最右缘（最高频操作），⋯ 管理菜单居其左
 - + 号新建均先弹引擎选择（EnginePick）：codex/opencode/kimi/omp 品牌图标 + 名字列表（复用 EngineIcon，未安装项置灰），建会话时定引擎、避免进会话后换引擎走 forkToEngine 产生分支；菜单开启前测量按钮位置，距视口底部不足一个菜单高（<170px）时自动改向上弹出，chats 分组靠屏幕底时不被窗口下缘遮挡
-- Workspace 实体：命名 + 多文件夹（首目录为 cwd，其余目录经 contextSeed 前缀注入告知引擎）；**codex 会话为真多根**（2026-07-30）：其余目录随 `runtimeWorkspaceRoots` 并入 workspace-write 沙盒可写根，写第二根不再弹「不在沙盒可写目录」授权（详见 §4.12）；opencode/kimi/omp 无 OS 沙盒天然可写
+- Workspace 实体：命名 + 多文件夹（首目录为 cwd，其余目录经 contextSeed 前缀注入告知引擎）；**硬放行通道逐引擎落地**：codex 真多根（2026-07-30，其余目录随 `runtimeWorkspaceRoots` 并入 workspace-write 沙盒可写根，详见 §4.12）；omp 真多根（2026-07-31，spawn 级可重复 `--add-dir`，进引擎路径白名单 + 系统提示词 `<workspace-roots>` 区块并随会话 header 持久化）；opencode 会话级权限预放行（2026-07-31，引擎侧无多根概念，额外目录经 external_directory allow 规则预批，免逐次弹权限卡，详见 §4.14）；kimi 仅提示注入（已验证 `kimi acp` 不收 --add-dir、ACP 无多根字段，内核只认项目根 `.kimi-code/local.toml`，写它会侵入用户项目文件故不采用；好在 kimi 文件工具允许绝对路径访问工作区外）
+- 「伪多根」徽标提示（2026-07-31）：多目录工作区（folders>1）选引擎时，无原生多根的引擎（opencode/kimi/antigravity）行尾挂琥珀色「伪多根」小徽标，悬浮显完整说明（如 opencode：引擎仍以首目录为唯一工作区，搜索/LSP/文件监听不覆盖其余目录）；三处入口：侧栏 workspace 组 EnginePick 菜单（带徽标时菜单加宽 w-48）/ 新会话页 workspace 行（按当前选中引擎 tab 显示，行 title 同步提示）/ Composer 换引擎菜单（多根工作区会话切到伪引擎选项时）；数据源 = EngineIcon.tsx 的 `ENGINE_PSEUDO_WORKSPACE_HINTS`（有键即伪，真多根引擎 codex/claude/omp 无键不占位）+ 共享 `PseudoWorkspaceBadge` 组件
 - Workspace 管理菜单（···）：管理工作区（名称/文件夹对话框）/ 打开终端 / 在编辑器打开 / 在文件管理器中打开 / 归档全部对话 / 从侧栏移除
 - 「从侧栏移除」带守卫：本身只解散分组、不删会话（组内会话按首目录 cwd 回落 Projects 分组）；组内还有未归档对话时菜单项禁用，tooltip 提示「组内还有对话，清空后才能移除」——判断基于全量会话列表、不受侧栏筛选器影响，已归档对话不阻止移除（DotMenu 组件新增 disabled/title 通用禁用态）
 - Project 组头菜单（···）：打开终端 / 在编辑器打开 / 在文件管理器中打开 / 归档全部对话
@@ -133,7 +144,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 侧栏会话行不提供删除 — 只能归档（二段确认：归档图标 → 黄色对勾 → 再点才归档，3 秒未确认/移开鼠标自动恢复）；彻底删除只在「已归档」页操作（删除仍是垃圾桶 → 红色对勾二段确认），防误删对话历史
 - 归档拦截进行中会话：会话 running/starting、或名下有进行中赛马（被打断的不算，isRaceActive 判定）时不可归档 — 行内归档按钮反应式置灰（cursor-not-allowed + tooltip 提示忙碌原因），workspace/project 的「归档全部对话」批量操作自动跳过这类会话；chatStore.archiveSession 动作层同谓词兜底（防未来新 UI 入口绕过，还原方向不拦）
 - 筛选菜单（漏斗）：排序（更新时间/创建时间）+ 状态（全部/运行中/等待操作/出错/已完成）+ 仅未读 + 重置
-- fork 分支树缩进展示（⑂ 前缀）；换引擎分支 ⇄ 前缀
+- fork 分支树缩进展示（⑂ 前缀）；**引擎切换分支「视觉连续」（2026-07-31）**：底层仍是干净的新会话分支（`chained` 标记，父会话原生上下文完整保留可无损回切），但侧栏沿 `parentId` 链折叠——有 chained 子分支的父会话不再单独占行，同一条对话永远只显示链上最新叶子（换引擎不加标题前缀、沿用原标题）；叶子行尾常驻 `⎇ N` 小徽标，点开展示被折叠的历史引擎分支（引擎图标 + 相对时间），点任一祖先即回到该引擎切换前的完整原生上下文续聊（当前活动会话是隐藏祖先时自动展开）
 - 未读机制：非活动会话回合完成标未读，选中即已读（main 持久化 + renderer 同步）
 - 侧栏展开/折叠：标题栏最左为品牌区（BrandMark+程序名，品牌优先占 Windows 应用图标惯例位），切换钮紧随品牌其后（品牌宽度恒定，展开/折叠两态按钮位置不变，图标交叉旋转淡入淡出）；动画 = 外层宽度容器 256px↔0 过渡 + 内容同步左移滑出（overflow-hidden 裁剪，主内容区平滑伸缩）；折叠后侧栏仍挂载（w-0 隐藏），左缘 2px 隐形热区悬停 peek 浮出 overlay 侧栏（不挤压内容区，位移+透明度渐变），点标题栏钮常驻展开；侧栏内部不再单设折叠按钮
 - 左下角：定时任务矩形入口 + 齿轮菜单（语言/明暗模式与配色主题快速切换 + 进入全页设置）
@@ -157,26 +168,30 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **底部活动指示器**：旋转 ✳ + "Working…" 流光，**仅静默空窗期显示**（流末尾存在任何可见进行态 — 流式思考/正文、进行中工具、未应答审批 — 即隐藏，避免与各块自带标签同词重复）；prompt 在途（sending）也算进行态，发送到回合开始的窗口期不像死机
 - **授权记录不留痕（2026-07-30，用户拍板：授权结果不需展示）**：待处理时流内一行知情提示（BrandSpinner 琥珀 + "Waiting for approval" 流光 + mono 命令标题），底部 PermissionSheet 仍是作答入口；**应答后该行直接从流里移除**（buildStream 过滤已作答 permission + DecisionRecord 兑底返 null），不再保留绿/红结果徽章历史行；数据链路：OpencodeAdapter tool 分支提取 state.metadata（filediff/diff/matches/count/exit/exists）+ toolName 原始工具名透传（明细行动词依据）+ grep/glob 归类 search；错误卡与思考正文长串 overflow-wrap:anywhere 防撑破边框
 - **折叠块平滑收展 + 无跳变滚动跟随**（2026-07-29）：所有自动/手动折叠区（Running/Exploring 工具组明细、Thinking 正文、ShellCard 输出、EditCard diff、ToolLine 输出）统一走 `Collapsible` 容器 —— `grid-template-rows 1fr↔0fr` 200ms 高度过渡（无需测量内容高度），完成态自动收起不再整块一帧消失；关闭动画跑完后延时卸载 children，长会话不积压隐藏 DOM · 贴底跟随在原 messages effect 基础上增加 **ResizeObserver 观察内容容器**（ChatView 与 SideChatPanel 各一），动画期间高度逐帧变化持续重贴底部，收起表现为平滑下滑而非跳变、流式增高跟随也更顺；用户上翻阅读时收起发生在视口下方不影响阅读位置，手动折叠上方旧块由 Chromium 原生 scroll anchoring 兜底
+- **回到底部悬浮按钮（2026-07-31）**：滚动离底（距底 ≥80px，与贴底跟随同阈值）时消息滚动区底缘中央浮现圆形 ↓ 按钮（Composer 正上方，QuestionPin 同款胶囊样式，与顶部提问胶囊上下呼应），点击平滑滚动回底并立即恢复自动贴底跟随（平滑滚动途中新消息到达由 ResizeObserver 接管直接贴底，不会滚到一半停住）；显隐由 onScroll 的 atBottom state 驱动（stickToBottom ref 的 state 镜像 — ref 不触发重渲染）；切会话时复位贴底状态防上个会话离底态泄漏致按钮误显示；i18n `scrollToBottom` tooltip（zh 回到底部 / en Scroll to bottom）；仅主 ChatView（SideChatPanel/RaceLane 同款贴底逻辑但空间窄，暂未加）
 - 审批底部卡（Approve once / Approve for session / Reject）+ **AskUserQuestion 提问卡**（2026-07-29 改版，仿 ChatGPT「Asking questions」：卡外灰色小字「模型提问」标签；深色圆角卡 = 问题标题 + `< 1 / N >` 分页器（多条待处理授权/提问循环切换，授权卡同获）+ × 关闭（取消）；选项纵向列表——序号圆圈 + 加粗名称截断 + hover 箭头，整行点击作答；底部回形针 + 补充说明输入行（提交 = 原文先以 `Other: …` 留档进消息记录（`noteAskUserAnswer`）+ 取消提问 + `enqueueTo` 排入本会话队列、回合后自动派发，有文本时 Skip 变发送钮）+ 圆角 Skip（reject 类选项映射，如 kimi `q0_skip`）；kimi 桥接现为单问题单请求、选项仅 label，无 description/Recommended 数据）
 - **提问流内记录卡 QuestionRecord**（2026-07-29，仿 ChatGPT「Questions Answers」）：ask_user 在对话流的历史记录为独立卡片（To-dos 卡同风头部栏：问号图标 +「模型提问」+ 右侧状态角标：待答 BrandSpinner 琥珀 / 已答 ✓ 绿 / 跳过 × 灰）；卡身保留加粗问题原文 + 一行回答：选项作答 ✓+选项名 / 自定义回答 `Other: 原话`（新增 `answeredNote` 可选字段，只增不删随会话持久化，旧历史无此字段照常渲染）/ 跳过取消灰字「已跳过」/ 待答 shimmer「等待作答…」；授权（permission）记录则不同于提问 — 应答后不留痕（见上「授权记录不留痕」条）
 - 任务清单 PlanWidget（sticky）
 - **Plan 计划文档卡**（Plan 模式产出的 md 长文本）：卡片内直接渲染 md 预览（限高 + 底部渐隐），点卡在右侧面板开完整预览（预览中卡片收起成单行小条）；卡上支持 复制 / 下载 / 「按此计划实施」（赛马角色会话隐藏实施钮、预览改弹窗）；**下载文件名 = 计划标题 + 时间戳**（`标题_YYYYMMDD-HHmm.md`，重复下载不撞名），标题取正文 md 一级标题，无标题时取首个有意义文本行（剥列表/加粗/引用记号截 30 字）兜底，不再千篇一律叫「计划文档」（planDoc.ts `extractPlanTitle`/`downloadMarkdown`，卡片/右侧面板/赛马弹窗三处下载入口共用）
 - 回合统计行：有真实 usage 显示 ↑上行（含缓存比）/ ↓下行 / t/s / 用时；无真实 usage（kimi ACP 不推 usage_update）时只显用时，不再展示 `~` 估算 token
-- **复制提问按钮**（2026-07-30）：用户提问气泡 hover 时左侧浮现复制图标按钮（与「回退到此处」纵向堆叠、复制在上回退在下），点击复制提问原文到剪贴板，成功后图标变绿 ✓「已复制」1.5s 后恢复；**常驻可用**（不受会话忙碌/steer/Goal/赛马角色等回退隐藏条件限制）；纯只读 UI 操作不触碰消息数据；i18n `copyQuestion` 词条（zh 复制提问 / en Copy prompt）
+- **复制提问按钮**（2026-07-30，2026-07-31 加文字）：用户提问气泡 hover 时左侧浮现复制按钮（与「回退到此处」纵向堆叠、复制在上回退在下，两钮同款图标+文字样式左对齐），图标后带「复制」文字（复用 i18n `planCopy`），点击复制提问原文到剪贴板，成功后变绿 ✓「已复制」1.5s 后恢复；**常驻可用**（不受会话忙碌/steer/Goal/赛马角色等回退隐藏条件限制）；纯只读 UI 操作不触碰消息数据；i18n `copyQuestion` 词条（zh 复制提问 / en Copy prompt）
 - 消息持久化（debounce 写盘）+ 会话恢复：**选中会话即预热引擎**（sessionWarmUp IPC → ensureRuntime + ACP session/resume，取代“首条消息才惰性复活”），模型/思考深度/命令选择器立即就绪
 - cron/steer 等 main 侧发起的消息经 `user.echo` 事件回显气泡
 - **重启中断任务状态收敛**：运行态实时持久化（session.status 事件即写 meta）；重启后上次仍在执行/待回答的会话自动标**未读**（侧栏醒目提示半截任务）；被打断的进行中工具调用收敛为 **canceled**（灰色 ×，与真正的 failed 红色区分），未应答的权限/提问卡锁定；磁盘文件收敛后回写避免长期留存脏状态
 
 ### 4.4 Composer（输入区）
-- 功能条布局（左→右）：引擎图标 → 模式（Agent/Plan）→ 权限 → ⚡Swarm → 🎯Goal ｜ 模型 → 思考深度（codex/opencode）→ 上下文圆环 → 展开 → 发送
-- **5 级响应式退避**（控件条宽度收窄时按优先级依次退避，ResizeObserver 断点 730/650/560/470/400px）：①权限变图标 → ②隐思考深度 → ③隐模型名 → ④隐权限图标 → ⑤隐 Agent/Plan；引擎图标/放大输入框/发送按钮永不退避（Agent/Plan 隐藏后 Shift+Tab 仍可切模式）
+- 功能条布局（左→右）：引擎图标 → 模式（Agent/Plan）→ 权限 → ⚡Swarm → 🎯Goal ｜ 模型 → 思考深度（codex/opencode/omp/kimi）→ 上下文圆环 → 展开 → 发送
+- **5 级响应式退避**（控件条宽度收窄时按优先级依次退避，ResizeObserver 断点 730/650/560/470/400px）：①模式开关变紧凑 → ②隐思考深度 → ③隐模型名 → ④隐权限图标 → ⑤隐 Agent/Plan；引擎图标/放大输入框/发送按钮永不退避（Agent/Plan 隐藏后 Shift+Tab 仍可切模式）；权限选择器自 2026-07-31 起恒为图标态（见下），不再参与宽→窄降级
 - **输入框动态行高**：默认 2 行，Shift+Enter/粘贴多行时逐行增高，5 行封顶；永不显滚动条（`.no-scrollbar`）；无聚焦高亮边框（始终 border-line 暗边框）
+- **未发送草稿按会话保留（2026-07-31）**：输入未发送内容在切走会话时保存、切回时恢复，按会话隔离不跟随到别的对话；因 ChatView 按 `key={activeSessionId}` 整树重建（Composer 本地 text state 必丢），草稿提升到 chatStore 新增 `drafts: Record<sessionId, string>`：Composer 卸载时经 textRef 写回、挂载时作 text 初值恢复；发送后 text 为空串，卸载写回空不残留旧草稿；与回退回填通道 `composerDrafts`（nonce 驱动一次性消费，§4.19）独立不混用；sidechat 分支面板输入框同机制（按分支会话 id 键控）；只覆盖文本正文，图片附件/展开态等其余本地 state 不保留；store 纯内存无持久化中间件，**重启 app 不保留（刻意，天然满足）**
 - **ChipInput（contenteditable 输入框）**：拖入非图片文件 → 在光标处插入彩色文件引用胶囊 chip（`</> 文件名`样式）；Ctrl+C 复制/发送时 chip 序列化为纯文本 `文件名(绝对路径)`（拦截 copy/cut 按选区片段序列化）；纯文本粘贴去格式；保留 Enter 发送/Shift+Enter 换行/IME/空态占位符；chip 只由拖拽/划选投递命令式插入不从字符串反解析（回填/清空为纯文本）；**插入点光标记忆**：经 selectionchange 持续快照框内最后光标位置，焦点移去文件预览等外部区域后命令式插入（拖文件/添加到对话）仍回插到原光标处而非追加末尾，且先解析插入点再 focus 避免光标被重置到开头
-- **斜线命令菜单（slash commands）**：输入仅为 `/token`（/ 开头、无空格无换行 — 与各引擎「/name 须在消息起始处生效」语义一致；goal 模式不触发）时，输入卡片正上方弹出补全菜单（Codex 桌面版同款），随输入实时过滤（名称精确 > 前缀 > 子串 > 描述命中），分 命令组 / 技能组 两区，行 = 图标 + /名称 + 描述 + 全局/项目 徽章（tooltip 显示来源文件路径）；↑↓ 循环选择（滚动跟随）、Enter/Tab 插入 `/name ` 并把光标移到末尾（ChipInput.setPlainText 命令式整体替换）、Esc 关闭（记住关闭时文本，继续输入即恢复）、IME 组合中不抢键；候选来自主进程 slashService 只读目录扫描（每次唤起重扫，无缓存）—— skills（目录内含 SKILL.md，frontmatter 取 name/description，容忍 UTF-8 BOM）：全局 ~/.codex/skills、~/.kimi-code/skills、~/.config/opencode/skills、~/.agents/skills，项目级 .codex/skills、.kimi-code/skills、.opencode/skills、.agents/skills；commands（*.md，取 frontmatter description 或首个有效正文行）：全局 ~/.codex/prompts、~/.config/opencode/commands（兼容 command 拼写），项目级 .codex/prompts、.opencode/commands（兼容 command）；按会话引擎过滤可见性（本引擎 + generic，kimi 兼容可见 codex skills — kimi-code dist 实测其内置读取 ~/.codex/skills），同名条目项目级覆盖全局；kimi 自定义 command 走插件清单机制（无目录约定）故 kimi 会话仅列 skills；IPC `slash:list` 通道（cwd + engine → SlashItem[]）
+- **斜线命令菜单（slash commands）**：输入仅为 `/token`（/ 开头、无空格无换行 — 与各引擎「/name 须在消息起始处生效」语义一致；goal 模式不触发）时，输入卡片正上方弹出补全菜单（Codex 桌面版同款），随输入实时过滤（名称精确 > 前缀 > 子串 > 描述命中），分 命令组 / 技能组 / **引擎命令组** 三区，行 = 图标 + /名称 + 描述 + 全局/项目/内置 徽章（tooltip 显示来源文件路径）；↑↓ 循环选择（滚动跟随）、Enter/Tab 插入 `/name ` 并把光标移到末尾（ChipInput.setPlainText 命令式整体替换）、Esc 关闭（记住关闭时文本，继续输入即恢复）、IME 组合中不抢键；候选来自主进程 slashService 只读目录扫描（每次唤起重扫，无缓存）—— skills（目录内含 SKILL.md，frontmatter 取 name/description，容忍 UTF-8 BOM）：全局 ~/.codex/skills、~/.kimi-code/skills、~/.config/opencode/skills、~/.agents/skills，项目级 .codex/skills、.kimi-code/skills、.opencode/skills、.agents/skills；commands（*.md，取 frontmatter description 或首个有效正文行）：全局 ~/.codex/prompts、~/.config/opencode/commands（兼容 command 拼写），项目级 .codex/prompts、.opencode/commands（兼容 command）；按会话引擎过滤可见性（本引擎 + generic，kimi 兼容可见 codex skills — kimi-code dist 实测其内置读取 ~/.codex/skills），同名条目项目级覆盖全局；kimi 自定义 command 走插件清单机制（无目录约定）故 kimi 会话仅列 skills；IPC `slash:list` 通道（cwd + engine → SlashItem[]）
+- **斜杠命令跨引擎统一（2026-07-31）**：在上述目录扫描两组外，新增第三组「引擎命令」（⚡ 图标 + 「内置」徽章）：引擎运行时推送的内置命令（claude init.slash_commands 含自定义命令/skills、kimi·omp ACP available_commands、kimi KAP 会话技能全集、opencode 服务端 GET /command）合并进面板（`ui.commands` 从此前“存而不用”转为消费者），与目录扫描项按名字去重（扫描项优先—描述更全且有源文件）；引擎命令按会话隔离（per-session `ui.commands`），切换引擎后不残留旧引擎命令，预热新引擎后 commands.update 自动补上
+- **发送侧斜杠路由（2026-07-31，SessionManager.prompt → slashService.routeSlashPrompt）**：针对引擎侧不自行解析 prompt 文本里斜杠的引擎，客户端补齐执行语义：claude / kimi（ACP 内置命令、KAP skill.activated trigger=user-slash）/ omp 均引擎侧原生解析—原样透传；opencode command → 原生 `POST /session/{id}/command`（服务端展开命令模板，adapter.command）；codex/antigravity command → 读 md 模板客户端展开（剥 frontmatter + `$ARGUMENTS`/`$1..$9` 代入，无占位符且带参则追加末尾）；skill（codex/antigravity/opencode）→ 展开为「读技能文件并执行」指令；未知名字原样透传（用户笔误或引擎私有命令不误伤）；contextSeed 首条消息优先于斜杠路由（换引擎后首条不拦截）
 - Agent/Plan 分段切换 + **全局 Shift+Tab** 循环切换（window 级监听，焦点在任意处均生效，阻止默认焦点导航）
 - Plan 模式：权限选择器隐藏（不再显示底部“只读规划”提示文字，避免切换时输入框上下跳动）
-- 权限（Agent 下）：手动审批 / 全自动 / YOLO
-- 引擎徽章（功能条最左，纯品牌图标按钮，tooltip 显引擎名）点击 →「换引擎继续聊」：排除当前引擎的其余引擎列表（图标+名字），历史重放式分支到目标引擎（contextSeed 注入）
+- 权限（Agent 下）：手动审批 / 全自动 / YOLO；**档位图标化（2026-07-31）**：三档各配语义图标 — 手动审批=✋ Hand（举手拦截）/ 全自动=🛡️ ShieldCheck（沙箱内放行）/ YOLO=🔥 Flame（解除沙箱狂奔，与盾牌拉开轮廓差异）；触发按钮**只显选中档图标 + 下拉箭头**（不显标题文字，完整文案进 tooltip）且保持中性灰不着色（避免控件条抢眼）；下拉列表项 = 着色图标 + 标题 + 副标题两行，图标按档位语义着色（询问=info 蓝 / 安全=ok 绿 / 危险=warn 橙，主题 token 跟随深浅色），antigravity 下置灰的「手动审批」项不着色维持压淡禁用态；图标与标题首行垂直居中（text-ui 20px 行高，13px 图标下移 3.5px）
+- 引擎徽章（功能条最左，纯品牌图标按钮，tooltip 显引擎名）点击 →「切换引擎继续本对话」：排除当前引擎的其余引擎列表（图标+名字），历史重放式分支到目标引擎（serializeHistory 种子注入，见 §4.8）；**视觉连续（2026-07-31）**：切换后聊天区**原地**追加一条居中分割线 system 消息「⇄ 已切换引擎 A → B，上下文已接续」，历史消息 id 不变（React key 稳定）故内容与滚动位置零跳变，仅引擎徽标随之更新；配合侧栏链折叠（§4.1），用户感知为「同一对话换了引擎」而非新开对话；**空白会话原地换引擎**：一条消息都没有的会话切引擎不 fork（无历史可保、空祖先分支纯属侧栏噪音），主进程直接改当前会话 meta.engine（close 旧引擎 + 重置 engineSessionId/modelId，contextSeed 多根工作区提示保留待注入），不产生分支链、不写分割线，等价于新会话页重选引擎；renderer 同步重置该会话 per-session ui（旧引擎模型/模式/命令残留不误显示）
 - ⚡Swarm 开关：发送时注入 AgentSwarm 并行委派提示词
 - 🎯Goal（仅 codex，模式开关式）：点图标只切换「目标编辑模式」（不立即提交，输入框占位变「输入目标…」），按发送/回车才把输入作为 objective 提交 codex `thread/goal/set`（等价其 `/goal`）；提交即**乐观置入状态条**（引擎往返/懒启动期间不空窗，真实快照到达后覆盖，失败回滚并向消息流插错误行）；与 Plan **互斥**（进一方自动退另一方；codex 同款：plan 激活时隐藏 goal 状态条）
 - Goal 状态条（输入框上方一行小字）：目标文本 + 执行计时 + 中止 / 继续 / 编辑（回填输入框并进目标模式）/ 清除目标（垃圾桶图标）；**计时连续显示**：引擎只在结算点（回合边界/goal 工具调用）推 timeUsedSeconds，两次推送间按本地墙钟秒级外推 + 单调保护（快照到达不回跳），暂停定格、换目标归零；**完成公告时序**：codex 模型先调 update_goal 标完成再流收尾总结，故 🎯 完成公告（目标+真实用时）暂存至该回合 turn.ended 后再插入消息流，排在最终输出之后（空闲时到达则立即插）
@@ -187,7 +202,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 非图片文件 chip（中性色 border-line + bg-panel，不抢眼）
 - **代码选区引用——行内胶囊（§4.7 预览划选投递；2026-07-30 由顶部卡片行改版）**：投递后在输入框**当前光标处**插入行内胶囊 `</> 文件名 #L起-止`（行号 accent 微高亮与普通文件引用区分，title 悬浮显路径+行号），光标落在胶囊后可直接提问；胶囊可退格/剪切删除，删除即同步移除背后快照（onSelChipsChange 存活名单回报，不会发送时夹带看不见的选区块）；序列化为纯文本标记 `文件名#L起-止(绝对路径)`；切会话只刷新名单不误插，队列编辑回填因文本已含标记只回填快照不重复插胶囊；背后仍是**添加那一刻的代码快照 + 绝对路径 + 行号范围**（快照而非发送时重读——AI 改文件后行号不错位；同文件同范围去重）；发送时快照序列化为 `<selection path lines>` + fenced 代码块注入 prompt 最前（上下文在前、提问在后），引导语注明可用 read 工具按路径+行号扩展上下文；**截断保护**（Claude Code 同款 maxSelectionLength=2000）：快照本体不截断、注入时截到最后完整行并标注剩余读法；历史气泡仍回显只读 SelectionChip 卡片（`{EXT} 文件名 #L起-止`，点击弹快照预览浮层、超限带 warn「截」徽标，随 user 消息持久化）；仅胶囊无正文也可发送
 - 展开按钮：长文输入大弹窗
-- 思考深度选择器（codex/opencode 会话）：codex 档位取自当前模型 catalog 的 `supported_reasoning_levels`（缺省 low/medium/high/xhigh）；**opencode 档位 = 模型 reasoning variants 键名**（如 none/thinking、low/medium/high/max，无 variants 的模型自动隐藏控件；未显式选择时不下发 variant 跟随 server 默认）；滑条交互；拉满档（xhigh）时轨道金色流光 + 滑块脉冲光环 + 档位文字渐变流光动画（index.css `effort-max-*`）
+- 思考深度选择器（codex/opencode/omp/kimi 会话）：codex 档位取自当前模型 catalog 的 `supported_reasoning_levels`（缺省 low/medium/high/xhigh）；**opencode 档位 = 模型 reasoning variants 键名**（如 none/thinking、low/medium/high/max，无 variants 的模型自动隐藏控件；未显式选择时不下发 variant 跟随 server 默认）；**kimi 档位 = config.toml 模型条目的 support_efforts 声明**（off + 档位，always_thinking 模型无 off；overrides 子块优先；无声明的模型隐控件；下发 = prompt 前 ACP `setSessionConfigOption(configId='thinking')`，旧版 CLI 被拒静默忽略留兼容账）；滑条交互；拉满档（xhigh/max）时轨道金色流光 + 滑块脉冲光环 + 档位文字渐变流光动画（index.css `effort-max-*`）
 - 模型选择器（右侧，与思考深度并排）：codex 候选来自 `model_catalog_json`（每项显示 displayName + 上下文窗口如 1M/256K + 图片模态图标），kimi 取 ACP 会话模型；**始终显示实际模型名**（无“默认”占位）；恢复态引擎未起时用持久化 modelId + catalog 兜底；切模型自动校正不支持的思考深度档；热切换（kimi unstable_setSessionModel；codex/opencode 下一 turn 生效）；opencode 用专属完整版选择器（见 §4.14）
 - **引擎配置刷新（2026-07-28，改配置无需重启应用）**：渲染层唯一重读入口 `chatStore.refreshEngineConfigs()`（复用现有 engineConfigsGet IPC — 主进程本就每次现读磁盘；in-flight 去重，并发调用汇合到同一次 IPC）：模型选择器 / 思考深度选择器**展开弹层时后台自动重读**（不 await 不阻塞交互，store 更新后列表自动重渲染）—— 改 `~/.codex/config.toml` / model_catalog JSON 后点开选择器即见新模型与新默认档；各引擎生效路径：codex/kimi 新会话 spawn 时现读配置天然生效（已开 kimi 会话候选由 CLI 进程内固化，维持新会话生效语义），opencode 走其选择器 ↻ force 重启 serve 链路（§4.14）
 
@@ -226,13 +241,14 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **rail 顶部首个按钮折叠/展开整个右侧面板区**（rail 图标列常驻不折叠；开着显 PanelRightClose、收起显 PanelRightOpen，按钮固定占位、激活态高亮）；展开回最近激活 tab，chat 会话无 tab 时直接新开 sidechat；折叠停在 plan tab 时清 planPreview 防自动重弹
 
 ### 4.8 sidechat / 分支
-- kimi：ACP `unstable_forkSession` 实测 **-32601 未实现** → 降级「新 session + 历史重放」（contextSeed 一次性前缀，12K 字符截尾）
+- kimi：ACP `unstable_forkSession` 实测 **-32601 未实现** → 降级「新 session + 历史重放」（serializeHistory 种子一次性前缀）
 - codex：原生 `thread/fork`
+- **历史种子最大化保真 serializeHistory（2026-07-31 重写，fork 降级 / 换引擎分支 / 回退到提问 三处共享同一通道）**：旧版「只留 user/text + 尾部 12K 硬截断」升级为四级保真——① 覆盖全部消息类型（工具轨迹：工具名 + 目标文件 + `+N/-N` + exit code + 命中数 + 失败/中断态；最终计划快照；权限决策；AI 提问与用户回答；错误；系统公告；仅 thinking/turn_end 不入 — 跨模型重放易被模仿且无信息量，与 oh-my-pi 跨 provider 丢弃 thinking 取舍一致）；② 分层压缩（最近 6 轮全保真含工具输出/patch 预览，更早轮次瘦身）；③ 预算 12K→40K，超预算从最早轮整轮省略但**留提问摘要行**（「最早 N 轮已省略，其间用户问过：…」）不默默蒸发；④ 会话概览头置顶列出全程改动过的文件清单（早期轮次即使省略这条关键线索也不丢）；注入文案声明「历史工具调用与文件改动已真实执行完毕，勿重复执行，磁盘以当前实际内容为准」防新引擎重复劳动
 - 客户端复制消息文件，分支立即可见完整历史；打开即预热分支引擎（sessionWarmUp）
 - **多实例 + tab 化宿主**：分支挂在 RightDock 统一标签栏（store `sidechats` 为分支 id 数组，一个主会话可同时开多个分支 tab）；新建时**乐观先弹「分支创建中…」占位 tab**（fork/引擎唤醒后台跑，完成后原地替换为真实面板，占位宽度对齐真实面板不跳动；用户中途切走则不强制跳回）；**关 tab = 彻底清理该分支**（删除 fork 会话，引擎/消息/侧栏一并移除）
 - **「只读分支」说明不再常驻面板头部**：鼠标悬浮其 tab 标签（及“+”菜单的新建项）时以 tooltip 展示；面板头部整体移除，标题/关闭由 tab 栏接管，省出的空间给消息流
 - 面板宽度由 dock 左缘统一拖拽把手调节（300–720px，localStorage 记忆，见 §4.7；2026-07-30 取代原面板内部专属把手）；开合动画统一由 dock 的 DockReveal 宽度过渡承担
-- mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兑底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left，codex/opencode 会话显示）；输入框行高与主输入框一致（2 行起 5 行封顶、无滚动条）
+- mini composer 底缘与主输入框纵向对齐；含模型选择器（同主 Composer 兑底逻辑）+ 思考深度滑条（复用主 EffortPicker，align=left，codex/opencode/kimi 会话显示）；输入框行高与主输入框一致（2 行起 5 行封顶、无滚动条）
 
 ### 4.9 定时任务（Cron）
 - 左下角入口 → 管理模态：列表（启停开关 / cron 表达式徽章 / 立即运行 / 编辑 / 删除）+ 新建表单
@@ -259,10 +275,11 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - 单实例锁；退出防孤儿（所有引擎子进程 + 代理 + cron 随 app 关闭）
 
 ### 4.12 引擎层
-- KimiAdapter（ACP）：initialize / session new-resume / prompt（附件 resource_link）/ 取消 / 模型热切 / 权限模式 / 审批与 AskUserQuestion 桥 / think 标签拆分 / usage / slash 命令透传 / compact(`/compact`)
+- **kimi 双通道（2026-07-31，详见 §4.26）**：kimi 会话优先走 **KimiKapAdapter（KAP：`kimi web` REST /api/v1 + WebSocket）** —— 原生 goal/steer/fork/compact/plan_mode/swarm_mode/真实 usage/独立 thinking/skill 斜杠命令/子代理可视化/附件真上传，全面补齐 ACP 通道缺失或模拟的能力；KAP 起不来（未安装/无 web 子命令/端口探测失败）时**会话级降级到 KimiAdapter（ACP）兜底**，降级只在会话启动时发生、不做回合中热切；已有引擎历史的 ACP 会话粘性不迁 KAP（跨引擎代际 v1/v2 resume 必丢上下文）。设置 `kimiPreferKap`（默认开）可强制走 ACP。
+- KimiAdapter（ACP，降级兜底通道）：initialize / session new-resume / prompt（附件 resource_link）/ 取消 / 模型热切 / 权限模式 / 审批与 AskUserQuestion 桥 / think 标签拆分 / usage / slash 命令透传 / compact(`/compact`)
 - CodexAdapter（app-server v2）：thread start/resume/fork / turn start-interrupt-steer / item 事件映射（agentMessage、reasoning、commandExecution、fileChange、mcpToolCall、webSearch、collab）/ 审批 server-request 应答 / plan / tokenUsage / effort / compact / 权限模式映射（default=on-request+workspace-write，plan=read-only，auto=never，yolo=danger-full-access）；模式切换附带 `thread/settings/update` **热同步线程存量策略**（initialize 开 `experimentalApi`；goal continuation 等引擎自发回合不走 turn/start 传参、只认线程存量设置，不同步则切 YOLO 后续跑仍按旧策略弹授权；旧版 codex 无此方法静默降级）；**多根 workspace 沙盒放行（2026-07-30）**：adapter 新增 `extraWritableRoots`（SessionManager 建 adapter 时现读当前 settings 的 workspace folders、过滤掉 cwd 传入）—— ① 主通道 thread/start 随参 `runtimeWorkspaceRoots=[cwd,...其余根]`（codex ≥0.144 原生实验字段，替换语义须含 cwd、绝对路径）；② spawn 级 `-c sandbox_workspace_write.writable_roots=[...]` 兜底旧版（源码确认新版 legacy 播种路径仍生效）；③ setMode 热切的 sandboxPolicy 带 writableRoots 防切换丢根，并修正 tag 命名：`thread/settings/update` 的 SandboxPolicy.type 是 camelCase（workspaceWrite/readOnly/dangerFullAccess）而非 thread/start 的 kebab-case，此前发 kebab 反序列化静默失败、模式热切从未真同步过沙盒策略（SANDBOX_POLICY_TAG 映射表）；冒烟探针 `.dev/workdir/probe-writable-roots.mjs`（0.144.4/0.146.0 实测通过）；**引擎自发回合（goal continuation / compact / review）完整生命周期**：turn/started 推 turn.started+running（主进程据此拍变更基线），结束发 `stopReason='background'` 的 turn.ended（无 usage 统计）+ 恢复 idle + 清 activeCodexTurnId；授权应答后无论哪类回合都把状态从 awaiting 拉回 running/idle；background 消费方约定：渲染端不产统计行/不派发队列/不触自动压缩（防压缩死循环），主进程不弹「任务完成」通知，赛马不误交卷
 - OpencodeAdapter（HTTP + SSE，详见 §4.14）：共享单例 serve；session create/resume（服务端持久化直接续接）/ prompt（逐条带 model+agent+variant，**只以 SSE `session.idle` resolve 回合**，HTTP 响应仅作错误通道）/ abort / 原生 fork(`/session/{id}/fork`) / compact(summarize) / 权限模式映射（default→build agent，plan→plan agent，auto/yolo→build + adapter 自动应答权限 once/always 不弹窗）；SSE part 全量快照→自算增量 delta；steer/goal 不实现（UI 自动隐藏，opencode 无原生 steer，官方 CLI 也是串行队列）
-- OmpAdapter（ACP，详见 §4.17）：initialize / session new-load(resume)-fork（均原生）/ prompt（附件 resource_link + effort→thinking 直发降级）/ 取消 / 模型热切（unstable_setSessionModel→set_config_option 双路径）/ set_mode plan↔default / 审批与 ask 桥 / background 自发回合收尾 / 命令黑名单 / 虚拟 URL 过滤 / compact(`/compact`)；approval/精细思考档走 spawn flag（见 §4.17 映射表）
+- OmpAdapter（ACP，详见 §4.17）：initialize / session new-load(resume)-fork（均原生）/ prompt（附件 resource_link + effort→thinking 直发降级）/ 取消 / 模型热切（unstable_setSessionModel→set_config_option 双路径）/ set_mode plan↔default / 审批与 ask 桥 / background 自发回合收尾 / 命令黑名单 / 虚拟 URL 过滤 / compact(`/compact`)；approval/精细思考档走 spawn flag（见 §4.17 映射表）；**多根 workspace 原生接入（2026-07-31）**：adapter 新增 `extraDirs`，spawn `omp acp` 时逐目录追加可重复 `--add-dir`（源码验证：omp 的 ACP session/new 无多根字段，但 acp 子命令收进程级 --add-dir → baseOptions → 该进程创建/加载的每个会话；本程序每会话一个 omp 进程，进程级即会话级），目录进 omp 路径白名单 + 系统提示词 `<workspace-roots>` 区块，并随会话 header 持久化、resume 后合并恢复
 - 内置 ai-server：resources/ai-server（上游 codex-server.js 原样 + config.js env shim），启动时复制到 userData 运行，key 只经 env 不落盘，仅 loopback 白名单，quota-guard 等团队功能关闭
 - 协议自动路由：第一个 `openai_chat` provider 喂转换槽（KIMI_*），第一个 `openai_responses` provider 喂直通槽（MINIMAX_*）
 - 多模型目录：codex `config.toml` 的 `model_catalog_json` 声明的 JSON（相对路径相对 CODEX_HOME），`engineConfigs.ts` 解析出每个模型的 slug（=codex `model` 参数）/ displayName / context_window / input_modalities / supported_reasoning_levels；`visibility:hidden` 跳过；直连模式候选 = 目录全部 slug（无目录回退 config 默认 model）；启动时读一次，改目录需重启应用
@@ -278,6 +295,8 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **OpencodeServerHost**：主进程自选空闲端口显式传入（不用 `--port 0` 的 4096 优先语义，避免与用户自跑的 opencode 抢端口）；每次启动随机生成 `OPENCODE_SERVER_PASSWORD` 注入 env，全部请求带 Basic 鉴权头（serve 不设密码时 127.0.0.1 无鉴权，本机任意进程可驱动）；stdout 就绪行解析 + `/global/health` 双确认；进程退出走「error 态 + 下次操作懒重启」（不做周期健康守护）；PID 入 orphanSweep
 - **OpencodeEventHub**：每 directory 一条上游 SSE `/event`，按事件 properties.sessionID 分发到各 adapter；断线 250ms 退避重连 + 20s stall 看门狗；引用计数归零关连接
 - **崩溃恢复**：opencode 会话服务端持久化，engineSessionId 重启后续接；手杀 server → 会话报错 → 再发消息 ensureLive 自动重启续接；空闲时停机（如强制刷新重启 serve）只转 closed 懒唤醒态不报红错；回合中停机才报错并结束等待防队列卡死
+- **多根 workspace 会话级权限预放行（2026-07-31）**：opencode 引擎侧无多根概念（单 directory/worktree 边界，根外访问触发 external_directory 权限审批默认 ask）— adapter 新增 `extraDirs`，建会 body 携带每目录一条 `{permission:'external_directory', pattern:'<dir>/*', action:'allow'}` 规则（会话级 ruleset 经服务端 merge 后 findLast 优先于 agent 默认的 ask）；pattern 用正斜杠 `dir/*` 即可覆盖整棵子树（源码确认 Wildcard.match 把 `*` 展开为跨斜杠 `.*` 且双侧反斜杠归一化，Windows 路径直接命中）；resume 路径不经建会 body → 改 `PATCH /session/{id}` 合并注入（目录集可能在两次启动间变过，merge 重复无害，失败静默——兜底是权限卡照弹）；旧版 server 不认 permission 字段时退回空 body 重试不阻断建会
+- **权限事件双版本契约兼容（2026-07-31）**：1.17.x 发 `permission.updated`（Permission 对象，permissionID/response 字段），1.18.x 改名 `permission.asked`（Request 对象，无 title、callID 下挂 tool，应答回声改 requestID/reply）— adapter 两套事件名/字段兼容取值，升级 server 后权限卡不消失
 - **模型/凭据哲学（用户已拍板）**：本程序**不做任何 provider 连接/管理**；模型目录只消费 `GET /config/providers`（= 已连接+启用的可用集：zen 免费模型**免登录开箱即用**、opencode.json 自定义模型、已 `opencode auth login` 的 provider；绝不用 `/provider` 的 models.dev 全目录）；新增 provider 引导用户去 opencode CLI 操作
 - **完整版模型选择器**（OpencodeModelPicker，opencode 会话专属）：搜索框 + 收藏星标（localStorage）+ 最近使用（localStorage，最多 5）+ 按 provider 分组 + 上下文窗口/图片模态图标；**列表过滤隐藏黑名单模型**（bySlug 用全量目录 — 当前已选模型即使被隐仍能解析显示名；底部「已隐藏 N 个」入口跳设置）；**不展示「免费」标签**（自定义 provider 的 cost 0/0 是未定价兑底非真免费，归一化层对 source=custom 且 0/0 抹成 undefined）；**详情卡从弹层右侧浮出**（hover/当前模型：能力 Tool calling/Reasoning/附件、输入→输出模态、$/1M 价格行只陈述事实（In $x · Out $y / 未定价）、上下文、思考档位）；底部静态引导「连接更多 provider：终端运行 opencode auth login」；**刷新按钮 ↻ = 重启 serve 再拉目录**（opencode 无配置文件 watcher，运行中实例握旧快照，改 opencode.json 后仅重拉无效）
 - **模型 id 规范**：复合 slug `providerID/modelID`；跨引擎 fork 继承的无 `/` 旧别名判无效强制重置（首选 zen 免费模型），防止 prompt 不带 model 时 server 静默用自己默认模型
@@ -320,6 +339,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 ### 4.17 omp 引擎（第四引擎，Oh My Pi，ACP）
 - **接入形态**：每会话 spawn 一个 `omp acp` 子进程（ACP ndjson stdio，复用 kimi 的 `@agentclientprotocol/sdk` 基建）；Windows 原生单 exe（`%LOCALAPPDATA%\omp\omp.exe`，不依赖 bun/node），解析顺序：设置显式路径 → 安装器默认位置 → PATH
 - **能力面**（probe-omp-findings 实测）：原生 `session/fork`（sidechat 真分叉，不降级历史重放）/ `session/load` resume / plan 只读模式（set_mode plan↔default 运行时可切）；approval 精细控制不在 ACP 运行时面 → **spawn flag 承载**（default→`--approval-mode always-ask`，auto→`--approval-mode write`，yolo→`--auto-approve`；中途切 auto/yolo 需重开会话）
+- **多根 workspace 原生接入（2026-07-31）**：其余根目录走 spawn 级可重复 `--add-dir`（ACP session/new 无多根字段，但 acp 子命令收进程级 flag；本程序每会话一进程，进程级即会话级），omp 侧进路径白名单 + 系统提示词 `<workspace-roots>` 区块，随会话 header 持久化、resume/fork 后合并恢复；目录增删后懒唤醒/重启自动生效（SessionManager 现读 settings），未重启前由 contextSeed 公告过渡
 - **思考档动态**：无模型时 configOptions 仅 off/auto；带 `--model` spawn 后值域扩展出目录 thinking[] 精细档（如 deepseek → off/auto/high/max）；适配器 effort 策略 = 原值直发 set_config_option，被拒降级 auto；Composer/赛马的档位选项 = off/auto + 目录精细档，非 reasoning 模型隐控件
 - **usage 优先级**：prompt 响应真实 usage（inputTokens/outputTokens/totalTokens/cachedReadTokens）> usage_update 快照 > 字符估算；用量统计纳入 omp（不适用 kimi 排除规则，筛选器列 codex/opencode/omp）
 - **后台自发回合**（异步 task/jobs 结果注入、auto-compact）：无活跃 prompt 时的内容事件合成独立回合，1.5s 静默后 `turn.ended(stopReason='background')` 收尾——对齐 codex 约定，赛马阶段机/通知抑制自动生效
@@ -436,6 +456,36 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **设置项**：设置 → 模型 →「Antigravity 账号」卡片内「额度不足时自动切号」开关（`settings.antigravityAutoSwitch`，**默认关**，保留手动兜底）+ 切号阈值输入（`settings.antigravityQuotaThreshold`，剩余百分比，**默认 15**，0–100 钳制）
 - 实现：`src/renderer/src/store/chatStore.ts`（`pickAgySwitchTarget` / `autoSwitchAgy` / `maybeProactiveSwitchAgy` 编排 + turn.ended 主动检测 + `case 'error'` quotaExhausted 兜底 + `switchAgyAccount` 赛马感知）+ `AntigravityAdapter.ts`（`reportQuotaExhaustion` 补 `quotaExhausted` 标记）+ `shared/types.ts`（AppSettings 两字段 + EngineEvent error 加 `quotaExhausted?`）+ `config/settings.ts`（DEFAULTS/migrate 回填钳制）+ `SettingsView.tsx`（开关 + 阈值 UI）；复用 IPC `agy:quota / active-quota / account-switch / accounts-list`、`race:resume`
 
+### 4.26 kimi KAP 双通道（kimi web REST+WS 首选 + ACP 降级兜底，2026-07-31）
+- **定位与选路铁律**：kimi 对外有两条集成面——**KAP**（`kimi web` 拉起的 kap-server，Fastify HTTP REST `/api/v1` + WebSocket 事件流，背后新代 agent-core-v2 引擎）与 **ACP**（`kimi acp` stdio，旧代 agent-core v1 引擎）。两侧是独立进程/独立会话运行时，**不能拼接互补**；会话粒度**一选定终身**（存 `SessionMeta.kimiChannel`: kap|acp）。选路在 `SessionManager.buildAdapter` 的 kimi 分支：`kimiPreferKap`（设置，默认开）且非粘性 ACP 会话时先试 `kapHost.ensure()`，成功→ KimiKapAdapter；抛错→ 写入兼容审计并降级 KimiAdapter（ACP）。**降级只在会话启动时发生，不做回合中热切**（跨代际 v1/v2 resume 未验证、in-flight 状态不可携带）；**粘性规则**：`kimiChannel==='acp'` 且有 resumeSessionId 且本地有历史的会话不迁 KAP（旧 ACP 会话继续走 ACP，避免丢引擎侧上下文）
+- **KapServerHost（单例宝室，`src/main/engine/kimi/KapServerHost.ts`）**：全部 kimi KAP 会话共享一个 server（kap-server 本身即一 server 多 session）。**发现优先于 spawn**：先扫实例注册表 `<KIMI_CODE_HOME>/server/instances/*.json`（pid 存活）+ 读 `<home>/server.token` + `GET /api/v1/healthz` 双确认，用户自己跑的 `kimi web` 直接复用（external，绝不杀）；无活实例才 spawn `kimi web --no-open --log-level error`，解析 stdout 就绪行 `Kimi server: <url>#token=…`（剥 ANSI 色码后正则提 origin+token，fragment 缺失时兑底读 server.token）；路由镜像 home 切换时换代重启；app 退出树杀自有子进程（external 不杀）；`detectKap()` 同步静态探测（installed/version/running，不 spawn）供启动检测 + engineConfigs 快照复用
+- **启动能力检测**：app whenReady 后 `kapHost.detectAtStartup()`（只发现不拉起；有活实例时做一次 healthz 确认，入缓存 + 日志）；server spawn 延到首个 kimi KAP 会话按需；kimi 快照 `KimiConfigSnapshot.kap`（KapDetection）接入现有 `engineConfigsGet` 能力检测面
+- **会话能力快照（UI 门控单一真源）**：`SessionManager.startRuntime` 按 adapter 可选方法存在性算 `SessionMeta.capabilities = {goal, steer, fork, compact, swarm}`，经 `session.meta` patch 推给渲染层——**同一引擎不同通道能力不同**（kimi KAP 有 goal/steer/swarm，ACP 降级会话没有），所以挂会话而非引擎 id；UI 控件（goal/swarm 按钮、token 展示）按能力快照显隐，未启动过时按引擎 id 兑底（goal 则 codex 兑底）
+- **KimiKapAdapter 全能力面**（`src/main/engine/kimi/KimiKapAdapter.ts`，约 48 种 KAP 事件→ EngineEvent）：
+  - **Goal**（原生）：写路径 = `POST profile.agent_config.goal_objective/goal_control`（已核实：prompts 路由不消费 goal 字段，profile 才是写路径；agent-core-v2 的 IAgentGoalService.createGoal/pause/resume/cancel），clear→cancel；状态由 `goal.updated` 事件 + `GET /sessions/{id}/goal` 推拉，GoalBar 无空窗；goal continuation 自发续跑回合补全生命周期（bgTurn，stopReason=background）
+  - **Steer**（原生）：排队 prompt + `prompts:steer` 并入活跃回合
+  - **Fork**（原生）：`POST /sessions/{id}:fork` → 新会话 id（引擎侧真分支，不再历史回放）
+  - **Compact**（原生）：`POST /sessions/{id}:compact` + compaction.started/completed/blocked/cancelled 四态合成回合（展示压缩前后 tokens）；自动压缩（autoCompactRatio）走同一链路
+  - **Plan 模式**：`setMode('plan')` → profile `plan_mode`（与 permission_mode 正交）；`agent.status.updated.planMode` 反向热同步
+  - **真实 usage**：`turn.step.completed` 逐 API 调用累计（input/output/cached/apiCalls），**不再字符估算**；MessageItem 对 kimi KAP 会话照常显 token（仅 ACP 降级会话 approx 隐藏）
+  - **独立 thinking**：`thinking.delta` 事件（不再从正文二次切分）；effort 逐回合 body.thinking 下发
+  - **模型/权限**：`GET /models` 目录 + profile 热切；permission_mode manual/auto/yolo 与 cyberslots default/plan/auto/yolo 双向映射
+  - **审批/模型提问**：`work_changed`/`agent.status.updated` 的 awaiting_approval phase → 拉取 pending approvals/questions → permission.request；审批卡含「本会话总是允许」（scope=session）
+  - **斜杠命令**：KAP 的 prompts 路由不解析斜杠（与 ACP 不同）——prompt() 拦截：`/compact`→原生 compact；`/<skill>` 命中会话 skill 目录→`POST /skills/{name}:activate`（skill_activation 自发回合，无 prompt id，用 engineTurnId 对齐等待）；未命中→原文交模型；启动时 `GET /sessions/{id}/skills` → commands.update（含内置 BUILTIN_SKILLS）恢复斜杠菜单
+  - **计划面板**：TodoList 工具的 `display.kind==='todo_list'` → plan.update（done→completed 状态映射，与 ACP planFromDisplayBlock 同源），其 tool.result 不出孤儿卡
+  - **工具卡投影**：结构化 ToolInputDisplay（command/file_io/diff/search/url_fetch/agent_call/skill_call/plan_review/goal_start）→ 标题/diff/locations；审批标题按 kind 摘要而非 [object Object]
+  - **WS 可靠性**：bearer 子协议 `kimi-code.bearer.<token>` 鉴权；seq/epoch 游标；volatile/durable 区分；断线指数退避重连 + 重连后在途 prompt 对账（防回合永久悬挂）；resync_required 对齐游标刷状态（消息流靠本地持久化，不靠重放）
+  - REST 信封解包 `{code,msg,data}`（code 0 = 成功）；事件黑名单未知类型入 compatAudit
+- **原生 swarm_mode（取代提示词软引导）**：Composer 的 ⚡SwarmToggle 按会话能力分流——kimi KAP 会话走**会话级原生开关**（`setSwarm` → profile.agent_config.swarm_mode → IAgentSwarmService.enter('manual')/exit），状态由 `swarm.update` 事件驱动（`agent.status.updated.swarmMode` 回声，含引擎自发退出 auto-exit 与模型自行进入）；其余引擎维持全局 swarmBoost 提示词前缀（软引导）；**原生 swarm 会话发送时不再叠加提示词前缀**（swarm_mode 已强制）；链路 EngineAdapter.setSwarm? → SessionManager.setSwarm → IPC `session:set-swarm`
+- **子代理/Swarm 可视化**（TUI 并行网格的桌面等价物）：`subagent.spawned` → 每个子代理一张任务卡（swarmIndex 编号 + 名称 + 描述，复用 omp 子代理 progress 卡机制）；子代理自身事件流（assistant/thinking delta、工具调用）按 agentId 路由到各自卡内进度行（300ms 节流、终态强刷不丢尾行）；completed/failed 收卡带 resultSummary/error；suspended 显「已挂起」；**子代理 token 并入回合统计**（逐步 usage + 完成 usage，swarm 开销不隐身）
+- **附件真上传**：非图片附件经 `POST /api/v1/files`（multipart 字段名 file）拿 FileMeta{id,name,media_type,size} → file 内容块进模型附件通道；图片维持内联 base64；上传/读取失败自动退化为路径附注（兑底不丢信息）
+- **多问题逐问全量回答**：一个 question 下发的 1-4 个子问题按序逐张出卡（多问时标题带 (n/N) 进度），每答一问即出下一张，全部答完**一次性合并 POST**（KAP 协议要求整体提交）；multi_select 以 multi 形态提交（UI 单选取一项），跳过/关闭→skipped
+- **plan_review / goal_start 富确认卡**：`permission.request` 事件与 permission/ask_user 消息新增 `body` 字段，PermissionSheet 两类卡都加卡内滚动正文区；`displayBody()` 按 display kind 生成正文：plan_review→计划全文（退出计划评审前看完整计划再批）、goal_start→objective+完成判据、长/多行命令全文；短内容不出正文区
+- **opencode goal 不支持显式提示**：opencode 核心无 goal API（仅第三方插件）——goal 图标对 opencode 会话照常展示，点击弹瞬态「引擎不支持原生 Goal」提示（2.6s 自消）而非隐藏（产品要求：显式告知）
+- **本轮未支持/做不到**：旧 ACP 会话无损迁 KAP（v1/v2 会话存储不互通，只能历史重放式迁移）· ACP 降级会话的 goal/steer/swarm（ACP 协议面无此方法）· kimi 原生多根工作区（引擎无多根概念，维持 contextSeed 注入）· 原生 undo（`:undo` 与现有影子快照回退体系语义需缝合，后排）· KAP 独有的终端流/文件 watch/后台任务/transcript 导出
+- **稳定性提醒**：kap-server 是 private 包、版本 0.1.0、WS 协议刚经 v2 breaking change，**无对外稳定承诺**——kimi CLI 升级可能破协议，靠 ACP 兜底 + 兼容审计监控；全部字段按 kimi-code 源码逐项核实，**尚未在真实 `kimi web` 上联调**
+- 实现：`src/main/engine/kimi/KapServerHost.ts`（server 生命周期 + detectKap）/ `KimiKapAdapter.ts`（REST+WS+事件映射）；`SessionManager.ts`（工厂选路 + capabilities 快照 + setSwarm）；`shared/types.ts`（SessionCapabilities/kimiChannel/KapDetection/swarm.update 事件/permission body/AppSettings.kimiPreferKap）；`engineConfigs.ts`（kimi 快照 kap 字段）；`index.ts`（启动检测 + 停机）；IPC `session:set-swarm`；渲染层 `chatStore`（setSwarm/swarm.update/能力门控）/ `Composer`（SwarmToggle 分流 + goal 能力门控）/ `PermissionSheet`（富正文区）/ `MessageItem`（token 展示门控）；新增依赖 `ws`（Electron 主进程无全局 WebSocket）；i18n `goalUnsupported`/`swarmNativeTag`
+
 ## 五、关键实测结论（新对话必读的坑）
 
 - kimi CLI 0.29.1 ACP：sessionCapabilities 仅 `{list, resume}`；`session/fork` 返回 -32601（SDK 有方法 ≠ agent 实现）；探针脚本 `scripts/probe-fork.mjs`
@@ -540,7 +590,7 @@ cyberslots/
 ### P1 待做
 - （✅ 已完成）diff 查看器 + 文件变更逐个/全部 接受·回退 — 见 §4.7
 - @ 文件补全（commands.update 事件已透传，UI 未做）
-- （✅ 已完成）slash 命令菜单（目录扫描式：引擎全局 + 项目级 skills/commands）— 见 §4.4
+- （✅ 已完成）slash 命令菜单（目录扫描 skills/commands + 引擎推送内置命令三组合并 + 发送侧跨引擎路由）— 见 §4.4
 - 会话搜索（sqlite FTS 或简单全文）、导出 Markdown、会话重命名/置顶 UI（置顶字段已有）
 - MCP 统一管理页（双引擎 config 同步）
 - CLI 路径设置项（cliEntry 参数 adapter 已支持，设置页未暴露）

@@ -19,6 +19,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 
 import type { RouteUpstreams } from '../config/engineConfigs';
+import { L } from '../i18n';
 
 const PROXY_FILES = [
   'codex-server.js',
@@ -165,7 +166,7 @@ async function waitForHealth(port: number): Promise<void> {
       });
     });
     if (ok) return;
-    if (Date.now() > deadline) throw new Error(`内置 ai-server(${port}) 启动超时`);
+    if (Date.now() > deadline) throw new Error(L(`内置 ai-server(${port}) 启动超时`, `Built-in ai-server (${port}) startup timed out`));
     await new Promise((r) => setTimeout(r, 250));
   }
 }

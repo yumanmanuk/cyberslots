@@ -6,7 +6,7 @@
  * 三级出场（大厂响应式 logo 策略）：
  * - BrandSpinner：三星芒错峰脉冲，13px 起清晰，替代通用转圈（16 处 loading）；
  * - BrandMark：静态整机线稿，小尺寸自动省略窗内细节，跟随 currentColor；
- * - BrandHero：≥48px 大场面全叙事 — 拉杆下压回弹 + 机身微震 + 星芒逐颗点亮，内置香槟金渐变。
+ * - BrandHero：≥48px 大场面全叙事 — 拉杆下压回弹 + 机身微震 + 星芒逐颗点亮，金色随明暗取色（--brand-*：浅色深金 / 暗色定稿香槟金）。
  */
 import { useId } from 'react';
 
@@ -80,7 +80,9 @@ export function BrandSpinner({ size = 14, className = '', spinning = true }: Bra
 /**
  * 大场面动效（≥48px：启动屏 / 空状态 / 赛马开跑）— 完整拉霸仪式：
  * 拉杆下压 100° → 弹性回弹 → 机身微震 → 三颗星芒逐颗点亮 → 齐亮 → 同步熄灭循环（3.2s）。
- * 内置香槟金渐变（gradientUnits 必须 userSpaceOnUse：纯横/竖线段 objectBoundingBox 零面积会导致渐变失效不渲染）。
+ * 渐变三档走 CSS 变量 --brand-hi/mid/lo（index.css：浅色为压深金适配奶油底，暗色为 Onyx 定稿香槟金）；
+ * var() 不能写在 SVG presentation attribute 里，必须走 style。
+ * gradientUnits 必须 userSpaceOnUse：纯横/竖线段 objectBoundingBox 零面积会导致渐变失效不渲染。
  */
 export function BrandHero({ size = 96, className = '' }: BrandProps): JSX.Element {
   // useId 产物含冒号（:r0:），在 url(#…) fragment 中部分环境解析不稳，去掉后仍唯一
@@ -92,9 +94,9 @@ export function BrandHero({ size = 96, className = '' }: BrandProps): JSX.Elemen
     <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden>
       <defs>
         <linearGradient id={gid} gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="6" y2="24">
-          <stop offset="0" stopColor="#f6e2a4" />
-          <stop offset="0.5" stopColor="#c99d3f" />
-          <stop offset="1" stopColor="#8f681e" />
+          <stop offset="0" style={{ stopColor: 'var(--brand-hi, #f6e2a4)' }} />
+          <stop offset="0.5" style={{ stopColor: 'var(--brand-mid, #c99d3f)' }} />
+          <stop offset="1" style={{ stopColor: 'var(--brand-lo, #8f681e)' }} />
         </linearGradient>
       </defs>
       <g className="brand-machine">
@@ -102,9 +104,9 @@ export function BrandHero({ size = 96, className = '' }: BrandProps): JSX.Elemen
         <rect x="7.4" y="8.3" width="6.4" height="3" rx="0.75" fill="none" stroke={gold} strokeWidth="0.6" />
         {[8.6, 10.6, 12.6].map((cx, i) => (
           /* 平移在外层 g：避免动画 CSS transform 覆盖 translate（星芒会飞回原点）。
-             fill 用窗框同阶金而非渐变：userSpaceOnUse 坐标系随 g 平移，星芒会取到顶端高亮金显突兀 */
+             fill 用 --brand-star（窗框同阶色）而非渐变：userSpaceOnUse 坐标系随 g 平移，星芒会取到顶端高光显突兀 */
           <g key={cx} transform={`translate(${cx} 9.8)`}>
-            <path d={starPath(0.7)} fill="#cea54b" className={`brand-jack brand-jack-${i + 1}`} />
+            <path d={starPath(0.7)} style={{ fill: 'var(--brand-star, #cea54b)' }} className={`brand-jack brand-jack-${i + 1}`} />
           </g>
         ))}
         <line x1="8.5" y1="16.1" x2="12.7" y2="16.1" stroke={gold} strokeWidth="1.1" strokeLinecap="round" />

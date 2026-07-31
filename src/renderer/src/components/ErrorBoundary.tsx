@@ -5,6 +5,8 @@
 
 import { Component, type ReactNode } from 'react';
 
+import { translate } from '../i18n';
+
 interface Props {
   children: ReactNode;
 }
@@ -28,7 +30,7 @@ export default class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-3 px-8">
-          <div className="text-sm font-medium text-err">界面渲染出错（已隔离，应用仍在运行）</div>
+          <div className="text-sm font-medium text-err">{translate('errUiCrash')}</div>
           <pre className="max-h-48 max-w-2xl overflow-auto rounded-lg bg-bg-panel px-4 py-3 font-mono text-[12px] text-ink-soft">
             {this.state.error.message}
           </pre>
@@ -36,7 +38,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             onClick={() => this.setState({ error: null })}
             className="rounded-lg border border-line bg-bg-input px-4 py-1.5 text-ui hover:bg-bg-hover hover:text-ink"
           >
-            重试渲染
+            {translate('errUiRetry')}
           </button>
         </div>
       );

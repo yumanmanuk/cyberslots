@@ -14,6 +14,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Circle,
   CircleAlert,
   CircleCheck,
@@ -57,7 +58,12 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
       if (msg.planDoc) return <PlanDocCard msg={msg} sessionId={sessionId} />;
       return (
         <div className="md-body max-w-none">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{ code: (props) => <MdCode {...props} sessionId={sessionId} /> }}
+          >
+            {msg.text}
+          </ReactMarkdown>
         </div>
       );
 
@@ -91,6 +97,15 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
       return <TurnStats msg={msg} sessionId={sessionId} />;
 
     case 'system':
+      // 引擎切换分割线：居中横线样式 —— 视觉连续的“原地换引擎”标记。
+      if (msg.text.startsWith('⇄'))
+        return (
+          <div className="flex items-center gap-3 py-1 text-[11px] text-ink-faint">
+            <span className="h-px flex-1 bg-line" />
+            <span className="shrink-0">{msg.text}</span>
+            <span className="h-px flex-1 bg-line" />
+          </div>
+        );
       // 安静的左对齐小字提示行（goal 完成公告等），不加高亮框不居中。
       return <div className="whitespace-pre-wrap text-[11.5px] leading-5 text-ink-faint">{msg.text}</div>;
 
@@ -101,6 +116,56 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
 
 // ------------------------------------------------------------- sub-blocks
 
+/** AI 正文行内代码的文件路径判定 — 必须命中已知扩展名白名单（对齐
+ *  FILE_ICONS + 常见文本类），宁可漏判也不把 `reasoning: true` /
+ *  `chain_valid` 这类配置键误判成文件 chip。 */
+const FILE_EXT_RE =
+  /\.(tsx?|jsx?|mjs|cjs|mts|cts|json|jsonc|md|markdown|css|scss|less|styl|vue|svelte|html?|xml|py|rs|go|java|kts?|c|h|cc|cpp|hpp|sh|bash|ps1|bat|cmd|ya?ml|toml|ini|env|conf|cfg|svg|png|jpe?g|gif|webp|ico|txt|lock|sql)$/i;
+
+function looksLikeFilePath(s: string): boolean {
+  const v = s.trim();
+  if (!v || v.length > 260 || /\s/.test(v)) return false;
+  if (/^https?:\/\//i.test(v)) return false;
+  const base = v.split(/[\\/]/).pop() ?? '';
+  return FILE_EXT_RE.test(base);
+}
+
+/** react-markdown v9 的 code 渲染分流：围栏块（带 language-…）保持默认；
+ *  行内代码若像文件路径 → 可点击文件 chip（codex 同款）。
+ *  注意 v9 没有 inline 参数，只能靠 className 区分。 */
+function MdCode({
+  className,
+  children,
+  sessionId,
+}: {
+  className?: string;
+  children?: ReactNode;
+  sessionId: string;
+}): JSX.Element {
+  const isBlock = /language-/.test(className ?? '');
+  const raw = typeof children === 'string' ? children : null;
+  if (!isBlock && raw && looksLikeFilePath(raw)) return <FileChip path={raw.trim()} sessionId={sessionId} />;
+  return <code className={className}>{children}</code>;
+}
+
+/** 最终回复里的可点击文件 chip：类型图标 + 模型原文路径（保留相对路径
+ *  上下文），点击在右侧 dock 的 files tab 打开预览（仅 work 会话生效）。 */
+function FileChip({ path, sessionId }: { path: string; sessionId: string }): JSX.Element {
+  const t = useT();
+  const base = path.split(/[\\/]/).pop() ?? path;
+  return (
+    <button
+      type="button"
+      title={`${path} — ${t('openFileInPanel')}`}
+      onClick={() => useChatStore.getState().requestFilePreview(sessionId, path)}
+      className="inline-flex max-w-full items-center gap-1 rounded-md border border-line bg-bg-panel px-1.5 py-px align-baseline font-mono text-[0.9em] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+    >
+      <FileTypeIcon name={base} size={12} />
+      <span className="truncate">{path}</span>
+    </button>
+  );
+}
+
 /** 用户提问气泡 + hover 回退入口（Claude Code 的 Undo changes up to
  *  this point 同款）：确认弹窗列出将被一并撤销的文件变更；确认后
  *  还原文件、截断消息，并把提问回填输入框。另附 hover 复制提问按钮。 */
@@ -110,6 +175,14 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
   const sending = useChatStore((s) => !!s.sending[sessionId]);
   const [undoOpen, setUndoOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  // 超长提问折叠（codex 同款）：默认限高约 10 行，确实溢出才显展开/收起。
+  const [textExpanded, setTextExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = textRef.current;
+    if (el) setOverflowing(el.scrollHeight > USER_TEXT_CLAMP_PX + 2);
+  }, [msg.text]);
   // undefined = 预览加载中；null = 无快照；[] = 无文件变更。
   const [preview, setPreview] = useState<SessionChangeEntry[] | null | undefined>(undefined);
   // 赛马角色会话：提问由编排器发出，回退会截断角色历史/还原文件，
@@ -136,27 +209,7 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
   };
 
   return (
-    <div className="group/user flex items-start justify-end gap-2">
-      {/* 复制提问 + 回退入口悬浮在气泡左侧（截图同款位置），纵向堆叠：复制在上、回退在下。 */}
-      <div className="mt-1.5 flex shrink-0 flex-col items-start gap-0.5">
-        <button
-          onClick={copyQuestion}
-          title={copied ? t('copied') : t('copyQuestion')}
-          className="flex items-center rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/user:opacity-100"
-        >
-          {copied ? <Check size={11} className="text-ok" /> : <Copy size={11} />}
-        </button>
-        {canUndo && (
-          <button
-            onClick={openUndo}
-            title={t('undoToHere')}
-            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/user:opacity-100"
-          >
-            <RotateCcw size={10} />
-            {t('undoToHere')}
-          </button>
-        )}
-      </div>
+    <div className="group/user flex flex-col items-end">
       <div className="max-w-[80%]">
         <div className="whitespace-pre-wrap rounded-2xl bg-bg-active px-4 py-2.5 text-body">
           {msg.selections && msg.selections.length > 0 && (
@@ -166,7 +219,28 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
               ))}
             </div>
           )}
-          {msg.text}
+          {/* 正文：未展开时限高 + 底部渐隐遮罩（风格对齐 PlanDocCard 预览） */}
+          <div className="relative">
+            <div
+              ref={textRef}
+              className="overflow-hidden"
+              style={textExpanded || !overflowing ? undefined : { maxHeight: USER_TEXT_CLAMP_PX }}
+            >
+              {msg.text}
+            </div>
+            {overflowing && !textExpanded && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-bg-active to-transparent" />
+            )}
+          </div>
+          {overflowing && (
+            <button
+              onClick={() => setTextExpanded((v) => !v)}
+              className="mt-1 flex items-center gap-1 rounded-md text-[11.5px] text-ink-faint transition hover:text-ink"
+            >
+              {textExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              {textExpanded ? t('collapse') : t('expand')}
+            </button>
+          )}
           {msg.attachments && msg.attachments.length > 0 && (
             <div className="mt-1 text-[12px] text-ink-soft">📎 {msg.attachments.join(', ')}</div>
           )}
@@ -176,6 +250,26 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
             <Target size={10} />
             {t('sentAsGoal')}
           </div>
+        )}
+      </div>
+      {/* 操作行常驻占位在气泡下方（hover 才显现，避免悬浮时布局跳动）：
+          纯图标 + title 悬浮提示 — 复制提问 / 回退到此处。 */}
+      <div className="mt-0.5 flex items-center gap-0.5 opacity-0 transition group-hover/user:opacity-100">
+        <button
+          onClick={copyQuestion}
+          title={copied ? t('copied') : t('copyQuestion')}
+          className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+        >
+          {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+        </button>
+        {canUndo && (
+          <button
+            onClick={openUndo}
+            title={t('undoToHere')}
+            className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+          >
+            <RotateCcw size={12} />
+          </button>
         )}
       </div>
       {undoOpen && (
@@ -189,6 +283,9 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
   );
 }
 
+/** 用户气泡折叠阈值：text-body 15px × 1.7 行高 × 约 10 行。 */
+const USER_TEXT_CLAMP_PX = 255;
+
 /** 回合结束统计行（取代分隔线）：↑上行（缓存比例） · ↓下行 · tts · 用时。
  *  复制按钮是纯图标，在统计行行首常驻显示。
  *  kimi 引擎不展示任何 token 数（无可靠的真实 usage 上报），只留用时。 */
@@ -198,7 +295,9 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   const [copied, setCopied] = useState(false);
   const u = msg.usage;
   const parts: string[] = [];
-  const showTokens = engine !== 'kimi';
+  // kimi 仅 ACP 降级会话隐藏 token 数（字符估算带 approx 标）；KAP 通道
+  // 有 turn.step.completed 真实 usage，照常展示。
+  const showTokens = engine !== 'kimi' || !u?.approx;
 
   if (showTokens && u?.inputTokens != null && u.inputTokens > 0) {
     const cachePct =
@@ -219,7 +318,7 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
     }
   }
   if (msg.durationMs) parts.push(fmtDuration(msg.durationMs));
-  if (msg.stopReason === 'cancelled') parts.unshift('已停止');
+  if (msg.stopReason === 'cancelled') parts.unshift(t('msgStopped'));
   if (parts.length === 0) return null;
 
   const copyAnswer = (): void => {
@@ -415,7 +514,7 @@ function fmtK(n: number): string {
   return String(n);
 }
 
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   const s = ms / 1000;
   if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`;
   const m = Math.floor(s / 60);
@@ -539,6 +638,7 @@ function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permiss
  * Other: 原文留档，跳过/取消显灰色小字；作答入口仍在底部 Sheet。
  */
 function QuestionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'ask_user' }> }): JSX.Element {
+  const t = useT();
   const answered = msg.answeredOptionId !== undefined;
   const chosen = msg.options.find((o) => o.optionId === msg.answeredOptionId);
   const skipped = !msg.answeredNote && (chosen ? chosen.kind.startsWith('reject') : msg.answeredOptionId === '__cancelled__');
@@ -546,7 +646,7 @@ function QuestionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'ask_use
     <div className="overflow-hidden rounded-lg border border-line">
       <div className="flex items-center gap-2 border-b border-line bg-bg-panel/60 px-3 py-2 text-ui">
         <MessageCircleQuestion size={13} className="shrink-0 text-ink-faint" />
-        <span className="font-medium text-ink-soft">模型提问</span>
+        <span className="font-medium text-ink-soft">{t('modelQuestion')}</span>
         <span className="ml-auto shrink-0">
           {!answered ? (
             <BrandSpinner size={13} className="text-warn" />
@@ -560,14 +660,14 @@ function QuestionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'ask_use
       <div className="space-y-1.5 px-3 py-2.5">
         <div className="text-ui font-semibold leading-snug">{msg.question}</div>
         {!answered ? (
-          <div className="shimmer-text text-ui">等待作答…</div>
+          <div className="shimmer-text text-ui">{t('awaitingAnswer')}</div>
         ) : msg.answeredNote ? (
           <div className="text-ui leading-snug text-ink-soft [overflow-wrap:anywhere]">
             <span className="text-ink-faint">Other: </span>
             {msg.answeredNote}
           </div>
         ) : skipped ? (
-          <div className="text-ui text-ink-faint">已跳过</div>
+          <div className="text-ui text-ink-faint">{t('answerSkipped')}</div>
         ) : (
           <div className="flex items-start gap-1.5 text-ui leading-snug text-ink-soft">
             <Check size={13} className="mt-[2.5px] shrink-0 text-ok" />
@@ -721,6 +821,7 @@ export function ToolLine({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_c
  *  卡头常驻「子代理不受审批约束」提示 — omp 对 headless 子代理强制
  *  yolo（probe-omp-findings §7），用户开着审批也拦不住它们。 */
 function TaskCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }> }): JSX.Element {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const active = msg.status === 'in_progress' || msg.status === 'pending';
   const c = msg.content;
@@ -728,17 +829,21 @@ function TaskCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
   const summary = c?.text;
   const hasDetail = !!(tail?.length || summary);
   return (
-    <div className={`overflow-hidden rounded-lg border transition ${active ? 'border-accent/35' : 'border-line'}`}>
+    <div className={`overflow-hidden rounded-lg border transition ${active ? 'border-accent/35' : msg.status === 'failed' ? 'border-err/30' : 'border-line'}`}>
       <button
         onClick={() => hasDetail && setOpen(!open)}
         className={`flex w-full items-center gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'
           }`}
       >
-        <Bot size={13} className="shrink-0 text-ink-faint" />
-        <span className="min-w-0 flex-1 truncate text-ui text-ink">{msg.title || '子代理任务'}</span>
-        <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[10.5px] text-warn" title="omp 对无界面的子代理强制自动批准，主会话的权限审批不约束它们（plan 只读模式除外）">
-          子代理免审批
-        </span>
+        <Bot size={13} className={`shrink-0 ${active ? 'text-accent' : msg.status === 'failed' ? 'text-err' : 'text-ink-faint'}`} />
+        <span className="min-w-0 flex-1 truncate text-ui text-ink">{msg.title || t('subagentTask')}</span>
+        {/* 免审批标：仅引擎真为 headless 子代理强制 yolo（omp）时显 —— 弱化为中性小字，
+            不与标题争焦（此前警示色对全引擎误显且刺眼）。 */}
+        {c?.autoApproved && (
+          <span className="shrink-0 text-[10.5px] text-ink-faint/70" title={t('subagentAutoApprovedTitle')}>
+            {t('subagentAutoApproved')}
+          </span>
+        )}
         {active ? (
           <span className="shimmer-text shrink-0 text-[11.5px] font-medium">Delegating…</span>
         ) : msg.status === 'failed' ? (
@@ -755,9 +860,10 @@ function TaskCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
             <ChevronRight size={12} className="shrink-0 text-ink-faint" />
           ))}
       </button>
-      {/* 运行中：卡内最新进度行（150ms 合并的进度流，就地刷新不叠消息）。 */}
+      {/* 运行中：卡内最新进度行（节流合并的进度流，就地刷新不叠消息）；行首 accent 尖括号作“正在跑”的轻提示。 */}
       {active && c?.progress?.line && (
         <div className="truncate border-t border-line bg-bg-panel/40 px-3 py-1.5 font-mono text-[11.5px] text-ink-faint">
+          <span className="mr-2 text-accent/60">›</span>
           {c.progress.line}
         </div>
       )}
@@ -839,6 +945,7 @@ export function FileTypeIcon({ name, size = 13 }: { name: string; size?: number 
  *  完成后右侧 +N -N 行数变更 + A/M/D 徽章；失败显 Failed。点击展开 diff。
  *  proposed（omp ast_edit 两阶段预览）：琥珀色 "Preview" 标签，落盘前可先看 diff。 */
 function EditCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }> }): JSX.Element {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const active = msg.status === 'in_progress' || msg.status === 'pending';
   const proposed = msg.status === 'proposed';
@@ -864,7 +971,7 @@ function EditCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
         {active ? (
           <span className="shimmer-text shrink-0 text-[11.5px] font-medium">Generating…</span>
         ) : proposed ? (
-          <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">预览待确认</span>
+          <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">{t('previewPending')}</span>
         ) : msg.status === 'failed' ? (
           <span className="shrink-0 text-[11.5px] font-medium text-err">Failed</span>
         ) : msg.status === 'canceled' ? (

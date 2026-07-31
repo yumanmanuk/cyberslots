@@ -14,6 +14,7 @@ import type { CronTask } from '@shared/types';
 import type { SessionManager } from '../engine/SessionManager';
 import type { SettingsStore } from '../config/settings';
 import { cronMatches, validateCron } from './cronMatch';
+import { L } from '../i18n';
 
 const TICK_MS = 20_000;
 
@@ -46,8 +47,8 @@ export class CronService {
   }
 
   save(task: CronTask): CronTask[] {
-    if (!task.name.trim()) throw new Error('任务名不能为空');
-    if (!task.prompt.trim()) throw new Error('prompt 不能为空');
+    if (!task.name.trim()) throw new Error(L('任务名不能为空', 'Task name is required'));
+    if (!task.prompt.trim()) throw new Error(L('prompt 不能为空', 'Prompt is required'));
     validateCron(task.cron);
     const normalized: CronTask = { ...task, id: task.id || randomUUID() };
     const idx = this.tasks.findIndex((t) => t.id === normalized.id);
@@ -102,12 +103,12 @@ export class CronService {
       await this.sessions.prompt(meta.id, task.prompt);
       task.lastResult = 'ok';
       if (this.settings.get().notifications.taskComplete) {
-        this.notify(`定时任务完成：${task.name}`, '结果已写入会话，可在侧栏查看。');
+        this.notify(L(`定时任务完成：${task.name}`, `Scheduled task done: ${task.name}`), L('结果已写入会话，可在侧栏查看。', 'Result written to a session — see the sidebar.'));
       }
     } catch (err) {
       task.lastResult = 'error';
       if (this.settings.get().notifications.error) {
-        this.notify(`定时任务失败：${task.name}`, err instanceof Error ? err.message : String(err));
+        this.notify(L(`定时任务失败：${task.name}`, `Scheduled task failed: ${task.name}`), err instanceof Error ? err.message : String(err));
       }
     } finally {
       task.lastRunAt = Date.now();

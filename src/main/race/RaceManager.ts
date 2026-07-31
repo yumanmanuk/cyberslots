@@ -17,6 +17,7 @@ import { IPC } from '@shared/ipc';
 import type { EngineEvent, UsageInfo } from '@shared/types';
 import type { RaceAdoptStrategy, RaceCreateRequest, RaceEvent, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from '../engine/SessionManager';
+import { L } from '../i18n';
 import { RaceOrchestrator, type RaceSessionHost, type RaceSpawnSpec } from './RaceOrchestrator';
 
 export class RaceManager implements RaceSessionHost {
@@ -79,6 +80,11 @@ export class RaceManager implements RaceSessionHost {
     this.orchestrator.revokeAdopt(raceId);
   }
 
+  /** 让裁判按既定策略重新出方案（换裁判引擎后手动重跑）。 */
+  rerunJudge(raceId: string): void {
+    this.orchestrator.rerunJudge(raceId);
+  }
+
   /** ✂ 剔除选手（标记式；约束与竞态处理在编排器）。 */
   eliminateRacer(raceId: string, role: RaceRole): void {
     this.orchestrator.eliminateRacer(raceId, role);
@@ -116,14 +122,14 @@ export class RaceManager implements RaceSessionHost {
     // 编排器直发的 prompt 在会话历史里回显为用户气泡（仅预览截断，
     // 完整内容照常发给引擎），否则重启后打开角色会话只见独白。
     const echo =
-      text.length > 2000 ? `${text.slice(0, 2000)}\n…（预览截断 · 完整指令已完整发送给引擎）` : text;
+      text.length > 2000 ? `${text.slice(0, 2000)}\n${L('…（预览截断 · 完整指令已完整发送给引擎）', '… (preview truncated · the full instruction was sent to the engine)')}` : text;
     // 同回合重试（中止/报错后重跑）：与上一条用户回显完全相同时，
     // 重复堆大段指令没有阅读价值 → 改发一行重试标记（历史只增不减，
     // 失败回合的诊断信息保留；指令仍完整发给引擎）。
     const lastUser = [...this.sessions.getMessages(sessionId)].reverse().find((m) => m.kind === 'user');
     this.sessions.announceUser(
       sessionId,
-      lastUser?.text === echo ? '↻ 已按相同指令重试本回合（指令原文见上一条，不再重复展示）' : echo,
+      lastUser?.text === echo ? L('↻ 已按相同指令重试本回合（指令原文见上一条，不再重复展示）', '↻ Retried this turn with the same instruction (original above, not repeated)') : echo,
     );
     return this.sessions.prompt(sessionId, text, undefined, effort);
   }

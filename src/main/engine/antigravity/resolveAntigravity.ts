@@ -16,6 +16,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import type { AntigravityCatalog, AntigravityConfigSnapshot, AntigravityModelEntry } from '@shared/types';
+import { L } from '../../i18n';
 import type { SpawnSpec } from '../kimi/resolveKimi';
 
 export function resolveAgyCli(extraArgs: string[], explicitPath?: string): SpawnSpec {
@@ -37,8 +38,11 @@ export function findAgyBinary(explicitPath?: string): string | undefined {
 }
 
 let cachedVersion: string | null | undefined; // undefined=未探测 null=失败
+let failedAt = 0; // 失败只缓存短期（应用先启动、CLI 后安装的场景无需重启即可检出）
+const PROBE_FAIL_TTL = 30_000;
 function probeVersion(explicitPath?: string): string | undefined {
-  if (cachedVersion !== undefined) return cachedVersion ?? undefined;
+  if (typeof cachedVersion === 'string') return cachedVersion;
+  if (cachedVersion === null && Date.now() - failedAt < PROBE_FAIL_TTL) return undefined;
   try {
     const spec = resolveAgyCli(['--version'], explicitPath);
     const res = spawnSync(spec.command, spec.args, {
@@ -53,6 +57,7 @@ function probeVersion(explicitPath?: string): string | undefined {
   } catch {
     cachedVersion = null;
   }
+  if (cachedVersion === null) failedAt = Date.now();
   return cachedVersion ?? undefined;
 }
 
@@ -96,17 +101,17 @@ export function fetchAntigravityCatalog(explicitPath?: string): Promise<Antigrav
       } catch {
         /* ignore */
       }
-      resolve({ models: [], error: 'agy models 超时' });
+      resolve({ models: [], error: L('agy models 超时', 'agy models timed out') });
     }, 30_000);
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ models: [], error: `无法运行 agy CLI: ${e.message}` });
+      resolve({ models: [], error: `${L('无法运行 agy CLI', 'Failed to run the agy CLI')}: ${e.message}` });
     });
     child.on('close', () => {
       clearTimeout(timer);
       const models = parseModelsText(out);
       if (models.length) resolve({ models });
-      else resolve({ models: [], error: err.trim().slice(0, 300) || '模型目录解析失败（可能未认证）' });
+      else resolve({ models: [], error: err.trim().slice(0, 300) || L('模型目录解析失败（可能未认证）', 'Failed to parse the model catalog (possibly unauthenticated)') });
     });
   });
 }

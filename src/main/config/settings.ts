@@ -11,7 +11,7 @@ import { join } from 'node:path';
 
 import type { AppSettings, ContextFallbackRule, EngineId } from '@shared/types';
 
-const ENGINE_IDS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity'];
+const ENGINE_IDS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity', 'claude'];
 
 /** 引擎顺序消毒：剔非法 id + 去重 + 把缺失引擎补到末尾（新版本
  *  加引擎后老配置自动补全，不会掉项）。 */
@@ -24,7 +24,6 @@ function sanitizeEngineOrder(raw: unknown): EngineId[] {
 
 const DEFAULTS: AppSettings = {
   themeMode: 'light',
-  themePalette: 'notion',
   language: 'zh',
   defaultPermissionMode: 'default',
   sendKey: 'enter',
@@ -35,11 +34,14 @@ const DEFAULTS: AppSettings = {
   workspaces: [],
   routing: { kimi: false, codex: false },
   opencodeHiddenModels: [],
+  ompHiddenModels: [],
   antigravityDefaultModel: '',
   antigravityHiddenModels: [],
   antigravityAutoSwitch: false,
-  antigravityQuotaThreshold: 15,
+  antigravityQuotaThreshold5h: 15,
+  antigravityQuotaThreshold7d: 5,
   engineOrder: [...ENGINE_IDS],
+  kimiPreferKap: true,
   race: {
     enableRacerC: false,
     roles: {
@@ -53,13 +55,23 @@ const DEFAULTS: AppSettings = {
   },
 };
 
+/** 0–100 百分比取整消毒；非数值返回 undefined，由调用侧决定回退。 */
+function pct(v: unknown): number | undefined {
+  return typeof v === 'number' ? Math.max(0, Math.min(100, Math.round(v))) : undefined;
+}
+
 /** Backfill fields added over time; silently drop the legacy provider
  *  store (pre-routing builds kept providers/keys in settings.json). */
 function migrate(stored: Record<string, unknown>): AppSettings {
-  const s = stored as Partial<AppSettings> & { providers?: unknown; defaultModelId?: unknown; theme?: 'notion' | 'light' | 'dark' };
+  const s = stored as Partial<AppSettings> & {
+    providers?: unknown;
+    defaultModelId?: unknown;
+    theme?: 'notion' | 'light' | 'dark';
+    /** 旧版单一切号阈值 — 拆 5h/7d 双阈值前的字段，迁移时双窗同值回填保持旧行为。 */
+    antigravityQuotaThreshold?: unknown;
+  };
   return {
     themeMode: s.themeMode ?? (s.theme === 'dark' ? 'dark' : DEFAULTS.themeMode),
-    themePalette: s.themePalette ?? DEFAULTS.themePalette,
     language: s.language ?? DEFAULTS.language,
     defaultPermissionMode: s.defaultPermissionMode ?? DEFAULTS.defaultPermissionMode,
     sendKey: s.sendKey ?? DEFAULTS.sendKey,
@@ -80,17 +92,24 @@ function migrate(stored: Record<string, unknown>): AppSettings {
     opencodeHiddenModels: Array.isArray(s.opencodeHiddenModels)
       ? s.opencodeHiddenModels.filter((x): x is string => typeof x === 'string')
       : [],
+    ompHiddenModels: Array.isArray(s.ompHiddenModels)
+      ? s.ompHiddenModels.filter((x): x is string => typeof x === 'string')
+      : [],
     antigravityDefaultModel:
       typeof s.antigravityDefaultModel === 'string' ? s.antigravityDefaultModel : DEFAULTS.antigravityDefaultModel,
     antigravityHiddenModels: Array.isArray(s.antigravityHiddenModels)
       ? s.antigravityHiddenModels.filter((x): x is string => typeof x === 'string')
       : [],
     antigravityAutoSwitch: typeof s.antigravityAutoSwitch === 'boolean' ? s.antigravityAutoSwitch : DEFAULTS.antigravityAutoSwitch,
-    antigravityQuotaThreshold:
-      typeof s.antigravityQuotaThreshold === 'number'
-        ? Math.max(0, Math.min(100, Math.round(s.antigravityQuotaThreshold)))
-        : DEFAULTS.antigravityQuotaThreshold,
+    // 旧版单阈值迁移：新字段缺失时用旧值同时回填两窗（行为与旧版完全一致）。
+    antigravityQuotaThreshold5h:
+      pct(s.antigravityQuotaThreshold5h) ?? pct(s.antigravityQuotaThreshold) ?? DEFAULTS.antigravityQuotaThreshold5h,
+    antigravityQuotaThreshold7d:
+      pct(s.antigravityQuotaThreshold7d) ?? pct(s.antigravityQuotaThreshold) ?? DEFAULTS.antigravityQuotaThreshold7d,
     engineOrder: sanitizeEngineOrder(s.engineOrder),
+    claudeMcpConfig: typeof s.claudeMcpConfig === 'string' ? s.claudeMcpConfig : DEFAULTS.claudeMcpConfig,
+    claudeCliPath: typeof s.claudeCliPath === 'string' ? s.claudeCliPath : DEFAULTS.claudeCliPath,
+    kimiPreferKap: typeof s.kimiPreferKap === 'boolean' ? s.kimiPreferKap : DEFAULTS.kimiPreferKap,
     race: {
       enableRacerC: s.race?.enableRacerC ?? DEFAULTS.race.enableRacerC,
       roles: { ...DEFAULTS.race.roles, ...(s.race?.roles ?? {}) },

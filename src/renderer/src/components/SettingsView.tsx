@@ -6,38 +6,55 @@
  * 不提供任何配置文件修改功能。
  */
 
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Bell, Box, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, FileLock2, Info, Plus, RefreshCw, Search, Settings2, Upload, X } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Bell, Box, ChevronRight, Eye, EyeOff, FileLock2, GripVertical, Info, Plus, RefreshCw, Search, Settings2, Upload, X } from 'lucide-react';
 
-import type { AgyAccountsSnapshot, AgyImportCandidate, AgyQuotaInfo, AppSettings, CodexConfigSnapshot, CompatAuditKind, CompatAuditSnapshot, ContextFallbackRule, EngineConfigsSnapshot, EngineId, KimiConfigSnapshot, NotificationSettings, OmpConfigSnapshot, OpencodeCatalog, OpencodeConfigSnapshot, OpencodeModelEntry, RaceRoleDefaultSetting, RouteSupport, TitleGenSettings } from '@shared/types';
-import { RACE_ROLES, RACE_ROLE_LABELS } from '@shared/race';
+import type { AgyAccountsSnapshot, AgyImportCandidate, AgyQuotaInfo, AppSettings, ClaudeConfigSnapshot, CodexConfigSnapshot, CompatAuditKind, CompatAuditSnapshot, ContextFallbackRule, EngineConfigsSnapshot, EngineId, KimiConfigSnapshot, NotificationSettings, OmpCatalog, OmpConfigSnapshot, OpencodeCatalog, OpencodeConfigSnapshot, RaceRoleDefaultSetting, RouteSupport, TitleGenSettings } from '@shared/types';
+import { RACE_ROLES } from '@shared/race';
 import { useChatStore } from '../store/chatStore';
-import { useT, type MsgKey } from '../i18n';
+import { agyWindowLabel, engineHintKey, raceRoleKey, translate, useT, type MsgKey } from '../i18n';
 import { ENGINE_LABELS, EngineIcon, useEngineOrder } from './EngineIcon';
+import { RaceHorse } from './RaceHorse';
 import { BrandHero, BrandMark, BrandSpinner } from './brand';
-import { EFFORT_LABELS, useRoleCatalogs } from './race/modelCatalogs';
+import { effortLabel, useRoleCatalogs } from './race/modelCatalogs';
 import { ANTIGRAVITY_LABELS } from './Composer';
 
-type Category = 'general' | 'models' | 'race' | 'notifications' | 'about';
+type MainCategory = 'general' | 'race' | 'notifications' | 'about';
+/** 导航分类：固定页 + 引擎总览页（'engines'）+ 每引擎一个子页
+ *  （「引擎」分组下按 engineOrder 列出）。 */
+type Category = MainCategory | 'engines' | EngineId;
 
-const CATEGORIES: Array<{ id: Category; key: MsgKey; icon: React.ReactNode }> = [
+const CATEGORIES: Array<{ id: MainCategory; key: MsgKey; icon: React.ReactNode }> = [
   { id: 'general', key: 'settingsGeneral', icon: <Settings2 size={15} /> },
-  { id: 'models', key: 'settingsModels', icon: <Box size={15} /> },
-  { id: 'race', key: 'settingsRace', icon: <span className="text-[15px] leading-none">🏇</span> },
+  { id: 'race', key: 'settingsRace', icon: <RaceHorse size={16} /> },
   { id: 'notifications', key: 'settingsNotifications', icon: <Bell size={15} /> },
   { id: 'about', key: 'settingsAbout', icon: <Info size={15} /> },
 ];
+
+/** 透明 1px 拖影 — 隐藏系统默认的半透明行快照（拖拽重排的视觉反馈
+ *  改走 FLIP 实体位移，见引擎顺序列表）。 */
+const DRAG_BLANK_IMG = new Image();
+DRAG_BLANK_IMG.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 export default function SettingsView(): JSX.Element | null {
   const t = useT();
   const open = useChatStore((s) => s.settingsOpen);
   const settings = useChatStore((s) => s.settings);
   const saveSettings = useChatStore((s) => s.saveSettings);
+  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  // 导航置灰/小黄点数据源：引擎可用性（null = 尚未探测 → 不置灰）与兼容性审计。
+  const availability = useChatStore((s) => s.engineAvailability);
+  const compatByEngine = useChatStore((s) => s.compatAudit?.engines);
+  const engineOrder = useEngineOrder();
   const [category, setCategory] = useState<Category>('general');
 
   useEffect(() => {
-    if (open) setCategory('general');
-  }, [open]);
+    if (open) {
+      setCategory('general');
+      // 打开设置即探测一次可用性 — 导航置灰不依赖用户先点进某个引擎页。
+      void refreshEngineConfigs();
+    }
+  }, [open, refreshEngineConfigs]);
 
   if (!open || !settings) return null;
 
@@ -46,6 +63,11 @@ export default function SettingsView(): JSX.Element | null {
   // 无草稿快照（旧快照整体回写会冲掉其他面板的即时改动）。
   const commit = (patch: Partial<AppSettings>): void => void saveSettings(patch);
 
+  const isEngine = (c: Category): c is EngineId => (engineOrder as string[]).includes(c);
+  const navBtnCls = (active: boolean): string =>
+    `mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${active ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+    }`;
+
   return (
     <div className="absolute inset-0 z-30 flex bg-bg-canvas">
       {/* 分类导航 — 与画布同色融合 */}
@@ -53,13 +75,44 @@ export default function SettingsView(): JSX.Element | null {
         <button onClick={close} className="mb-3 flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink">
           <ArrowLeft size={15} /> {t('back')}
         </button>
-        {CATEGORIES.map((c) => (
-          <button
-            key={c.id}
-            onClick={() => setCategory(c.id)}
-            className={`mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${category === c.id ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
-              }`}
-          >
+        {CATEGORIES.slice(0, 1).map((c) => (
+          <button key={c.id} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
+            {c.icon} {t(c.key)}
+          </button>
+        ))}
+        {/* 引擎分组 — 组标题本身可点 = 引擎总览页（支持哪些引擎/安装态/顺序）；
+            下挂每引擎一个子页，顺序跟随设置 engineOrder。未安装只置灰
+            不禁点 — 页内自带安装指引，全禁用会把指引也锁死。 */}
+        <button
+          onClick={() => setCategory('engines')}
+          className={`mb-0.5 mt-3 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${category === 'engines' ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+            }`}
+        >
+          <Box size={15} /> {t('settingsEngines')}
+        </button>
+        {engineOrder.map((id) => {
+          const installed = availability?.[id] ?? true;
+          const hasIssue = (compatByEngine?.[id]?.length ?? 0) > 0;
+          return (
+            <button
+              key={id}
+              onClick={() => setCategory(id)}
+              title={installed ? undefined : t('engineNotInstalledHint')}
+              className={`${navBtnCls(category === id)} pl-5 ${installed ? '' : 'opacity-55'}`}
+            >
+              <EngineIcon engine={id} size={14} />
+              <span className="min-w-0 flex-1 truncate text-left">{ENGINE_LABELS[id]}</span>
+              {/* 兼容性审计有条目 → 子项小黄点（承接侧栏齿轮黄点的定位链路） */}
+              {hasIssue && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />}
+              {!installed && (
+                <span className="shrink-0 rounded bg-warn/10 px-1 text-[10px] text-warn">{t('engineNotInstalled')}</span>
+              )}
+            </button>
+          );
+        })}
+        <div className="mt-3" />
+        {CATEGORIES.slice(1).map((c) => (
+          <button key={c.id} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
             {c.icon} {t(c.key)}
           </button>
         ))}
@@ -69,9 +122,16 @@ export default function SettingsView(): JSX.Element | null {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-[20px] bg-bg shadow-sm">
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-2xl px-8 py-8">
-            <h1 className="mb-6 text-xl font-semibold">{t(CATEGORIES.find((c) => c.id === category)!.key)}</h1>
+            <h1 className="mb-6 text-xl font-semibold">
+              {category === 'engines'
+                ? t('settingsEngines')
+                : isEngine(category)
+                  ? ENGINE_LABELS[category]
+                  : t(CATEGORIES.find((c) => c.id === category)!.key)}
+            </h1>
             {category === 'general' && <GeneralPane settings={settings} commit={commit} />}
-            {category === 'models' && <ModelsPane />}
+            {category === 'engines' && <EnginesOverviewPane settings={settings} commit={commit} onOpenEngine={setCategory} />}
+            {isEngine(category) && <EnginePane engine={category} />}
             {category === 'race' && <RacePane settings={settings} commit={commit} />}
             {category === 'notifications' && <NotificationsPane settings={settings} commit={commit} />}
             {category === 'about' && <AboutPane />}
@@ -95,15 +155,6 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
   const setRules = (contextFallbackRules: ContextFallbackRule[]): void => commit({ contextFallbackRules });
   const titleGen = settings.titleGen ?? { mode: 'program', baseUrl: '', apiKey: '', model: '' };
   const patchTitleGen = (p: Partial<TitleGenSettings>): void => commit({ titleGen: { ...titleGen, ...p } });
-  // 引擎列表顺序：上/下移交换相邻项后整体回写（消毒后的完整序列）。
-  const engineOrder = useEngineOrder();
-  const moveEngine = (index: number, delta: -1 | 1): void => {
-    const target = index + delta;
-    if (target < 0 || target >= engineOrder.length) return;
-    const next = [...engineOrder];
-    [next[index], next[target]] = [next[target]!, next[index]!];
-    commit({ engineOrder: next });
-  };
   return (
     <div className="space-y-7">
       <Section title={t('language')}>
@@ -127,17 +178,6 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
           onChange={(themeMode) => commit({ themeMode: themeMode as AppSettings['themeMode'] })}
         />
       </Section>
-      <Section title={t('themePalette')}>
-        <Segmented
-          value={settings.themePalette}
-          options={[
-            { id: 'notion', label: t('paletteNotion') },
-            { id: 'solarized', label: t('paletteSolarized') },
-            { id: 'everforest', label: t('paletteEverforest') },
-          ]}
-          onChange={(themePalette) => commit({ themePalette: themePalette as AppSettings['themePalette'] })}
-        />
-      </Section>
       <Section title={t('sendKey')}>
         <Segmented
           value={settings.sendKey}
@@ -148,33 +188,18 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
           onChange={(sendKey) => commit({ sendKey: sendKey as AppSettings['sendKey'] })}
         />
       </Section>
-      <Section title={t('engineOrder')}>
-        <div className="w-full max-w-md space-y-1">
-          {engineOrder.map((id, i) => (
-            <div key={id} className="flex items-center gap-2.5 rounded-lg border border-line bg-bg-input px-3 py-1.5">
-              <span className="w-3 text-center text-[11px] tabular-nums text-ink-faint">{i + 1}</span>
-              <EngineIcon engine={id} size={14} />
-              <span className="flex-1 text-ui">{ENGINE_LABELS[id]}</span>
-              <button
-                title={t('engineOrderUp')}
-                disabled={i === 0}
-                onClick={() => moveEngine(i, -1)}
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
-              >
-                <ChevronUp size={13} />
-              </button>
-              <button
-                title={t('engineOrderDown')}
-                disabled={i === engineOrder.length - 1}
-                onClick={() => moveEngine(i, 1)}
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
-              >
-                <ChevronDown size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
-        <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('engineOrderHint')}</p>
+      <Section title={t('defaultPermMode')}>
+        {/* 档位与 Composer 权限选择器一致（plan 由 Agent/Plan 开关承载，不在此列）。 */}
+        <Segmented
+          value={settings.defaultPermissionMode}
+          options={[
+            { id: 'default', label: t('permManual') },
+            { id: 'auto', label: t('permAuto') },
+            { id: 'yolo', label: t('permYolo') },
+          ]}
+          onChange={(defaultPermissionMode) => commit({ defaultPermissionMode: defaultPermissionMode as AppSettings['defaultPermissionMode'] })}
+        />
+        <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('defaultPermModeHint')}</p>
       </Section>
       <Section title={t('titleGen')}>
         <Segmented
@@ -263,37 +288,237 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
   );
 }
 
-// ----------------------------------------------------------------- models
-// 只读展示 CLI 自己的配置（本程序永不写入）+ 每引擎的协议路由开关。
+// ----------------------------------------------------------------- engines
+// 引擎总览：支持的引擎清单（安装态/版本/简介，点击进入子页）+
+// 引擎总体配置（展示顺序）+ 跨引擎兼容性诊断。
 
-function ModelsPane(): JSX.Element {
+function EnginesOverviewPane({ commit, onOpenEngine }: PaneProps & { onOpenEngine: (id: EngineId) => void }): JSX.Element {
+  const t = useT();
+  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const availability = useChatStore((s) => s.engineAvailability);
+  const [snap, setSnap] = useState<EngineConfigsSnapshot | null>(null);
+  useEffect(() => {
+    void refreshEngineConfigs().then(setSnap);
+  }, [refreshEngineConfigs]);
+
+  // 引擎列表顺序：拖拽排序 — 拖动中实时预览重排（FLIP 位移动画），
+  // 松手提交完整序列；取消（Esc/拖出）则弹回原序。
+  const engineOrder = useEngineOrder();
+  const [dragId, setDragId] = useState<EngineId | null>(null);
+  const [draft, setDraft] = useState<EngineId[] | null>(null);
+  const dropCommitted = useRef(false);
+  const rowRefs = useRef(new Map<EngineId, HTMLDivElement>());
+  const flipTops = useRef(new Map<EngineId, number>());
+  const order = draft ?? engineOrder;
+
+  /** 重排前先快照各行纵坐标 — 渲染后在 useLayoutEffect 里做 FLIP 反演位移。 */
+  const snapshotRows = (): void => {
+    flipTops.current.clear();
+    for (const [id, el] of rowRefs.current) flipTops.current.set(id, el.getBoundingClientRect().top);
+  };
+  useLayoutEffect(() => {
+    // FLIP：新位置先反向平移回旧位置，下一帧释放到 0 — 行以缓动曲线“让位”
+    // 而非瞬移。无快照时不动（仅拖拽/弹回引发的重排才有动画）。
+    for (const [id, el] of rowRefs.current) {
+      const prevTop = flipTops.current.get(id);
+      if (prevTop === undefined) continue;
+      const dy = prevTop - el.getBoundingClientRect().top;
+      if (!dy) continue;
+      el.style.transition = 'none';
+      el.style.transform = `translateY(${dy}px)`;
+      requestAnimationFrame(() => {
+        el.style.transition = 'transform 240ms cubic-bezier(0.22, 1, 0.36, 1)';
+        el.style.transform = '';
+      });
+    }
+    flipTops.current.clear();
+  });
+
+  /** 拖到某行上方 → 把被拖引擎插到该行位置（预览序，未提交）。 */
+  const previewMove = (overId: EngineId): void => {
+    if (!dragId || dragId === overId) return;
+    const cur = draft ?? engineOrder;
+    const from = cur.indexOf(dragId);
+    const to = cur.indexOf(overId);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = [...cur];
+    next.splice(from, 1);
+    next.splice(to, 0, dragId);
+    snapshotRows();
+    setDraft(next);
+  };
+  const commitDrag = (): void => {
+    if (draft && draft.join('|') !== engineOrder.join('|')) commit({ engineOrder: draft });
+    dropCommitted.current = true;
+  };
+  const endDrag = (): void => {
+    setDragId(null);
+    if (!dropCommitted.current && draft) {
+      // 未落在有效目标上（Esc/拖出窗口）→ 弹回原序（同样走 FLIP）。
+      snapshotRows();
+      setDraft(null);
+    }
+    dropCommitted.current = false;
+  };
+  // 提交后 settings 回到与预览序一致 → 静默释放 draft（无视觉跳变）。
+  useEffect(() => {
+    if (draft && !dragId && draft.join('|') === engineOrder.join('|')) setDraft(null);
+  }, [draft, dragId, engineOrder]);
+
+  /** 快照 → 安装态/版本（kimi/codex 无 CLI 探测，安装态用配置存在性近似，
+   *  版本号来自 npm 包/`--version` 探测；快照未到时回退 store 可用性，
+   *  undefined = 探测中）。 */
+  const statusOf = (id: EngineId): { installed?: boolean; version?: string } => {
+    if (!snap) return { installed: availability?.[id] };
+    switch (id) {
+      case 'codex':
+        return { installed: snap.codex.exists, version: snap.codex.version };
+      case 'kimi':
+        return { installed: snap.kimi.exists, version: snap.kimi.version };
+      case 'opencode':
+        return { installed: snap.opencode.installed, version: snap.opencode.version };
+      case 'omp':
+        return { installed: snap.omp.installed, version: snap.omp.version };
+      case 'antigravity':
+        return { installed: snap.antigravity.installed, version: snap.antigravity.version };
+      case 'claude':
+        return { installed: snap.claude.installed, version: snap.claude.version };
+    }
+  };
+
+  return (
+    <div className="space-y-7">
+      <Section title={t('supportedEngines')}>
+        <div className="w-full space-y-1.5">
+          {engineOrder.map((id) => {
+            const { installed, version } = statusOf(id);
+            const off = installed === false;
+            return (
+              <button
+                key={id}
+                onClick={() => onOpenEngine(id)}
+                title={off ? t('engineNotInstalledHint') : undefined}
+                className={`flex w-full items-center gap-3 rounded-xl border border-line bg-bg-panel/50 px-4 py-3 text-left transition hover:bg-bg-hover ${off ? 'opacity-55' : ''}`}
+              >
+                <EngineIcon engine={id} size={18} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-semibold">{ENGINE_LABELS[id]}</span>
+                  <span className="block truncate text-[11px] leading-5 text-ink-faint">{t(engineHintKey(id))}</span>
+                </span>
+                {installed === undefined ? (
+                  <BrandSpinner size={12} />
+                ) : (
+                  <span className={`shrink-0 rounded-md px-1.5 text-[10px] ${installed ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+                    {installed ? `${t('setInstalled')}${version ? ` ${version}` : ''}` : t('engineNotInstalled')}
+                  </span>
+                )}
+                <ChevronRight size={14} className="shrink-0 text-ink-faint" />
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('enginesOverviewHint')}</p>
+      </Section>
+      <Section title={t('engineOrder')}>
+        <div className="w-full max-w-md space-y-1" onDragOver={(e) => e.preventDefault()}>
+          {order.map((id, i) => {
+            const dragging = dragId === id;
+            return (
+              <div
+                key={id}
+                ref={(el) => {
+                  if (el) rowRefs.current.set(id, el);
+                  else rowRefs.current.delete(id);
+                }}
+                draggable
+                onDragStart={(e) => {
+                  setDragId(id);
+                  dropCommitted.current = false;
+                  e.dataTransfer.effectAllowed = 'move';
+                  // 隐藏系统拖影 — 行本体留在列表里随预览重排移动，
+                  // 观感是“实体在列表内滑动”而非半透明副本飘移。
+                  e.dataTransfer.setDragImage(DRAG_BLANK_IMG, 0, 0);
+                }}
+                onDragEnter={() => previewMove(id)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  commitDrag();
+                }}
+                onDragEnd={endDrag}
+                title={t('engineOrderDrag')}
+                className={`relative flex select-none items-center gap-2.5 rounded-lg border px-3 py-1.5 ${dragging
+                  ? 'z-10 cursor-grabbing border-accent/60 bg-bg-hover shadow-lg'
+                  : 'cursor-grab border-line bg-bg-input'
+                  }`}
+              >
+                <GripVertical size={13} className={`shrink-0 ${dragging ? 'text-accent' : 'text-ink-faint/60'}`} />
+                <span className="w-3 text-center text-[11px] tabular-nums text-ink-faint">{i + 1}</span>
+                <EngineIcon engine={id} size={14} />
+                <span className="flex-1 text-ui">{ENGINE_LABELS[id]}</span>
+              </div>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('engineOrderHint')}</p>
+      </Section>
+      {/* 跨引擎视角的兼容性诊断总卡（各引擎子页内另有单引擎过滤视图） */}
+      <CompatAuditCard />
+    </div>
+  );
+}
+
+// 每引擎一个子页：只读展示 CLI 自己的配置（本程序永不写入）+ 协议路由
+// 开关 + 该引擎的兼容性诊断。未安装时卡片自带安装指引（导航只置灰不禁点）。
+
+function EnginePane({ engine }: { engine: EngineId }): JSX.Element {
   const t = useT();
   const settings = useChatStore((s) => s.settings);
   const saveSettings = useChatStore((s) => s.saveSettings);
   const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const loadOmpCatalog = useChatStore((s) => s.loadOmpCatalog);
+  const loadOpencodeCatalog = useChatStore((s) => s.loadOpencodeCatalog);
   const [snap, setSnap] = useState<EngineConfigsSnapshot | null>(null);
+  // ↻ 刷新进行中 — 图标按钮 busy 态换 BrandSpinner（完成即停，回到 ↻）。
+  const [reloadBusy, setReloadBusy] = useState(false);
 
-  // ↻ 一次点击同时刷新本页快照与全局 codex 目录/默认档（同一次读取，天然一致）。
-  const reload = (): void => {
-    void refreshEngineConfigs().then(setSnap);
+  // ↻ 一次点击同时刷新本页快照与全局 codex 目录/默认档（同一次读取，天然一致）；
+  // 显式点击时连当前引擎的模型目录一并强制重拉（否则目录走进程级缓存，
+  // 改完 models.yml 点 ↻ 看不到新模型）；切页自动刷新不强拉，避免每次白跑 CLI。
+  const reload = (forceCatalog?: boolean): void => {
+    setReloadBusy(true);
+    const jobs: Promise<unknown>[] = [refreshEngineConfigs().then(setSnap)];
+    if (forceCatalog && engine === 'omp') jobs.push(loadOmpCatalog(true));
+    if (forceCatalog && engine === 'opencode') jobs.push(loadOpencodeCatalog(true));
+    void Promise.allSettled(jobs).then(() => setReloadBusy(false));
   };
-  useEffect(reload, []);
+  // 切换引擎子页时重读一次 — 配置文件是磁盘上的活物。
+  useEffect(() => reload(), [engine]);
 
   // 路由开关即时保存（同通知开关），并提示仅对新开会话生效。
-  const setRouting = (engine: 'kimi' | 'codex', on: boolean): void => {
-    const routing = { ...(settings?.routing ?? { kimi: false, codex: false }), [engine]: on };
+  const setRouting = (e: 'kimi' | 'codex', on: boolean): void => {
+    const routing = { ...(settings?.routing ?? { kimi: false, codex: false }), [e]: on };
     void saveSettings({ routing });
   };
-
   const routing = settings?.routing ?? { kimi: false, codex: false };
+
+  // antigravity 无 CLI 配置快照 — 账号导入池卡片自成一页。
+  if (engine === 'antigravity') {
+    return (
+      <div className="space-y-5">
+        <AntigravityAccountsCard />
+        <CompatAuditCard engine="antigravity" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
       <div className="flex items-start gap-2 rounded-xl border border-line bg-bg-panel/50 px-4 py-3">
         <FileLock2 size={15} className="mt-0.5 shrink-0 text-ink-faint" />
         <p className="text-[12px] leading-5 text-ink-faint">{t('modelsReadonlyHint')}</p>
-        <button title={t('cfgReload')} onClick={reload} className="shrink-0 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
-          <RefreshCw size={13} />
+        <button title={t('cfgReload')} onClick={() => reload(true)} disabled={reloadBusy} className="shrink-0 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:cursor-default disabled:hover:bg-transparent">
+          {reloadBusy ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
         </button>
       </div>
 
@@ -301,28 +526,32 @@ function ModelsPane(): JSX.Element {
         <div className="flex flex-col items-center gap-2 py-8 text-ui text-ink-faint">
           {/* 面板内容区级等待按规范用 BrandHero（原来只有一个纯文字…） */}
           <BrandHero size={48} />
-          读取引擎配置…
+          {t('setReadingConfig')}
         </div>
       ) : (
         <>
-          <CodexConfigCard
-            snap={snap.codex}
-            support={snap.routeSupport.codex}
-            routing={routing.codex}
-            onToggle={(on) => setRouting('codex', on)}
-          />
-          <KimiConfigCard
-            snap={snap.kimi}
-            support={snap.routeSupport.kimi}
-            routing={routing.kimi}
-            onToggle={(on) => setRouting('kimi', on)}
-          />
-          <OpencodeConfigCard snap={snap.opencode} />
-          <OmpConfigCard snap={snap.omp} />
-          <AntigravityAccountsCard />
-          <CompatAuditCard />
+          {engine === 'codex' && (
+            <CodexConfigCard
+              snap={snap.codex}
+              support={snap.routeSupport.codex}
+              routing={routing.codex}
+              onToggle={(on) => setRouting('codex', on)}
+            />
+          )}
+          {engine === 'kimi' && (
+            <KimiConfigCard
+              snap={snap.kimi}
+              support={snap.routeSupport.kimi}
+              routing={routing.kimi}
+              onToggle={(on) => setRouting('kimi', on)}
+            />
+          )}
+          {engine === 'opencode' && <OpencodeConfigCard snap={snap.opencode} />}
+          {engine === 'omp' && <OmpConfigCard snap={snap.omp} />}
+          {engine === 'claude' && <ClaudeConfigCard snap={snap.claude} />}
         </>
       )}
+      <CompatAuditCard engine={engine} />
     </div>
   );
 }
@@ -387,7 +616,7 @@ function CodexConfigCard({
         <div className="space-y-1.5 text-[12px]">
           <ReadonlyRow label={t('cfgActiveModel')} value={`${snap.model ?? '—'}${snap.reasoningEffort ? ` · ${snap.reasoningEffort}` : ''}`} />
           <ReadonlyRow label={t('cfgAuth')} value={authLabel} />
-          <ReadonlyRow label={t('cfgActiveProvider')} value={snap.activeProvider ?? 'openai（内置）'} />
+          <ReadonlyRow label={t('cfgActiveProvider')} value={snap.activeProvider ?? t('setBuiltinOpenai')} />
           {snap.providers.length > 0 ? (
             snap.providers.map((p) => (
               <div key={p.id} className="rounded-lg border border-line bg-bg-input px-3 py-2">
@@ -473,8 +702,19 @@ function ReadonlyRow({ label, value }: { label: string; value: string }): JSX.El
  *  catalog 加载后展示「模型展示」管理区 — openchamber 同款黑名单机制，
  *  隐藏的模型不再出现在选择器/赛马配置里（不碰 opencode 配置文件）。 */
 function OpencodeConfigCard({ snap }: { snap: OpencodeConfigSnapshot }): JSX.Element {
+  const t = useT();
   const catalog = useChatStore((s) => s.opencodeCatalog);
   const loadCatalog = useChatStore((s) => s.loadOpencodeCatalog);
+  // 目录拉取进行中（本地态 — store 的 in-flight 标记非响应式，不驱动重绘）
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const runLoadCatalog = async (force?: boolean): Promise<void> => {
+    setCatalogBusy(true);
+    try {
+      await loadCatalog(force);
+    } finally {
+      setCatalogBusy(false);
+    }
+  };
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
       <div className="mb-1 flex items-center gap-3">
@@ -483,31 +723,32 @@ function OpencodeConfigCard({ snap }: { snap: OpencodeConfigSnapshot }): JSX.Ele
           {snap.configPath ?? ''}
         </span>
         <span className={`rounded-md px-1.5 text-[10px] ${snap.installed ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
-          {snap.installed ? `已安装 ${snap.version ?? ''}` : '未安装'}
+          {snap.installed ? `${t('setInstalled')} ${snap.version ?? ''}` : t('engineNotInstalled')}
         </span>
       </div>
       <div className="mb-3 text-[11px] leading-5 text-ink-faint">
-        新增 provider / 登录请在 opencode CLI 中操作（终端运行 <span className="font-mono">opencode auth login</span>），
-        本程序不管理凭据；zen 免费模型无需登录开箱即用。
+        {t('ocHint1')}<span className="font-mono">opencode auth login</span>{t('ocHint2')}
       </div>
       {!snap.installed ? (
-        <div className="text-ui text-ink-faint">未找到 opencode CLI — 运行 npm i -g opencode-ai 安装后刷新。</div>
+        <div className="text-ui text-ink-faint">{t('ocNotFound')}</div>
       ) : (
         <div className="space-y-1.5 text-[12px]">
           {snap.cliPath && <ReadonlyRow label="CLI" value={snap.cliPath} />}
-          <ReadonlyRow label="opencode.json" value={snap.configExists ? '存在' : '未创建（可选）'} />
+          <ReadonlyRow label="opencode.json" value={snap.configExists ? t('setExists') : t('setNotCreatedOptional')} />
           {catalog ? (
             catalog.error ? (
-              <div className="text-[11.5px] text-err">provider 列表加载失败：{catalog.error}</div>
+              <div className="text-[11.5px] text-err">{t('ocProvidersFailed', { err: catalog.error })}</div>
             ) : (
               <OpencodeModelVisibility catalog={catalog} />
             )
           ) : (
             <button
-              onClick={() => void loadCatalog()}
-              className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover"
+              onClick={() => void runLoadCatalog()}
+              disabled={catalogBusy}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover disabled:cursor-default disabled:hover:bg-transparent"
             >
-              加载模型列表，管理展示哪些模型（将启动 opencode server）
+              {catalogBusy && <BrandSpinner size={12} />}
+              {t('ocLoadModels')}
             </button>
           )}
         </div>
@@ -522,8 +763,19 @@ function OpencodeConfigCard({ snap }: { snap: OpencodeConfigSnapshot }): JSX.Ele
 const OMP_PINNED_VERSION = '17.1.8';
 
 function OmpConfigCard({ snap }: { snap: OmpConfigSnapshot }): JSX.Element {
+  const t = useT();
   const catalog = useChatStore((s) => s.ompCatalog);
   const loadCatalog = useChatStore((s) => s.loadOmpCatalog);
+  // 目录拉取进行中（本地态 — store 的 in-flight 标记非响应式，不驱动重绘）
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const runLoadCatalog = async (force?: boolean): Promise<void> => {
+    setCatalogBusy(true);
+    try {
+      await loadCatalog(force);
+    } finally {
+      setCatalogBusy(false);
+    }
+  };
   const versionDrift = snap.installed && snap.version && snap.version !== OMP_PINNED_VERSION;
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
@@ -533,51 +785,141 @@ function OmpConfigCard({ snap }: { snap: OmpConfigSnapshot }): JSX.Element {
           {snap.configPath ?? ''}
         </span>
         <span className={`rounded-md px-1.5 text-[10px] ${snap.installed ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
-          {snap.installed ? `已安装 ${snap.version ?? ''}` : '未安装'}
+          {snap.installed ? `${t('setInstalled')} ${snap.version ?? ''}` : t('engineNotInstalled')}
         </span>
       </div>
       <div className="mb-3 text-[11px] leading-5 text-ink-faint">
-        登录/provider 配置请在终端运行 <span className="font-mono">omp</span> 完成（支持 Kimi/MiniMax/GLM/Copilot 等订阅），
-        本程序只读不写 ~/.omp。注意：omp 对无界面子代理（task）强制自动批准，主会话审批不约束它们；
-        正文里的 <span className="font-mono">ultrathink / orchestrate / workflowz</span> 会触发特殊行为（输入框会提示）。
+        {t('ompHint1')}<span className="font-mono">omp</span>{t('ompHint2')}
+        <span className="font-mono">ultrathink / orchestrate / workflowz</span>{t('ompHint3')}
       </div>
       {versionDrift && (
         <div className="mb-2 rounded-md bg-warn/10 px-2.5 py-1 text-[11px] text-warn">
-          当前版本 {snap.version} 与实测基线 {OMP_PINNED_VERSION} 不一致 — omp 迭代快，协议行为可能漂移，异常时优先回退基线版本。
+          {t('ompVersionDrift', { v: snap.version ?? '', base: OMP_PINNED_VERSION })}
         </div>
       )}
       {!snap.installed ? (
         <div className="text-ui text-ink-faint">
-          未找到 omp CLI — PowerShell 运行 <span className="font-mono">irm https://omp.sh/install.ps1 | iex</span> 安装后刷新。
+          {t('ompNotFound1')}<span className="font-mono">irm https://omp.sh/install.ps1 | iex</span>{t('ompNotFound2')}
         </div>
       ) : (
         <div className="space-y-1.5 text-[12px]">
           {snap.cliPath && <ReadonlyRow label="CLI" value={snap.cliPath} />}
-          <ReadonlyRow label="~/.omp/agent" value={snap.configExists ? '存在' : '未初始化（首次运行 omp 后生成）'} />
+          <ReadonlyRow label="~/.omp/agent" value={snap.configExists ? t('setExists') : t('ompNotInited')} />
           {catalog ? (
             catalog.error ? (
-              <div className="text-[11.5px] text-err">模型目录加载失败：{catalog.error}</div>
+              <div className="text-[11.5px] text-err">{t('ompCatalogFailed', { err: catalog.error })}</div>
             ) : catalog.models.length === 0 ? (
-              <div className="text-[11.5px] text-ink-faint">目录为空 — 在终端运行 omp 完成登录/配 key 后重新加载。</div>
+              <div className="text-[11.5px] text-ink-faint">{t('ompCatalogEmpty')}</div>
             ) : (
-              <div className="flex items-center gap-2 text-[11.5px] text-ink-faint">
-                <span>模型目录：{catalog.models.length} 个（{new Set(catalog.models.map((m) => m.provider)).size} 个 provider）</span>
-                <button
-                  onClick={() => void loadCatalog(true)}
-                  className="rounded-md border border-line px-1.5 py-0.5 text-[10.5px] text-ink-soft transition hover:bg-bg-hover"
-                >
-                  重拉
-                </button>
-              </div>
+              <>
+                <div className="flex items-center gap-2 text-[11.5px] text-ink-faint">
+                  <span>{t('ompCatalogCount', { n: catalog.models.length, p: new Set(catalog.models.map((m) => m.provider)).size })}</span>
+                  <button
+                    onClick={() => void runLoadCatalog(true)}
+                    disabled={catalogBusy}
+                    className="inline-flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10.5px] text-ink-soft transition hover:bg-bg-hover disabled:cursor-default disabled:hover:bg-transparent"
+                  >
+                    {catalogBusy && <BrandSpinner size={11} />}
+                    {t('ompRefetch')}
+                  </button>
+                </div>
+                <OmpModelVisibility catalog={catalog} />
+              </>
             )
           ) : (
             <button
-              onClick={() => void loadCatalog()}
-              className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover"
+              onClick={() => void runLoadCatalog()}
+              disabled={catalogBusy}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover disabled:cursor-default disabled:hover:bg-transparent"
             >
-              加载模型目录（omp models --json）
+              {catalogBusy && <BrandSpinner size={12} />}
+              {t('ompLoadCatalog')}
             </button>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Claude Code 区块 — 无路由开关，凭据/模型完全委托 claude 自身
+ *  （终端运行 `claude` 或 `claude login` 登录，或设 ANTHROPIC_API_KEY）。
+ *  展示安装/版本/登录布尔态 — 本程序只读不写 ~/.claude，绝不外泄凭据。 */
+function ClaudeConfigCard({ snap }: { snap: ClaudeConfigSnapshot }): JSX.Element {
+  const t = useT();
+  const authLabel =
+    snap.authMethod === 'oauth' ? t('clAuthOauth') : snap.authMethod === 'apikey' ? t('clAuthApiKey') : t('cfgAuthNone');
+  const mcpConfig = useChatStore((s) => s.settings?.claudeMcpConfig ?? '');
+  const cliPath = useChatStore((s) => s.settings?.claudeCliPath ?? '');
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const [mcpDraft, setMcpDraft] = useState(mcpConfig);
+  const [cliDraft, setCliDraft] = useState(cliPath);
+  useEffect(() => setMcpDraft(mcpConfig), [mcpConfig]);
+  useEffect(() => setCliDraft(cliPath), [cliPath]);
+  // 自定义启动命令变更 → 存盘后重拉快照（主进程探测缓存按入口 keying，自动重探）。
+  const saveCliPath = (): void => {
+    const next = cliDraft.trim();
+    if (next === cliPath) return;
+    void saveSettings({ claudeCliPath: next }).then(() => void refreshEngineConfigs());
+  };
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
+      <div className="mb-1 flex items-center gap-3">
+        <span className="text-[13px] font-semibold">Claude Code</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint" title={snap.cliPath}>
+          {snap.cliPath ?? ''}
+        </span>
+        <span className={`rounded-md px-1.5 text-[10px] ${snap.installed ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+          {snap.installed ? `${t('setInstalled')} ${snap.version ?? ''}` : t('engineNotInstalled')}
+        </span>
+      </div>
+      <div className="mb-3 text-[11px] leading-5 text-ink-faint">
+        {t('clHint1')}<span className="font-mono">claude login</span>{t('clHint2')}
+        <span className="font-mono"> ANTHROPIC_API_KEY</span>{t('clHint3')}
+      </div>
+      {/* 自定义启动命令：始终可见（自动探测失败时，设它正是修复手段）。
+          可填完整路径（cli.js/.cmd/.exe）或 PATH 上的命令名（如 cc）；
+          不支持 shell 别名。仅对新开会话生效。 */}
+      <div className="mb-3 flex items-center gap-2">
+        <span className="w-20 shrink-0 text-[11px] text-ink-faint">{t('clLaunchCmd')}</span>
+        <input
+          value={cliDraft}
+          placeholder={t('clLaunchPlaceholder')}
+          onChange={(e) => setCliDraft(e.target.value)}
+          onBlur={saveCliPath}
+          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+          className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2.5 py-1 font-mono text-[11px] outline-none placeholder:text-ink-faint"
+        />
+      </div>
+      {!snap.installed ? (
+        <div className="text-ui text-ink-faint">
+          {t('clNotFound1')}<span className="font-mono">npm i -g @anthropic-ai/claude-code</span>{t('clNotFound2')}
+        </div>
+      ) : snap.error ? (
+        <div className="text-ui text-err">{snap.error}</div>
+      ) : (
+        <div className="space-y-1.5 text-[12px]">
+          {snap.cliPath && <ReadonlyRow label="CLI" value={snap.cliPath} />}
+          <ReadonlyRow label={t('cfgAuth')} value={authLabel} />
+          <div className="flex items-center gap-2">
+            <span className="w-20 shrink-0 text-[11px] text-ink-faint">{t('clLoginState')}</span>
+            <span className={`rounded-md px-1.5 text-[10px] ${snap.loggedIn ? 'bg-ok/10 text-ok' : 'bg-warn/10 text-warn'}`}>
+              {snap.loggedIn ? t('clLoggedIn') : t('clNotLoggedIn')}
+            </span>
+          </div>
+          {/* MCP：claude 自身 ~/.claude 的 MCP 服务器无需配置自动加载；此处只为叠加
+              额外服务器（指向一个 MCP JSON 文件，→ --mcp-config），仅对新开会话生效。 */}
+          <div className="flex items-center gap-2 pt-1">
+            <span className="w-20 shrink-0 text-[11px] text-ink-faint">{t('clExtraMcp')}</span>
+            <input
+              value={mcpDraft}
+              placeholder={t('clMcpPlaceholder')}
+              onChange={(e) => setMcpDraft(e.target.value)}
+              onBlur={() => mcpDraft !== mcpConfig && void saveSettings({ claudeMcpConfig: mcpDraft.trim() })}
+              className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2.5 py-1 font-mono text-[11px] outline-none placeholder:text-ink-faint"
+            />
+          </div>
         </div>
       )}
     </div>
@@ -590,9 +932,9 @@ function fmtAgyReset(sec?: number): string {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (d > 0) return `${d}天${h}小时后重置`;
-  if (h > 0) return `${h}小时${m}分后重置`;
-  return `${m}分后重置`;
+  if (d > 0) return translate('agyResetInDays', { d, h });
+  if (h > 0) return translate('agyResetInHours', { h, m });
+  return translate('agyResetInMins', { m });
 }
 
 /** Antigravity 账号导入池 — 列账号 + 额度总览 + 手动切号。本程序只使用
@@ -600,6 +942,7 @@ function fmtAgyReset(sec?: number): string {
  *  cockpit 账号库拷贝凭据副本到 userData/agy-accounts.json，不需任何
  *  OAuth 登录；移除仅删副本，不碰 cockpit / 当前 keyring。 */
 function AntigravityAccountsCard(): JSX.Element {
+  const t = useT();
   const [snap, setSnap] = useState<AgyAccountsSnapshot | null>(null);
   const [quota, setQuota] = useState<Record<string, AgyQuotaInfo>>({});
   const [quotaBusy, setQuotaBusy] = useState(false);
@@ -616,7 +959,8 @@ function AntigravityAccountsCard(): JSX.Element {
   const agyDefaultModel = useChatStore((s) => s.settings?.antigravityDefaultModel ?? '');
   const agyHiddenList = useChatStore((s) => s.settings?.antigravityHiddenModels);
   const agyAutoSwitch = useChatStore((s) => s.settings?.antigravityAutoSwitch ?? false);
-  const agyThreshold = useChatStore((s) => s.settings?.antigravityQuotaThreshold ?? 15);
+  const agyThreshold5h = useChatStore((s) => s.settings?.antigravityQuotaThreshold5h ?? 15);
+  const agyThreshold7d = useChatStore((s) => s.settings?.antigravityQuotaThreshold7d ?? 5);
   const saveSettings = useChatStore((s) => s.saveSettings);
   const agyHidden = useMemo(() => new Set(agyHiddenList ?? []), [agyHiddenList]);
   const toggleAgyHidden = (slug: string): void => {
@@ -709,13 +1053,13 @@ function AntigravityAccountsCard(): JSX.Element {
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
       <div className="mb-1 flex items-center gap-3">
-        <span className="text-[13px] font-semibold">Antigravity 账号</span>
+        <span className="text-[13px] font-semibold">{t('agyAccountsTitle')}</span>
         <span className="min-w-0 flex-1" />
         {snap && (
-          <span className="rounded-md bg-bg-panel px-1.5 text-[10px] text-ink-faint">已导入 {snap.accounts.length}</span>
+          <span className="rounded-md bg-bg-panel px-1.5 text-[10px] text-ink-faint">{t('agyImportedCount', { n: snap.accounts.length })}</span>
         )}
         <button
-          title="刷新额度"
+          title={t('quotaRefresh')}
           onClick={() => loadQuota(true)}
           className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
         >
@@ -723,18 +1067,17 @@ function AntigravityAccountsCard(): JSX.Element {
         </button>
       </div>
       <div className="mb-3 text-[11px] leading-5 text-ink-faint">
-        本程序只使用在此导入的账号（切号/额度扫描均限导入池）。导入仅拷贝 cockpit 账号库的凭据副本，
-        无需登录；移除只删本程序副本。凭据失效时在 cockpit 重新登录后再导入一次即可覆盖。
+        {t('agyPoolHint')}
       </div>
       {/* agy 默认模型—未在 composer 显式选模型时生效（已隐藏的模型不列，当前默认除外） */}
       <div className="mb-3 flex items-center gap-2">
-        <span className="shrink-0 text-[12px] text-ink-soft">默认模型</span>
+        <span className="shrink-0 text-[12px] text-ink-soft">{t('cfgActiveModel')}</span>
         <select
           value={agyDefaultModel}
           onChange={(e) => void saveSettings({ antigravityDefaultModel: e.target.value })}
           className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent"
         >
-          <option value="">跟随默认（{ANTIGRAVITY_LABELS['claude-sonnet-4-6']}）</option>
+          <option value="">{t('agyFollowDefault', { model: ANTIGRAVITY_LABELS['claude-sonnet-4-6']! })}</option>
           {Object.entries(ANTIGRAVITY_LABELS)
             .filter(([slug]) => !agyHidden.has(slug) || slug === agyDefaultModel)
             .map(([slug, label]) => (
@@ -747,7 +1090,7 @@ function AntigravityAccountsCard(): JSX.Element {
       {/* 隐藏模型—只影响本程序内的模型选择器/赛马配置，不限制 agy 实际可用模型 */}
       <div className="mb-3">
         <div className="mb-1.5 text-[11px] leading-5 text-ink-faint">
-          隐藏不常用的模型 — 只影响本程序内的模型选择器/赛马配置，不修改 agy 本身。
+          {t('agyHideHint')}
         </div>
         <div className="overflow-hidden rounded-lg border border-line bg-bg-input">
           {Object.entries(ANTIGRAVITY_LABELS).map(([slug, label], i) => {
@@ -760,10 +1103,10 @@ function AntigravityAccountsCard(): JSX.Element {
                 title={slug}
               >
                 <span className="min-w-0 flex-1 truncate text-[12px]">{label}</span>
-                {isDefault && <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">默认</span>}
+                {isDefault && <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">{t('defaultBadge')}</span>}
                 <button
                   onClick={() => toggleAgyHidden(slug)}
-                  title={off ? '显示' : '隐藏'}
+                  title={off ? t('showWord') : t('hideWord')}
                   className="shrink-0 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
                 >
                   {off ? <EyeOff size={13} /> : <Eye size={13} />}
@@ -781,40 +1124,52 @@ function AntigravityAccountsCard(): JSX.Element {
             checked={agyAutoSwitch}
             onChange={(e) => void saveSettings({ antigravityAutoSwitch: e.target.checked })}
           />
-          <span className="flex-1 text-[12px] font-medium">额度不足时自动切号</span>
+          <span className="flex-1 text-[12px] font-medium">{t('agyAutoSwitchLabel')}</span>
         </label>
         <div className="mt-1 text-[11px] leading-5 text-ink-faint">
-          回合结束后检测当前账号，任一时间窗剩余低于阈值即自动换到两窗都≥阈值、短板最厚的账号；
-          真耗尽报错时作兜底。普通会话静默换号，赛马换后续跑当前阶段。无合格账号时回退手动选号。
+          {t('agyAutoSwitchHint')}
         </div>
         {agyAutoSwitch && (
-          <div className="mt-2 flex items-center gap-2">
-            <span className="shrink-0 text-[12px] text-ink-soft">切号阈值</span>
-            <input
-              type="number"
-              min={0}
-              max={100}
-              value={agyThreshold}
-              onChange={(e) => {
-                const v = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
-                void saveSettings({ antigravityQuotaThreshold: v });
-              }}
-              className="w-16 rounded-md border border-line bg-bg px-2 py-1 text-right font-mono text-[12px] outline-none transition focus:border-accent"
-            />
-            <span className="shrink-0 text-[11px] text-ink-faint">% 剩余（任一时间窗低于此值即视为不足）</span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            {/* 5h 窗桶小消耗快但自愈快，阈值宜高；7d 窗桶大恢复慢，阈值宜低（否则全池同时不合格） */}
+            {(
+              [
+                [t('agyWin5h'), agyThreshold5h, 'antigravityQuotaThreshold5h'],
+                [t('agyWin7d'), agyThreshold7d, 'antigravityQuotaThreshold7d'],
+              ] as const
+            ).map(([label, value, key]) => (
+              <label key={key} className="flex items-center gap-2">
+                <span className="shrink-0 text-[12px] text-ink-soft">{label}{t('agyThresholdSuffix')}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={value}
+                  onChange={(e) => {
+                    const v = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
+                    void saveSettings({ [key]: v });
+                  }}
+                  className="w-16 rounded-md border border-line bg-bg px-2 py-1 text-right font-mono text-[12px] outline-none transition focus:border-accent"
+                />
+                <span className="shrink-0 text-[11px] text-ink-faint">%</span>
+              </label>
+            ))}
+            <span className="basis-full text-[11px] leading-4 text-ink-faint">
+              {t('agyThresholdHint')}
+            </span>
           </div>
         )}
       </div>
       {!snap ? (
         <div className="flex flex-col items-center gap-2 py-6 text-ui text-ink-faint">
           <BrandHero size={48} />
-          读取导入池…
+          {t('agyReadingPool')}
         </div>
       ) : (
         <div className="space-y-1.5">
           {snap.accounts.length === 0 && (
             <div className="rounded-lg border border-dashed border-line px-3 py-2.5 text-[12px] text-ink-faint">
-              尚未导入任何账号 — antigravity 会话的账号切换将不可用。
+              {t('agyNoneImported')}
             </div>
           )}
           {/* 卡片网格：当前活动账号置顶，其余保持导入顺序（仅展示层排序）。 */}
@@ -835,20 +1190,20 @@ function AntigravityAccountsCard(): JSX.Element {
                         {a.email}
                       </span>
                       {isActive ? (
-                        <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">当前</span>
+                        <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">{t('agyCurrent')}</span>
                       ) : (
                         <button
-                          title="切换为 agy 当前账号（覆写 keyring，立即生效）"
+                          title={t('agySwitchToTitle')}
                           onClick={() => switchTo(a.id)}
                           disabled={!!switchingId}
                           className="flex shrink-0 items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-ink-soft transition hover:bg-bg-hover disabled:opacity-50"
                         >
                           {switching && <BrandSpinner size={10} />}
-                          切换
+                          {t('agySwitchBtn')}
                         </button>
                       )}
                       <button
-                        title="从导入池移除（不碰 cockpit）"
+                        title={t('agyRemoveTitle')}
                         onClick={() => remove(a.id)}
                         className="shrink-0 rounded-md p-0.5 text-ink-faint transition hover:bg-bg-hover hover:text-err"
                       >
@@ -866,7 +1221,7 @@ function AntigravityAccountsCard(): JSX.Element {
                               <div key={g.group} className="min-w-0">
                                 <div className="flex items-baseline justify-between gap-1">
                                   <span className="min-w-0 truncate text-[11px] font-medium text-ink-soft" title={g.models?.join(', ')}>
-                                    {g.group}
+                                    {agyWindowLabel(t, g.group)}
                                   </span>
                                   <span className={`shrink-0 font-mono text-[11px] ${color}`}>{remain}%</span>
                                 </div>
@@ -881,25 +1236,25 @@ function AntigravityAccountsCard(): JSX.Element {
                           })}
                         </div>
                       ) : q && !q.ok ? (
-                        <div className="text-[11px] text-ink-faint">额度查询失败：{q.error?.slice(0, 60)}</div>
+                        <div className="text-[11px] text-ink-faint">{t('agyQuotaFailedDetail', { err: q.error?.slice(0, 60) ?? '' })}</div>
                       ) : q ? (
                         // ok 但 0 组：响应成功却解析不出分组（字段漂移，主进程已留档）——明示而非空白。
-                        <div className="text-[11px] text-ink-faint">无额度数据</div>
+                        <div className="text-[11px] text-ink-faint">{t('agyNoQuotaData')}</div>
                       ) : quotaBusy ? (
                         <div className="flex items-center gap-1.5 text-[11px] text-ink-faint">
-                          <BrandSpinner size={11} /> 额度加载中…
+                          <BrandSpinner size={11} /> {t('agyQuotaLoading')}
                         </div>
                       ) : quotaFailed ? (
-                        <div className="text-[11px] text-ink-faint">额度查询失败 — 点右上角刷新重试</div>
+                        <div className="text-[11px] text-ink-faint">{t('agyQuotaFailedRetry')}</div>
                       ) : (
-                        <div className="text-[11px] text-ink-faint">额度未加载</div>
+                        <div className="text-[11px] text-ink-faint">{t('agyQuotaNotLoaded')}</div>
                       )}
                     </div>
                   </div>
                 );
               })}
           </div>
-          {switchError && <div className="text-[11.5px] text-err">切换失败：{switchError}</div>}
+          {switchError && <div className="text-[11.5px] text-err">{t('agySwitchFailed', { err: switchError })}</div>}
           {snap.error && <div className="text-[11.5px] text-warn">{snap.error}</div>}
 
           {!importOpen ? (
@@ -908,21 +1263,21 @@ function AntigravityAccountsCard(): JSX.Element {
                 onClick={openImport}
                 className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover"
               >
-                <Plus size={13} /> 导入账号（从 cockpit 账号库）
+                <Plus size={13} /> {t('agyImportBtn')}
               </button>
               <button
-                title="支持 [{email, refresh_token}] 数组或 {accounts:[…]} 的 JSON 导出文件；同邮箱覆盖更新"
+                title={t('agyImportFileTitle')}
                 onClick={importFromFile}
                 disabled={fileBusy}
                 className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover disabled:opacity-50"
               >
-                {fileBusy ? <BrandSpinner size={13} /> : <Upload size={13} />} 从导出文件导入
+                {fileBusy ? <BrandSpinner size={13} /> : <Upload size={13} />} {t('agyImportFileBtn')}
               </button>
             </div>
           ) : (
             <div className="rounded-lg border border-line px-3 py-2.5">
               <div className="mb-1.5 flex items-center gap-2">
-                <span className="text-[11.5px] font-medium">选择要导入的账号</span>
+                <span className="text-[11.5px] font-medium">{t('agyPickAccounts')}</span>
                 <span className="flex-1" />
                 <button
                   onClick={() => setImportOpen(false)}
@@ -934,15 +1289,15 @@ function AntigravityAccountsCard(): JSX.Element {
               {!candidates ? (
                 <div className="flex flex-col items-center gap-2 py-5 text-[11.5px] text-ink-faint">
                   <BrandHero size={48} />
-                  扫描 cockpit 账号库…
+                  {t('agyScanning')}
                 </div>
               ) : candError ? (
                 <div className="py-2 text-[11.5px] text-err">{candError}</div>
               ) : candidates.length === 0 ? (
-                <div className="py-2 text-[11.5px] text-ink-faint">未找到候选账号（~/.antigravity_cockpit）</div>
+                <div className="py-2 text-[11.5px] text-ink-faint">{t('agyNoCandidates')}</div>
               ) : candidates.every((c) => c.imported) ? (
                 // 已导入的不再列出 — 全部导过时明示而非空白；刷新凭据走文件导入。
-                <div className="py-2 text-[11.5px] text-ink-faint">cockpit 账号已全部导入，无新增候选</div>
+                <div className="py-2 text-[11.5px] text-ink-faint">{t('agyAllImported')}</div>
               ) : (
                 <>
                   <div className="max-h-56 space-y-0.5 overflow-y-auto">
@@ -962,7 +1317,7 @@ function AntigravityAccountsCard(): JSX.Element {
                               onChange={() => togglePick(c.id)}
                             />
                             <span className="min-w-0 flex-1 truncate">{c.email}</span>
-                            {disabled && <span className="shrink-0 text-[10px] text-warn">无凭据</span>}
+                            {disabled && <span className="shrink-0 text-[10px] text-warn">{t('agyNoToken')}</span>}
                           </label>
                         );
                       })}
@@ -974,9 +1329,9 @@ function AntigravityAccountsCard(): JSX.Element {
                       className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[11.5px] font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {busy && <BrandSpinner size={12} />}
-                      导入 {picked.size > 0 ? `${picked.size} 个账号` : ''}
+                      {picked.size > 0 ? t('agyImportN', { n: picked.size }) : t('agyImportWord')}
                     </button>
-                    <span className="text-[10.5px] text-ink-faint">已导入的账号不再列出；刷新凭据可用「从导出文件导入」覆盖</span>
+                    <span className="text-[10.5px] text-ink-faint">{t('agyImportedNote')}</span>
                   </div>
                 </>
               )}
@@ -988,43 +1343,46 @@ function AntigravityAccountsCard(): JSX.Element {
   );
 }
 
-const AUDIT_KIND_LABELS: Record<CompatAuditKind, string> = {
-  'unknown-event': '未识别事件',
-  'rejected-method': '方法被拒',
-  'parse-error': '解析失败',
+const AUDIT_KIND_KEYS: Record<CompatAuditKind, MsgKey> = {
+  'unknown-event': 'auditUnknownEvent',
+  'rejected-method': 'auditRejectedMethod',
+  'parse-error': 'auditParseError',
 };
 
 /** 引擎兼容性诊断 — 各 adapter 降级点的审计计数（未知事件/被拒方法/
  *  解析失败）。用户侧降级静默，这里是维护者的可见入口：引擎升级后
  *  协议漂移（砍方法/加事件/改格式）第一时间在此显形，原始报文样本
- *  可从 JSONL 日志导出排查。 */
-function CompatAuditCard(): JSX.Element {
+ *  可从 JSONL 日志导出排查。传 engine 时只看该引擎（引擎子页内嵌）。 */
+function CompatAuditCard({ engine }: { engine?: EngineId }): JSX.Element {
+  const t = useT();
   const audit = useChatStore((s) => s.compatAudit);
-  const engines = Object.entries(audit?.engines ?? {}) as Array<[EngineId, CompatAuditSnapshot['engines'][EngineId]]>;
+  const engines = (Object.entries(audit?.engines ?? {}) as Array<[EngineId, CompatAuditSnapshot['engines'][EngineId]]>).filter(
+    ([id]) => !engine || id === engine,
+  );
   const hasIssues = engines.some(([, list]) => (list?.length ?? 0) > 0);
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
       <div className="mb-1 flex items-center gap-3">
-        <span className="text-[13px] font-semibold">引擎兼容性诊断</span>
+        <span className="text-[13px] font-semibold">{t('auditTitle')}</span>
         <span className="min-w-0 flex-1" />
         <span className={`rounded-md px-1.5 text-[10px] ${hasIssues ? 'bg-warn/10 text-warn' : 'bg-ok/10 text-ok'}`}>
-          {hasIssues ? '有未识别协议行为' : '未发现协议异常'}
+          {hasIssues ? t('auditHasIssues') : t('auditNoIssues')}
         </span>
       </div>
       <div className="mb-2 text-[11px] leading-5 text-ink-faint">
-        引擎发来不认识的事件/调用被拒/报文解析失败会静默降级不打断使用，但全部记账在此 —
-        引擎升级后若出现条目，说明协议行为漂移，异常时优先据此排查。
+        {t('auditHint')}
       </div>
       {hasIssues && (
         <div className="mb-2 space-y-2">
-          {engines.map(([engine, list]) =>
+          {engines.map(([id, list]) =>
             !list?.length ? null : (
-              <div key={engine}>
-                <div className="mb-0.5 text-[11px] font-medium text-ink-soft">{ENGINE_LABELS[engine] ?? engine}</div>
+              <div key={id}>
+                {/* 引擎子页内嵌时页面语境已明确 — 不重复引擎名小标题 */}
+                {!engine && <div className="mb-0.5 text-[11px] font-medium text-ink-soft">{ENGINE_LABELS[id] ?? id}</div>}
                 <div className="space-y-0.5">
                   {list.map((e) => (
                     <div key={`${e.kind}:${e.detail}`} className="flex items-center gap-2 text-[11.5px]">
-                      <span className="shrink-0 rounded bg-warn/10 px-1 text-[10px] text-warn">{AUDIT_KIND_LABELS[e.kind]}</span>
+                      <span className="shrink-0 rounded bg-warn/10 px-1 text-[10px] text-warn">{t(AUDIT_KIND_KEYS[e.kind])}</span>
                       <span className="min-w-0 flex-1 truncate font-mono text-ink-soft" title={e.detail}>{e.detail}</span>
                       <span className="shrink-0 text-ink-faint">×{e.count}</span>
                       <span className="shrink-0 text-[10.5px] text-ink-faint">{new Date(e.lastTs).toLocaleTimeString()}</span>
@@ -1043,39 +1401,109 @@ function CompatAuditCard(): JSX.Element {
           className="rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover"
           title={audit.logFile}
         >
-          打开审计日志位置（含原始报文样本，反馈问题时请附上）
+          {t('auditOpenLog')}
         </button>
       )}
     </div>
   );
 }
 
+/** 模型展示管理的归一化行 — opencode/omp 目录各自映射后交给 ModelVisibility 渲染。 */
+interface VisibilityRow {
+  slug: string;
+  providerID: string;
+  providerName: string;
+  label: string;
+  contextWindow?: number;
+}
+
+function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX.Element {
+  const t = useT();
+  const hiddenList = useChatStore((s) => s.settings?.opencodeHiddenModels);
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  const rows = useMemo(
+    () =>
+      catalog.models.map((m) => ({
+        slug: m.slug,
+        providerID: m.providerID,
+        providerName: m.providerName,
+        label: m.displayName ?? m.modelID,
+        contextWindow: m.contextWindow,
+      })),
+    [catalog],
+  );
+  return (
+    <ModelVisibility
+      rows={rows}
+      hiddenList={hiddenList}
+      hint={t('ocHideHint')}
+      onPersist={(next) => void saveSettings({ opencodeHiddenModels: next })}
+    />
+  );
+}
+
+/** omp 模型展示管理 — 与 opencode 同款 UI，黑名单存 ompHiddenModels；
+ *  只影响本程序内的选择器/赛马配置，不限制 omp 实际可用模型。 */
+function OmpModelVisibility({ catalog }: { catalog: OmpCatalog }): JSX.Element {
+  const t = useT();
+  const hiddenList = useChatStore((s) => s.settings?.ompHiddenModels);
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  const rows = useMemo(
+    () =>
+      catalog.models.map((m) => ({
+        slug: m.slug,
+        providerID: m.provider,
+        providerName: m.providerName ?? m.provider,
+        label: m.displayName ?? m.modelID,
+        contextWindow: m.contextWindow,
+      })),
+    [catalog],
+  );
+  return (
+    <ModelVisibility
+      rows={rows}
+      hiddenList={hiddenList}
+      hint={t('ompHideHint')}
+      onPersist={(next) => void saveSettings({ ompHiddenModels: next })}
+    />
+  );
+}
+
 /** 模型展示管理 — provider 可折叠分组，每行一个眼睛开关（隐藏行半透明
  *  保留在列表里可随时恢复），搭配 provider 级批量隐藏/显示与搜索过滤。
- *  黑名单即时写回 settings（同本页路由开关 — 不依赖底部保存按钮）。 */
-function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX.Element {
-  const settings = useChatStore((s) => s.settings);
-  const saveSettings = useChatStore((s) => s.saveSettings);
+ *  黑名单经 onPersist 即时写回 settings（同本页路由开关 — 不依赖底部保存按钮）。 */
+function ModelVisibility({
+  rows,
+  hiddenList,
+  hint,
+  onPersist,
+}: {
+  rows: VisibilityRow[];
+  hiddenList: string[] | undefined;
+  hint: string;
+  onPersist: (next: string[]) => void;
+}): JSX.Element {
+  const t = useT();
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const hidden = useMemo(() => new Set(settings?.opencodeHiddenModels ?? []), [settings]);
+  const hidden = useMemo(() => new Set(hiddenList ?? []), [hiddenList]);
   const q = query.trim().toLowerCase();
   const matched = useMemo(
     () =>
       q
-        ? catalog.models.filter(
+        ? rows.filter(
           (m) =>
             m.slug.toLowerCase().includes(q) ||
-            (m.displayName ?? '').toLowerCase().includes(q) ||
+            m.label.toLowerCase().includes(q) ||
             m.providerName.toLowerCase().includes(q),
         )
-        : catalog.models,
-    [catalog, q],
+        : rows,
+    [rows, q],
   );
-  /** provider 分组（保持 catalog 顺序）。 */
+  /** provider 分组（保持目录顺序）。 */
   const groups = useMemo(() => {
-    const out = new Map<string, { name: string; models: OpencodeModelEntry[] }>();
+    const out = new Map<string, { name: string; models: VisibilityRow[] }>();
     for (const m of matched) {
       const g = out.get(m.providerID) ?? { name: m.providerName, models: [] };
       g.models.push(m);
@@ -1085,9 +1513,9 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
   }, [matched]);
 
   const persist = (next: Set<string>): void => {
-    // 只保留当前 catalog 仍存在的 slug — provider 断开后的残留项顺手清理。
-    const alive = new Set(catalog.models.map((m) => m.slug));
-    void saveSettings({ opencodeHiddenModels: [...next].filter((s) => alive.has(s)) });
+    // 只保留当前目录仍存在的 slug — provider 断开后的残留项顺手清理。
+    const alive = new Set(rows.map((m) => m.slug));
+    onPersist([...next].filter((s) => alive.has(s)));
   };
   const toggleOne = (slug: string): void => {
     const next = new Set(hidden);
@@ -1095,7 +1523,7 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
     else next.add(slug);
     persist(next);
   };
-  const setProvider = (models: OpencodeModelEntry[], hide: boolean): void => {
+  const setProvider = (models: VisibilityRow[], hide: boolean): void => {
     const next = new Set(hidden);
     for (const m of models) {
       if (hide) next.add(m.slug);
@@ -1110,14 +1538,14 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
     setExpanded(next);
   };
 
-  const visibleTotal = catalog.models.filter((m) => !hidden.has(m.slug)).length;
+  const visibleTotal = rows.filter((m) => !hidden.has(m.slug)).length;
 
   return (
     <div className="pt-2">
       <div className="mb-2 flex items-center gap-2.5">
-        <span className="text-ui font-semibold text-ink">模型展示</span>
+        <span className="text-ui font-semibold text-ink">{t('mvTitle')}</span>
         <span className="rounded-md bg-bg-panel px-2 py-0.5 text-[11px] text-ink-faint">
-          显示 {visibleTotal} / {catalog.models.length}
+          {t('mvShown', { a: visibleTotal, b: rows.length })}
         </span>
         <span className="flex-1" />
         <div className="flex items-center gap-2 rounded-lg border border-line bg-bg-input px-2.5 py-1.5">
@@ -1125,14 +1553,12 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索模型…"
+            placeholder={t('ocSearchModel')}
             className="w-44 bg-transparent text-ui outline-none placeholder:text-ink-faint"
           />
         </div>
       </div>
-      <div className="mb-2 text-[12px] leading-5 text-ink-faint">
-        隐藏不常用的模型 — 只影响本程序内的模型选择器，不修改 opencode 配置。
-      </div>
+      <div className="mb-2 text-[12px] leading-5 text-ink-faint">{hint}</div>
       <div className="overflow-hidden rounded-lg border border-line bg-bg-input">
         {[...groups.entries()].map(([providerID, g], i) => {
           const open = !!q || expanded.has(providerID);
@@ -1158,7 +1584,7 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
                     }}
                     className="rounded-md px-2 py-1 text-[12px] text-ink-soft transition hover:bg-bg-active hover:text-ink"
                   >
-                    全部隐藏
+                    {t('mvHideAll')}
                   </button>
                   <button
                     onClick={(e) => {
@@ -1167,7 +1593,7 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
                     }}
                     className="rounded-md px-2 py-1 text-[12px] text-ink-soft transition hover:bg-bg-active hover:text-ink"
                   >
-                    全部显示
+                    {t('mvShowAll')}
                   </button>
                 </div>
               </div>
@@ -1182,14 +1608,14 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
                         onClick={() => toggleOne(m.slug)}
                         title={m.slug}
                       >
-                        <span className="min-w-0 flex-1 truncate text-ui">{m.displayName ?? m.modelID}</span>
+                        <span className="min-w-0 flex-1 truncate text-ui">{m.label}</span>
                         {m.contextWindow ? (
                           <span className="shrink-0 text-[11px] text-ink-faint">{fmtCtxK(m.contextWindow)}</span>
                         ) : null}
                         {/* 眼睛常驻可见 — 隐藏/显示的可操作性一目了然，hover 提亮 */}
                         <span
                           className={`shrink-0 rounded p-1 transition ${off ? 'text-ink-soft' : 'text-ink-faint/50 group-hover:text-ink-soft'}`}
-                          title={off ? '显示该模型' : '隐藏该模型'}
+                          title={off ? t('mvShowModel') : t('mvHideModel')}
                         >
                           {off ? <EyeOff size={15} /> : <Eye size={15} />}
                         </span>
@@ -1201,7 +1627,7 @@ function OpencodeModelVisibility({ catalog }: { catalog: OpencodeCatalog }): JSX
             </div>
           );
         })}
-        {!groups.size && <div className="px-3 py-2.5 text-[12px] text-ink-faint">无匹配模型</div>}
+        {!groups.size && <div className="px-3 py-2.5 text-[12px] text-ink-faint">{t('ocNoMatch')}</div>}
       </div>
     </div>
   );
@@ -1221,6 +1647,7 @@ function fmtCtxK(n: number): string {
  *  发起面板打开时以此预填；模型/档位选「跟随默认」（空值）时，
  *  发起面板会自动取引擎默认模型 + 最大思考档。 */
 function RacePane({ settings, commit }: PaneProps): JSX.Element {
+  const t = useT();
   const { modelOptions, effortOptions } = useRoleCatalogs(true);
   const raceAvailability = useChatStore((s) => s.engineAvailability);
   const engineOrder = useEngineOrder();
@@ -1234,11 +1661,11 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
 
   return (
     <div className="space-y-8">
-      <Section title="参赛阵容">
+      <Section title={t('raceLineup')}>
         <label className="flex cursor-pointer select-none items-center justify-between">
           <div>
-            <div className="text-body">默认启用第三选手（选手 C）</div>
-            <div className="mt-0.5 text-[12px] text-ink-faint">选手 A/B 必选；C 可选，发起面板里也可临时开关</div>
+            <div className="text-body">{t('raceEnableCDefault')}</div>
+            <div className="mt-0.5 text-[12px] text-ink-faint">{t('raceEnableCHint')}</div>
           </div>
           <input
             type="checkbox"
@@ -1248,12 +1675,12 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
         </label>
       </Section>
 
-      <Section title="各角色默认（引擎 / 模型 / 思考深度）">
+      <Section title={t('raceRoleDefaults')}>
         <div className="mb-1.5 grid grid-cols-[88px_1fr_1.4fr_110px] gap-2 px-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">
-          <span>角色</span>
-          <span>引擎</span>
-          <span>模型</span>
-          <span>思考深度</span>
+          <span>{t('raceColRole')}</span>
+          <span>{t('engine')}</span>
+          <span>{t('model')}</span>
+          <span>{t('effort')}</span>
         </div>
         {RACE_ROLES.map((role) => {
           const d: RaceRoleDefaultSetting = race.roles[role] ?? { engine: 'codex', modelId: '', effort: '' };
@@ -1261,7 +1688,7 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
           const effOpts = effortOptions(d.engine, d.modelId);
           return (
             <div key={role} className="mb-1.5 grid grid-cols-[88px_1fr_1.4fr_110px] items-center gap-2">
-              <span className="text-[12.5px] font-medium text-ink">{RACE_ROLE_LABELS[role]}</span>
+              <span className="text-[12.5px] font-medium text-ink">{t(raceRoleKey(role))}</span>
               <select
                 value={d.engine}
                 onChange={(e) => patchRole(role, { engine: e.target.value as EngineId, modelId: '', effort: '' })}
@@ -1270,7 +1697,7 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
                 {engineOrder.map((eng) => (
                   <option key={eng} value={eng} disabled={raceAvailability ? !raceAvailability[eng] : false}>
                     {ENGINE_LABELS[eng]}
-                    {raceAvailability && !raceAvailability[eng] ? '（未安装）' : ''}
+                    {raceAvailability && !raceAvailability[eng] ? t('raceNotInstalled') : ''}
                   </option>
                 ))}
               </select>
@@ -1279,7 +1706,7 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
                 onChange={(e) => patchRole(role, { modelId: e.target.value, effort: '' })}
                 className="min-w-0 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent"
               >
-                <option value="">跟随引擎默认</option>
+                <option value="">{t('raceFollowEngineDefault')}</option>
                 {d.modelId && !mOpts.some((o) => o.value === d.modelId) && <option value={d.modelId}>{d.modelId}</option>}
                 {mOpts.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -1293,10 +1720,10 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
                 disabled={effOpts.length === 0}
                 className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-soft outline-none transition focus:border-accent disabled:opacity-60"
               >
-                <option value="">默认（最大档）</option>
+                <option value="">{t('raceEffortDefaultMax')}</option>
                 {effOpts.map((ef) => (
                   <option key={ef} value={ef}>
-                    {EFFORT_LABELS[ef] ?? ef}
+                    {effortLabel(ef)}
                   </option>
                 ))}
               </select>
@@ -1304,7 +1731,7 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
           );
         })}
         <p className="mt-2 text-[11.5px] leading-5 text-ink-faint">
-          这里是发起赛马时的预填默认；每场赛马仍可在发起面板里临时调整。
+          {t('racePaneHint')}
         </p>
       </Section>
     </div>

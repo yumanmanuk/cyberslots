@@ -8,20 +8,12 @@ import { FolderGit2, FolderOpen, MessageCircle, Layers } from 'lucide-react';
 
 import type { EngineId, WorkspaceInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
-import { useT } from '../i18n';
+import { engineHintKey, enginePseudoWsKey, useT } from '../i18n';
 import WorkspaceDialog from './WorkspaceDialog';
-import { EngineIcon, ENGINE_LABELS, useEngineOrder } from './EngineIcon';
+import { EngineIcon, ENGINE_LABELS, PseudoWorkspaceBadge, useEngineOrder } from './EngineIcon';
 import { BrandHero, BrandSpinner } from './brand';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
-
-const ENGINE_HINTS: Record<EngineId, string> = {
-  codex: '主引擎 · app-server · 直连 ~/.codex 配置/登录（可开协议路由）',
-  opencode: '第二引擎 · HTTP · 直连 opencode 已连接的 provider（zen 免费模型免登录可用）',
-  kimi: '第三引擎 · ACP · 直连 ~/.kimi-code 配置（可开协议路由）',
-  omp: '第四引擎 · ACP · 直连 ~/.omp 配置（原生 fork/plan 沙箱，子代理/LSP 全工具面）',
-  antigravity: '第五引擎 · headless · agy CLI（Gemini/Claude 多模型，支持账号切换）',
-};
 
 export default function NewSessionView(): JSX.Element {
   const t = useT();
@@ -91,7 +83,7 @@ export default function NewSessionView(): JSX.Element {
             <button
               key={id}
               ref={(el) => { tabRefs.current[id] = el; }}
-              title={unavailable ? `${ENGINE_HINTS[id]}（未检测到本机安装，详见设置-模型页）` : ENGINE_HINTS[id]}
+              title={unavailable ? `${t(engineHintKey(id))}${t('engineNotDetectedSuffix')}` : t(engineHintKey(id))}
               disabled={unavailable}
               onClick={() => setEngine(id)}
               className={`relative flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-ui transition ${unavailable
@@ -149,11 +141,14 @@ export default function NewSessionView(): JSX.Element {
             <button
               key={w.id}
               disabled={creating}
+              title={w.folders.length > 1 && enginePseudoWsKey(engine) ? t(enginePseudoWsKey(engine)!) : undefined}
               onClick={() => void start('', w.id)}
               className="flex items-center gap-2.5 rounded-xl border border-line bg-bg-input px-4 py-2.5 text-left shadow-sm transition hover:bg-bg-hover disabled:opacity-50"
             >
               <FolderGit2 size={15} className="shrink-0 text-accent" />
               <span className="min-w-0 flex-1 truncate text-ui font-medium">{w.name}</span>
+              {/* 当前选中引擎无原生多根且工作区是多目录 → 事前提醒伪 workspace */}
+              {w.folders.length > 1 && <PseudoWorkspaceBadge engine={engine} />}
               <span className="shrink-0 text-[11px] text-ink-faint">{w.folders.length} {t('folders')}</span>
             </button>
           ))}

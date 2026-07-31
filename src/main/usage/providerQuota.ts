@@ -16,6 +16,7 @@ import { parse as tomlParse } from 'smol-toml';
 
 import type { ProviderQuotaInfo, QuotaProviderId, QuotaTierInfo } from '@shared/types';
 import { codexHomeDir, kimiHomeDir } from '../config/engineConfigs';
+import { L } from '../i18n';
 
 type Json = Record<string, unknown>;
 
@@ -182,7 +183,7 @@ async function fetchJson(url: string, key: string): Promise<Json> {
       headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
       signal: ctrl.signal,
     });
-    if (res.status === 401 || res.status === 403) throw new Error('API key 无效或已过期');
+    if (res.status === 401 || res.status === 403) throw new Error(L('API key 无效或已过期', 'API key invalid or expired'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as Json;
   } finally {

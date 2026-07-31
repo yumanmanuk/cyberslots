@@ -22,6 +22,7 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { L } from '../../i18n';
 import { ThinkSplitter } from '../thinkSplitter';
 import { compatAudit } from '../compatAudit';
 import type { OpencodeEventHub, OpencodeSseEvent } from './OpencodeEventHub';
@@ -38,6 +39,11 @@ export interface OpencodeAdapterOptions {
   resumeSessionId?: string;
   /** 会话没有客户端历史时恢复失败静默降级。 */
   quietResumeFallback?: boolean;
+  /** 多根工作区的其余根目录。opencode 引擎侧无多根概念（单
+   *  directory/worktree 边界），根外访问走 external_directory 权限
+   *  审批（默认 ask）—— 这里通过会话级 permission ruleset 预放行，
+   *  免去每次访问额外目录都弹权限卡。 */
+  extraDirs?: string[];
 }
 
 /** permissionMode → opencode agent（auto/yolo 附加自动应答权限）。 */
@@ -45,11 +51,14 @@ function agentFor(mode: PermissionMode): string {
   return mode === 'plan' ? 'plan' : 'build';
 }
 
-const PERMISSION_OPTIONS: PermissionOptionView[] = [
-  { optionId: 'once', name: '允许一次', kind: 'allow_once' },
-  { optionId: 'always', name: '本会话总是允许', kind: 'allow_always' },
-  { optionId: 'reject', name: '拒绝', kind: 'reject_once' },
-];
+/** 权限选项现用现算 — 标签随当前界面语言（模块级常量会冻结启动时语言）。 */
+function permissionOptions(): PermissionOptionView[] {
+  return [
+    { optionId: 'once', name: L('允许一次', 'Allow once'), kind: 'allow_once' },
+    { optionId: 'always', name: L('本会话总是允许', 'Always allow in this session'), kind: 'allow_always' },
+    { optionId: 'reject', name: L('拒绝', 'Reject'), kind: 'reject_once' },
+  ];
+}
 
 /** 已知且刻意不渲染的 SSE 事件/part 类型 — 不进兼容审计。 */
 const KNOWN_IGNORED_SSE = new Set(['session.status', 'session.diff', 'session.updated', 'message.part.removed', 'message.removed']);
@@ -83,6 +92,8 @@ export class OpencodeAdapter implements EngineAdapter {
   /** 本回合 API 调用计数 — 每个 step-finish = 一次 LLM 请求完成。 */
   private turnApiCalls = 0;
   private readonly pendingPermissions = new Set<string>();
+  /** 服务端命令名拦截表（小写）：GET /command 拉取，prompt 时命中改走原生命令端点。 */
+  private serverCommands = new Set<string>();
 
   constructor(
     private readonly opts: OpencodeAdapterOptions,
@@ -103,7 +114,7 @@ export class OpencodeAdapter implements EngineAdapter {
       if (this.disposed) return;
       if (this.turnDone) {
         // 回合进行中服务器停机 = 真错误：报错 + 结束等待防队列卡死。
-        this.emit({ type: 'error', source: 'engine', message: 'opencode server 进程退出，当前回合中断（下次发送自动重启续接）' });
+        this.emit({ type: 'error', source: 'engine', message: L('opencode server 进程退出，当前回合中断（下次发送自动重启续接）', 'opencode server exited — current turn interrupted (auto-restarts on next send)') });
         this.emit({ type: 'session.status', status: 'error', detail: 'server-exited' });
         this.finishTurn('error');
       } else {
@@ -117,21 +128,23 @@ export class OpencodeAdapter implements EngineAdapter {
 
     // 恢复：opencode 会话服务端持久化，GET 验证存在即可续接。
     let sid = '';
+    let resumed = false;
     if (this.opts.resumeSessionId) {
       const res = await this.api(`/session/${this.opts.resumeSessionId}`);
       if (res.ok) {
         sid = this.opts.resumeSessionId;
+        resumed = true;
       } else if (!this.opts.quietResumeFallback) {
-        this.emit({ type: 'error', source: 'engine', message: `会话恢复失败（HTTP ${res.status}），已新建会话继续` });
+        this.emit({ type: 'error', source: 'engine', message: L(`会话恢复失败（HTTP ${res.status}），已新建会话继续`, `Session resume failed (HTTP ${res.status}) — started a new session to continue`) });
       }
     }
     if (!sid) {
-      const res = await this.api('/session', { method: 'POST', body: '{}' });
-      if (!res.ok) throw new Error(`opencode 建会话失败 (HTTP ${res.status})`);
-      sid = String((res.json as Json)?.id ?? '');
-      if (!sid) throw new Error('opencode 建会话未返回 id');
+      sid = await this.createSession();
     }
     this.sessionID = sid;
+    // 恢复路径不经建会 body —— 额外目录的预放行改走 PATCH 合并
+    //（目录集可能在两次启动间变过；merge 语义重复无害）。
+    if (resumed) await this.grantExtraDirs(sid);
     this.subscribe();
 
     // 模型合法性兑底：合法 slug 必含 '/'（providerID/modelID）——跨引擎
@@ -146,6 +159,9 @@ export class OpencodeAdapter implements EngineAdapter {
     }
     this.emitModels();
     this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
+    // 服务端命令清单（opencode.json/插件/md 命令全集，目录扫描覆盖不到
+    // 前两类）→ 斜杠面板「引擎命令」组 + prompt 拦截表。best effort。
+    await this.refreshCommands().catch(() => undefined);
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.sessionID };
   }
@@ -166,16 +182,13 @@ export class OpencodeAdapter implements EngineAdapter {
 
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     await this.ensureLive();
-    const turnId = ++this.turnId;
-    this.turnHadError = false;
-    this.splitter.reset();
-    this.turnTokens = undefined;
-    this.turnCost = 0;
-    this.turnApiCalls = 0;
-    this.turnStartedAt = Date.now();
-    this.emit({ type: 'turn.started', turnId });
-    this.emit({ type: 'session.status', status: 'running' });
-
+    // 服务端已知命令拦截：server 不解析 message 文本里的斜杠（TUI 职责），
+    // 命中清单即改走原生命令端点；带附件时不拦截（command 端点无 parts 字段）。
+    const slash = /^\/([A-Za-z0-9][\w:.-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
+    if (slash && !attachments?.length && this.serverCommands.has(slash[1]!.toLowerCase())) {
+      await this.command(slash[1]!, (slash[2] ?? '').trim());
+      return;
+    }
     // 附件与 kimi 同策：文本注入路径（file part 的 url 语义未经探针验证）。
     let full = text;
     for (const path of attachments ?? []) full += `\n[附件] ${path}`;
@@ -187,22 +200,60 @@ export class OpencodeAdapter implements EngineAdapter {
     };
     if (providerID && modelID) body.model = { providerID, modelID };
     if (effort) body.variant = effort;
+    await this.runTurn(`/session/${this.sessionID}/message`, body);
+  }
+
+  /** 原生斜杠命令回合：POST /session/{id}/command，服务端展开命令模板
+   *  （opencode server 不解析 message 文本里的斜杠 — TUI 侧职责，
+   *  此处由 SessionManager 的发送侧斜杠路由调度进来）。 */
+  async command(name: string, args: string): Promise<void> {
+    await this.ensureLive();
+    const { providerID, modelID } = this.parseModel();
+    const body: Json = { command: name, arguments: args, agent: agentFor(this.mode) };
+    if (providerID && modelID) body.model = { providerID, modelID };
+    await this.runTurn(`/session/${this.sessionID}/command`, body);
+  }
+
+  /** 服务端命令清单：GET /command → commands.update（斜杠面板）+ 拦截表。 */
+  private async refreshCommands(): Promise<void> {
+    const res = await this.api('/command');
+    if (!res.ok || !Array.isArray(res.json)) return;
+    const commands = (res.json as Array<Record<string, unknown>>)
+      .map((c) => ({
+        name: String(c.name ?? ''),
+        description: c.description == null ? undefined : String(c.description),
+      }))
+      .filter((c) => c.name);
+    this.serverCommands = new Set(commands.map((c) => c.name.toLowerCase()));
+    if (commands.length) this.emit({ type: 'commands.update', commands });
+  }
+
+  /** 共享回合生命周期：HTTP 响应会阻塞到回合完成，但只作错误通道 ——
+   *  resolve 一律以 SSE session.idle 为准（防时序卡死队列）。 */
+  private async runTurn(path: string, body: Json): Promise<void> {
+    const turnId = ++this.turnId;
+    this.turnHadError = false;
+    this.splitter.reset();
+    this.turnTokens = undefined;
+    this.turnCost = 0;
+    this.turnApiCalls = 0;
+    this.turnStartedAt = Date.now();
+    this.emit({ type: 'turn.started', turnId });
+    this.emit({ type: 'session.status', status: 'running' });
 
     try {
       const done = new Promise<void>((resolve) => {
         this.turnDone = resolve;
       });
-      // HTTP 响应会阻塞到回合完成，但只作错误通道 —— resolve 一律以
-      // SSE session.idle 为准（防时序卡死队列）。
-      void this.api(`/session/${this.sessionID}/message`, { method: 'POST', body: JSON.stringify(body) })
+      void this.api(path, { method: 'POST', body: JSON.stringify(body) })
         .then((res) => {
           if (!res.ok) {
-            this.emit({ type: 'error', turnId, source: 'engine', message: `发送失败 (HTTP ${res.status})` });
+            this.emit({ type: 'error', turnId, source: 'engine', message: L(`发送失败 (HTTP ${res.status})`, `Send failed (HTTP ${res.status})`) });
             this.finishTurn('error');
           }
         })
         .catch((err) => {
-          this.emit({ type: 'error', turnId, source: 'client', message: `发送失败: ${errMsg(err)}` });
+          this.emit({ type: 'error', turnId, source: 'client', message: `${L('发送失败', 'Send failed')}: ${errMsg(err)}` });
           this.finishTurn('error');
         });
       await done;
@@ -286,9 +337,7 @@ export class OpencodeAdapter implements EngineAdapter {
     const res = await this.api(`/session/${this.sessionID}`);
     if (!res.ok) {
       // 服务端会话丢失（数据目录变化等）— 重建并同步 engineSessionId。
-      const created = await this.api('/session', { method: 'POST', body: '{}' });
-      if (!created.ok) throw new Error(`opencode 会话重建失败 (HTTP ${created.status})`);
-      this.sessionID = String((created.json as Json)?.id ?? '');
+      this.sessionID = await this.createSession();
       this.emit({ type: 'session.meta', patch: { engineSessionId: this.sessionID } });
     }
     this.subscribe();
@@ -330,13 +379,16 @@ export class OpencodeAdapter implements EngineAdapter {
       case 'session.error': {
         const error = props.error as Json | undefined;
         const data = (error?.data ?? {}) as Json;
-        const message = String(data.message ?? error?.name ?? '未知引擎错误');
+        const message = String(data.message ?? error?.name ?? L('未知引擎错误', 'Unknown engine error'));
         this.turnHadError = true;
         this.emit({ type: 'error', turnId: this.turnId, source: 'provider', message });
         return;
       }
-      case 'permission.updated': {
-        // Permission 对象本体（id 以 per 开头）。auto/yolo → 静默自动应答。
+      case 'permission.updated':
+      case 'permission.asked': {
+        // 1.17.x 发 permission.updated（Permission 对象）；1.18.x 改名
+        // permission.asked（Request 对象，无 title、tool 下挂 callID）。
+        // 两套字段兼容取值，避免升级 server 后权限卡消失。
         const id = String(props.id ?? '');
         if (!id) return;
         if (this.mode === 'auto' || this.mode === 'yolo') {
@@ -344,24 +396,26 @@ export class OpencodeAdapter implements EngineAdapter {
           this.answerPermission(id, this.mode === 'yolo' ? 'always' : 'once');
           return;
         }
+        const tool = (props.tool ?? {}) as Json;
         this.pendingPermissions.add(id);
         this.emit({
           type: 'permission.request',
           turnId: this.turnId,
           requestId: id,
           isQuestion: false,
-          title: String(props.title ?? props.type ?? '权限请求'),
-          toolCallId: props.callID ? String(props.callID) : undefined,
-          options: PERMISSION_OPTIONS,
+          title: String(props.title ?? props.type ?? props.permission ?? L('权限请求', 'Permission request')),
+          toolCallId: firstString(props.callID, tool.callID),
+          options: permissionOptions(),
         });
         this.emit({ type: 'session.status', status: 'awaiting' });
         return;
       }
       case 'permission.replied': {
         // 他端应答（或本端确认回声）— 解除挂起态。
-        const id = String(props.permissionID ?? '');
+        // 1.17.x 字段 permissionID/response；1.18.x 改 requestID/reply。
+        const id = firstString(props.permissionID, props.requestID) ?? '';
         if (id && this.pendingPermissions.delete(id)) {
-          this.emit({ type: 'permission.resolved', requestId: id, optionId: String(props.response ?? '') });
+          this.emit({ type: 'permission.resolved', requestId: id, optionId: firstString(props.response, props.reply) });
           if (this.turnDone) this.emit({ type: 'session.status', status: 'running' });
         }
         return;
@@ -534,6 +588,43 @@ export class OpencodeAdapter implements EngineAdapter {
     const idx = this.modelId.indexOf('/');
     if (idx <= 0) return { providerID: '', modelID: '' };
     return { providerID: this.modelId.slice(0, idx), modelID: this.modelId.slice(idx + 1) };
+  }
+
+  /** 额外根目录 → 会话级 external_directory allow 规则。pattern 用正斜杠
+   *  `dir/*`：opencode 的 Wildcard.match 把 `*` 展开为跨斜杠的 `.*` 且
+   *  双侧反斜杠归一化，整棵子树（含嵌套子目录的请求 glob）都命中。 */
+  private extraDirRules(): Json[] {
+    return (this.opts.extraDirs ?? []).map((dir) => ({
+      permission: 'external_directory',
+      pattern: `${dir.replaceAll('\\', '/').replace(/\/+$/, '')}/*`,
+      action: 'allow',
+    }));
+  }
+
+  /** 新建会话；多根工作区时建会 body 直接携带预放行规则（会话级
+   *  ruleset 经 merge 后优先于 agent 默认的 external_directory ask）。
+   *  旧版 server 不认 permission 字段时退回空 body 重试，不阻断建会。 */
+  private async createSession(): Promise<string> {
+    const rules = this.extraDirRules();
+    let res = await this.api('/session', {
+      method: 'POST',
+      body: rules.length ? JSON.stringify({ permission: rules }) : '{}',
+    });
+    if (!res.ok && rules.length) {
+      res = await this.api('/session', { method: 'POST', body: '{}' });
+    }
+    if (!res.ok) throw new Error(L(`opencode 建会话失败 (HTTP ${res.status})`, `opencode session creation failed (HTTP ${res.status})`));
+    const sid = String((res.json as Json)?.id ?? '');
+    if (!sid) throw new Error(L('opencode 建会话未返回 id', 'opencode session creation returned no id'));
+    return sid;
+  }
+
+  /** 已存会话（resume）补预放行：PATCH /session/{id} 的 permission
+   *  服务端与现有规则 merge。失败静默 —— 兜底路径是权限卡照弹。 */
+  private async grantExtraDirs(sid: string): Promise<void> {
+    const rules = this.extraDirRules();
+    if (!rules.length) return;
+    await this.api(`/session/${sid}`, { method: 'PATCH', body: JSON.stringify({ permission: rules }) }).catch(() => undefined);
   }
 
   private async api(path: string, init?: { method?: string; body?: string }): Promise<{ ok: boolean; status: number; json: unknown }> {

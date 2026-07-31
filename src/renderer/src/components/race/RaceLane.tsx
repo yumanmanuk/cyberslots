@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { BrandHero, BrandSpinner } from '../brand';
 
 import { useChatStore } from '../../store/chatStore';
+import { useT } from '../../i18n';
 import EliminateButton from './EliminateButton';
 import MessageList from '../MessageList';
 
@@ -48,6 +49,7 @@ export default function RaceLane({
   /** 本阶段产物已落盘 = 真冲线（缺省：!running 视为已冲线，兼容参考区/执行道）。 */
   finished?: boolean;
 }): JSX.Element {
+  const t = useT();
   const messages = useChatStore((s) => (sessionId ? s.ui[sessionId]?.messages : undefined));
   // 重启后会话消息是懒加载的（仅 selectSession 时水合）；泳道不走
   // 选择链路，需自行触发一次，否则已冲线角色（如执行者）恢复后
@@ -118,13 +120,13 @@ export default function RaceLane({
         </div>
         <div className="ml-auto flex items-center gap-1 text-[11px] text-ink-faint">
           {done ? (
-            '已冲线 🏁'
+            t('raceLaneFinished')
           ) : showBusy ? (
             <>
-              <BrandSpinner size={11} /> 进行中
+              <BrandSpinner size={11} /> {t('raceLaneRunning')}
               {onStop && sessionId && (
                 <button
-                  title="中止该选手当前回合（可随后⚙调整配置并重试，只重跑该选手）"
+                  title={t('raceLaneStopTitle')}
                   onClick={onStop}
                   className="ml-1 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err"
                 >
@@ -134,14 +136,14 @@ export default function RaceLane({
             </>
           ) : (
             <>
-              <span className="font-medium text-warn">已停止</span>
+              <span className="font-medium text-warn">{t('raceLaneStopped')}</span>
               {onRetry && sessionId && (
                 <button
-                  title="只重跑本选手当前回合（可先⚙调整其配置；另一侧不受影响）"
+                  title={t('raceLaneRetryTitle')}
                   onClick={onRetry}
                   className="ml-0.5 flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[11px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
                 >
-                  <RotateCcw size={10} /> 重试
+                  <RotateCcw size={10} /> {t('raceRetry')}
                 </button>
               )}
             </>
@@ -164,10 +166,10 @@ export default function RaceLane({
             {showBusy ? (
               <>
                 <BrandHero size={48} />
-                等待输出…
+                {t('raceWaitingOutput')}
               </>
             ) : (
-              '（无输出）'
+              t('raceNoOutput')
             )}
           </div>
         ) : (

@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { app, net } from 'electron';
 
 import type { AgyAccount, AgyAccountsSnapshot, AgyActiveQuota, AgyImportCandidate, AgyQuotaGroup, AgyQuotaInfo } from '@shared/types';
+import { L } from '../../i18n';
 import { compatAudit } from '../compatAudit';
 
 const KEYRING_TARGET = 'gemini:antigravity';
@@ -41,7 +42,7 @@ async function gFetch(url: string, init: RequestInit): Promise<Response> {
     return await net.fetch(url, { ...init, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (e) {
     if (e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
-      throw new Error(`请求超时（${FETCH_TIMEOUT_MS / 1000}s，检查网络/代理）: ${new URL(url).host}`);
+      throw new Error(L(`请求超时（${FETCH_TIMEOUT_MS / 1000}s，检查网络/代理）: ${new URL(url).host}`, `Request timed out (${FETCH_TIMEOUT_MS / 1000}s — check network/proxy): ${new URL(url).host}`));
     }
     throw e;
   }
@@ -76,8 +77,10 @@ function loadEnterpriseClient(): OAuthClient {
       /* try next */
     }
   }
-  throw new Error(
+  throw new Error(L(
     '缺少 antigravity_enterprise client 凭据：请设置环境变量 AGY_ENTERPRISE_ID/AGY_ENTERPRISE_SECRET，或提供 .dev/agy-clients.json。',
+    'Missing antigravity_enterprise client credentials: set AGY_ENTERPRISE_ID/AGY_ENTERPRISE_SECRET env vars, or provide .dev/agy-clients.json.',
+  ),
   );
 }
 
@@ -159,7 +162,7 @@ export function listAgyAccounts(): AgyAccountsSnapshot {
     }));
     snap.active = readActiveEmail();
   } catch (err) {
-    snap.error = `读取导入池失败: ${err instanceof Error ? err.message : String(err)}`;
+    snap.error = `${L('读取导入池失败', 'Failed to read the import pool')}: ${err instanceof Error ? err.message : String(err)}`;
   }
   return snap;
 }
@@ -187,7 +190,7 @@ export function listAgyImportCandidates(): { candidates: AgyImportCandidate[]; e
       }));
     return { candidates };
   } catch (err) {
-    return { candidates: [], error: `读取 cockpit 账号库失败: ${err instanceof Error ? err.message : String(err)}` };
+    return { candidates: [], error: `${L('读取 cockpit 账号库失败', 'Failed to read the cockpit account store')}: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -214,7 +217,7 @@ export function importAgyAccounts(ids: string[]): AgyAccountsSnapshot {
   writeImportedStore(store);
   invalidateQuotaCaches();
   const snap = listAgyAccounts();
-  if (failed.length) snap.error = `${failed.length} 个账号缺少凭据，未导入`;
+  if (failed.length) snap.error = L(`${failed.length} 个账号缺少凭据，未导入`, `${failed.length} account(s) missing credentials — not imported`);
   return snap;
 }
 
@@ -238,14 +241,14 @@ export function importAgyAccountsFromFile(filePath: string): AgyAccountsSnapshot
     parsed = JSON.parse(readFileSync(filePath, 'utf8'));
   } catch (err) {
     const snap = listAgyAccounts();
-    snap.error = `文件读取/解析失败: ${err instanceof Error ? err.message : String(err)}`;
+    snap.error = `${L('文件读取/解析失败', 'Failed to read/parse the file')}: ${err instanceof Error ? err.message : String(err)}`;
     return snap;
   }
   const wrapped = (parsed as { accounts?: unknown }) ?? {};
   const raw = Array.isArray(parsed) ? parsed : Array.isArray(wrapped.accounts) ? wrapped.accounts : null;
   if (!raw) {
     const snap = listAgyAccounts();
-    snap.error = '无法识别的文件格式：应为账号数组或 {accounts:[…]}';
+    snap.error = L('无法识别的文件格式：应为账号数组或 {accounts:[…]}', 'Unrecognized file format: expected an account array or {accounts:[…]}');
     return snap;
   }
   const store = readImportedStore();
@@ -274,7 +277,7 @@ export function importAgyAccountsFromFile(filePath: string): AgyAccountsSnapshot
   writeImportedStore(store);
   invalidateQuotaCaches();
   const snap = listAgyAccounts();
-  if (skipped) snap.error = `${skipped} 条缺少 email/refresh_token，已跳过`;
+  if (skipped) snap.error = L(`${skipped} 条缺少 email/refresh_token，已跳过`, `${skipped} entries missing email/refresh_token — skipped`);
   return snap;
 }
 
@@ -306,10 +309,10 @@ async function refreshWithEnterprise(refreshToken: string): Promise<RefreshedTok
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`刷新失败 (${res.status}): ${txt.slice(0, 200)}`);
+    throw new Error(`${L('刷新失败', 'Token refresh failed')} (${res.status}): ${txt.slice(0, 200)}`);
   }
   const t = (await res.json()) as { access_token?: string; id_token?: string; expires_in?: number };
-  if (!t.access_token) throw new Error('刷新响应无 access_token');
+  if (!t.access_token) throw new Error(L('刷新响应无 access_token', 'Refresh response has no access_token'));
   return { access_token: t.access_token, id_token: t.id_token, expires_in: t.expires_in ?? 3599 };
 }
 
@@ -417,7 +420,7 @@ if (-not $ok) { Write-Error ("CredWrite failed err=" + $err); exit 1 }
 Write-Output 'OK'
 `;
   const res = await runPowerShellScript(script, { 'blob.json': blobJson });
-  if (res.code !== 0) throw new Error(`keyring 写入失败: ${(res.stderr || res.stdout).trim().slice(0, 200)}`);
+  if (res.code !== 0) throw new Error(`${L('keyring 写入失败', 'keyring write failed')}: ${(res.stderr || res.stdout).trim().slice(0, 200)}`);
 }
 
 function updateGoogleAccountsActive(email: string): void {
@@ -447,7 +450,7 @@ function updateGoogleAccountsActive(email: string): void {
  */
 export async function switchAgyAccount(accountId: string): Promise<{ email: string }> {
   const acct = readImportedStore().accounts.find((a) => a.id === accountId);
-  if (!acct) throw new Error(`账号 ${accountId} 不在导入池中 — 请先在「设置 → 模型 → Antigravity 账号」导入`);
+  if (!acct) throw new Error(L(`账号 ${accountId} 不在导入池中 — 请先在「设置 → 模型 → Antigravity 账号」导入`, `Account ${accountId} is not in the import pool — import it first under Settings → Engines → Antigravity accounts`));
   const refreshed = await refreshWithEnterprise(acct.refreshToken);
   const blob = buildKeyringBlob(acct.refreshToken, refreshed, acct.idToken);
   await credWriteBlob(blob);
@@ -489,7 +492,7 @@ async function queryOneAccount(account: AgyAccount): Promise<AgyQuotaInfo> {
   const info: AgyQuotaInfo = { email: account.email, accountId: account.id, ok: false, groups: [], queriedAt: Date.now() };
   try {
     const rt = readImportedStore().accounts.find((a) => a.id === account.id)?.refreshToken;
-    if (!rt) throw new Error('账号不在导入池中');
+    if (!rt) throw new Error(L('账号不在导入池中', 'Account is not in the import pool'));
     const refreshed = await refreshWithEnterprise(rt);
     const { base, projectId } = await loadCodeAssist(refreshed.access_token);
     info.groups = await retrieveQuotaSummary(base, refreshed.access_token, projectId);
@@ -515,7 +518,7 @@ export async function queryActiveAgyQuota(force = false): Promise<AgyActiveQuota
       data.email = snap.active;
       // 活动邮箱 → 导入池对应账号（拿 refresh_token）；未导入则无法代查。
       const acct = snap.accounts.find((a) => snap.active && a.email === snap.active);
-      if (!acct) throw new Error('当前活动账号未导入本程序');
+      if (!acct) throw new Error(L('当前活动账号未导入本程序', 'The currently active account is not imported into this app'));
       data.email = acct.email;
       const one = await queryOneAccount(acct);
       data.ok = one.ok;
@@ -552,7 +555,7 @@ async function loadCodeAssist(accessToken: string): Promise<{ base: string; proj
       lastErr = String(e);
     }
   }
-  throw new Error(`loadCodeAssist 失败: ${lastErr}`);
+  throw new Error(`${L('loadCodeAssist 失败', 'loadCodeAssist failed')}: ${lastErr}`);
 }
 
 /** retrieveUserQuotaSummary → 归一化为「分组周额度」。字段宽松解析

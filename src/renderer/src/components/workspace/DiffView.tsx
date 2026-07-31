@@ -9,6 +9,7 @@ import { RotateCcw, X } from 'lucide-react';
 
 import type { SessionChangeDiff } from '@shared/ipc';
 import { BrandHero } from '../brand';
+import { useT } from '../../i18n';
 
 type Row = { t: 'ctx' | 'add' | 'del'; text: string; oldN?: number; newN?: number };
 
@@ -27,6 +28,7 @@ export default function DiffView({
   onClose: () => void;
   onRevert: () => void;
 }): JSX.Element {
+  const t = useT();
   const [data, setData] = useState<SessionChangeDiff | null>(null);
   useEffect(() => {
     let alive = true;
@@ -52,13 +54,13 @@ export default function DiffView({
         <span className="font-mono text-[11px] text-ok">+{adds}</span>
         <span className="font-mono text-[11px] text-err">-{dels}</span>
         <button
-          title="回退此文件到编辑前"
+          title={t('wsRevertFileTitle')}
           onClick={onRevert}
           className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-err"
         >
           <RotateCcw size={13} />
         </button>
-        <button title="关闭" onClick={onClose} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-ink">
+        <button title={t('close')} onClick={onClose} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-ink">
           <X size={14} />
         </button>
       </div>
@@ -67,10 +69,10 @@ export default function DiffView({
           <div className="flex flex-col items-center justify-center gap-2 px-3 py-8 text-ink-faint">
             {/* 面板内容区级等待按规范用 BrandHero */}
             <BrandHero size={48} />
-            加载中…
+            {t('loading')}
           </div>
         ) : rows.length === 0 ? (
-          <div className="px-3 py-8 text-center text-ink-faint">无差异</div>
+          <div className="px-3 py-8 text-center text-ink-faint">{t('diffNoChange')}</div>
         ) : (
           rows.map((r, i) => (
             <div

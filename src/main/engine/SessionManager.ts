@@ -11,17 +11,22 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path';
 import type { WebContents } from 'electron';
 
-import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
+import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, PermissionOptionView, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
+import { ENGINE_LABELS } from '@shared/types';
 import type { SessionChangeDiff, SessionChangeEntry } from '@shared/ipc';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
+import { KimiKapAdapter } from './kimi/KimiKapAdapter';
+import type { KapServerHost } from './kimi/KapServerHost';
 import { CodexAdapter } from './codex/CodexAdapter';
 import { ChangeTracker } from './changeTracker';
+import { compatAudit } from './compatAudit';
 import { OpencodeAdapter } from './opencode/OpencodeAdapter';
 import { OmpAdapter } from './omp/OmpAdapter';
 import { AntigravityAdapter } from './antigravity/AntigravityAdapter';
+import { ClaudeAdapter } from './claude/ClaudeAdapter';
 import type { OpencodeServerHost } from './opencode/OpencodeServerHost';
 import type { OpencodeEventHub } from './opencode/OpencodeEventHub';
 import {
@@ -33,7 +38,9 @@ import {
   resolveKimiRouteUpstreams,
 } from '../config/engineConfigs';
 import type { SettingsStore } from '../config/settings';
+import { L } from '../i18n';
 import type { AiServerHost } from '../proxy/AiServerHost';
+import { routeSlashPrompt } from '../slash/slashService';
 
 interface LiveSession {
   meta: SessionMeta;
@@ -73,6 +80,7 @@ export class SessionManager {
     private readonly proxy: AiServerHost,
     private readonly opencodeHost: OpencodeServerHost,
     private readonly opencodeHub: OpencodeEventHub,
+    private readonly kapHost: KapServerHost,
   ) {
     this.loadPersistedMetas();
   }
@@ -92,14 +100,16 @@ export class SessionManager {
     const id = randomUUID();
     const settings = this.settings.get();
     const workspace = req.workspaceId ? settings.workspaces.find((w) => w.id === req.workspaceId) : undefined;
-    // Workspace sessions run in the first root; the remaining roots are
-    // announced to the engine via a one-shot context prefix (kimi ACP has
-    // no stable multi-root field yet — 方案 P1 的提示注入路径).
+    // Workspace sessions run in the first root. Extra roots reach engines
+    // through two channels: a one-shot context prefix (认知，所有引擎) +
+    // per-engine native 硬放行 (claude --add-dir / codex writable_roots /
+    // omp --add-dir / opencode 会话级权限预放行；kimi acp 无任何原生
+    // 通道 — 已验证 CLI/ACP 均不收多根参数，仅剩提示注入).
     const cwd = workspace?.folders[0] ?? req.cwd ?? '';
     const meta: SessionMeta = {
       id,
       engine: req.engine,
-      title: req.title ?? '新会话',
+      title: req.title ?? L('新会话', 'New chat'),
       cwd: cwd || this.makeScratchDir(id),
       chatMode: cwd ? 'work' : 'chat',
       workspaceId: workspace?.id,
@@ -142,6 +152,16 @@ export class SessionManager {
       engineText = `${s.meta.contextSeed}\n\n用户消息：${text}`;
       s.meta.contextSeed = undefined;
       this.persistMetas();
+    } else if (text.startsWith('/')) {
+      // 发送侧斜杠路由：引擎不解析斜杠文本时客户端补齐执行语义
+      //（opencode 命令走原生端点；codex/antigravity 展开模板/技能）。
+      const route = await routeSlashPrompt(s.meta.cwd, s.meta.engine, text).catch(() => null);
+      if (route?.type === 'command' && s.adapter?.command) {
+        await s.adapter.command(route.name, route.args);
+        this.touch(s.meta);
+        return;
+      }
+      if (route?.type === 'text') engineText = route.text;
     }
     await s.adapter?.prompt(engineText, attachments, effort);
     this.touch(s.meta);
@@ -163,11 +183,24 @@ export class SessionManager {
   private async startRuntime(s: LiveSession): Promise<void> {
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
+    // 能力快照：单一真源 = adapter 可选方法存在性（同一引擎不同通道
+    // 能力不同，如 kimi KAP/ACP）— UI 据此显隐 goal/steer 等控件。
+    s.meta.capabilities = {
+      goal: !!adapter.setGoal,
+      steer: !!adapter.steer,
+      fork: !!adapter.fork,
+      compact: !!adapter.compact,
+      swarm: !!adapter.setSwarm,
+    };
     // 预热/唤醒的状态过渡只持久化，不刷 updatedAt — 否则选中即预热
     // 会把会话顶到侧栏顶部，快速连点时列表顺序乱跳。
     s.meta.status = 'starting';
     this.persistMetas();
     this.forward(s.meta.id, { type: 'session.status', status: 'starting' });
+    this.forward(s.meta.id, {
+      type: 'session.meta',
+      patch: { capabilities: s.meta.capabilities, kimiChannel: s.meta.kimiChannel },
+    });
     try {
       const { engineSessionId } = await adapter.start();
       s.meta.engineSessionId = engineSessionId;
@@ -182,7 +215,7 @@ export class SessionManager {
       this.forward(s.meta.id, {
         type: 'error',
         source: 'client',
-        message: `会话启动失败: ${err instanceof Error ? err.message : String(err)}`,
+        message: `${L('会话启动失败', 'Session failed to start')}: ${err instanceof Error ? err.message : String(err)}`,
       });
       await adapter.dispose().catch(() => undefined);
       throw err;
@@ -209,22 +242,32 @@ export class SessionManager {
    * Preferred path is the engine's native session/fork; kimi CLI 0.29.1
    * rejects it (-32601, scripts/probe-fork.mjs), so we fall back to a
    * fresh engine session seeded with the serialized parent history on
-   * first prompt. Either way the client copies the folded message list
-   * so the branch renders the full context immediately.
+   * first prompt. Either way the full parent context is preserved (native
+   * engineSessionId or contextSeed) and the folded history is copied into
+   * the branch's message store so it survives restarts — but the branch
+   * records forkSeedCount so SideChatPanel can hide that inherited history
+   * and only render questions asked inside the branch (§4.8).
    */
   async fork(sessionId: string): Promise<SessionMeta> {
     const src = this.require(sessionId);
     await this.ensureRuntime(src);
-    const native = src.adapter?.fork ? await src.adapter.fork() : null;
+    // claude 原生分叉：父会话有 engineSessionId 时，新会话首个 prompt 以
+    // --resume <父> --fork-session 分叉（引擎侧真分支，免重放历史）。
+    const claudeFork = src.meta.engine === 'claude' && src.meta.engineSessionId ? src.meta.engineSessionId : undefined;
+    const native = !claudeFork && src.adapter?.fork ? await src.adapter.fork() : null;
     const id = randomUUID();
     const history = this.getMessages(sessionId);
     const meta: SessionMeta = {
       ...src.meta,
       id,
       engineSessionId: native?.engineSessionId, // undefined → fresh session on revive
+      forkPendingFromId: claudeFork, // claude: 首个 prompt 时 --fork-session 的父 id
       title: `⑂ ${src.meta.title.replace(/^⑂ /, '')}`,
       parentId: src.meta.id,
-      contextSeed: native ? undefined : serializeHistory(history),
+      chained: undefined, // sidechat 分支平级展示，不折叠父会话（区别于 forkToEngine）
+      // 原生分叉（native 或 claudeFork）无需重放种子；否则注入历史。
+      contextSeed: native || claudeFork ? undefined : serializeHistory(history),
+      forkSeedCount: history.length, // 面板隐藏这段继承历史，仅显示分支内新问答
       status: 'closed', // revived lazily on first prompt
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -238,20 +281,37 @@ export class SessionManager {
 
   /**
    * “换引擎继续聊”：历史重放式分支到另一个引擎（引擎侧无法跨引擎
-   * 迁移会话，所以始终走 contextSeed 前缀注入）。
+   * 迁移会话，所以始终走 contextSeed 前缀注入）。数据上是新会话（干净的
+   * 分支模型，父会话原生上下文完整保留可无损回切），视觉上接管父会话：
+   * 沿用原标题、chained 标记让侧栏折叠链上祖先、消息流末尾追加切换分割线。
    */
-  forkToEngine(sessionId: string, engine: SessionMeta['engine']): SessionMeta {
+  async forkToEngine(sessionId: string, engine: SessionMeta['engine']): Promise<SessionMeta> {
     const src = this.require(sessionId);
-    const id = randomUUID();
     const history = this.getMessages(sessionId);
     const engineChanged = engine !== src.meta.engine;
+    // 空白会话（一条消息都没有）：原地换引擎 — 无历史可保、无上下文可迁，
+    // fork 只会留下一个毫无意义的空祖先（侧栏 ⎇ 噪音）；等价于新会话页
+    // 重选引擎：不产生分支链、不写切换分割线；contextSeed（多根工作区提示）
+    // 保留继续待注入。await close 防竞态：fire-and-forget 的 dispose 回调会
+    // 把随后懒唤醒的新 adapter 置空造成孤儿进程。
+    if (history.length === 0) {
+      await this.close(sessionId);
+      src.meta.engine = engine;
+      src.meta.engineSessionId = undefined;
+      if (engineChanged) src.meta.modelId = '';
+      src.meta.permissionMode = engine === 'antigravity' ? 'auto' : src.meta.permissionMode;
+      this.touch(src.meta);
+      return src.meta;
+    }
+    const id = randomUUID();
     const meta: SessionMeta = {
       ...src.meta,
       id,
       engine,
       engineSessionId: undefined,
-      title: `⇄ ${src.meta.title.replace(/^[⑂⇄] /, '')}`,
+      title: src.meta.title.replace(/^[⑂⇄] /, ''), // 视觉连续：沿用原标题，不加分支前缀
       parentId: src.meta.id,
+      chained: true, // 侧栏把父会话折叠进本分支（同一条对话只显示最新叶子）
       contextSeed: serializeHistory(history),
       // 切到不同引擎时重置模型（否则沿用上一个引擎的模型名）；空串 = 目标引擎用其默认。
       modelId: engineChanged ? '' : src.meta.modelId,
@@ -264,14 +324,25 @@ export class SessionManager {
     };
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
-    this.saveMessages(id, history);
+    // 聊天区呈现为原地换引擎：历史原样带入 + 一条切换分割线。
+    const divider: UnifiedMessage = {
+      kind: 'system',
+      id: randomUUID(),
+      turnId: -1,
+      text: L(
+        `⇄ 已切换引擎 ${ENGINE_LABELS[src.meta.engine]} → ${ENGINE_LABELS[engine]}，上下文已接续`,
+        `⇄ Engine switched ${ENGINE_LABELS[src.meta.engine]} → ${ENGINE_LABELS[engine]}, context carried over`,
+      ),
+      createdAt: Date.now(),
+    };
+    this.saveMessages(id, [...history, divider]);
     return meta;
   }
 
   async compact(sessionId: string): Promise<void> {
     const s = this.require(sessionId);
     await this.ensureRuntime(s);
-    if (!s.adapter?.compact) throw new Error(`引擎 ${s.meta.engine} 不支持上下文压缩`);
+    if (!s.adapter?.compact) throw new Error(L(`引擎 ${s.meta.engine} 不支持上下文压缩`, `Engine ${s.meta.engine} does not support context compaction`));
     await s.adapter.compact();
   }
 
@@ -312,11 +383,11 @@ export class SessionManager {
   async undoToMessage(sessionId: string, messageId: string): Promise<{ text: string; attachments?: string[] }> {
     const s = this.require(sessionId);
     if (s.meta.status === 'running' || s.meta.status === 'awaiting') {
-      throw new Error('会话进行中，无法回退');
+      throw new Error(L('会话进行中，无法回退', 'Session is busy — cannot undo'));
     }
     const messages = this.getMessages(sessionId);
     const idx = messages.findIndex((m) => m.kind === 'user' && m.id === messageId);
-    if (idx < 0) throw new Error('未找到该提问');
+    if (idx < 0) throw new Error(L('未找到该提问', 'Question message not found'));
     const target = messages[idx] as Extract<UnifiedMessage, { kind: 'user' }>;
 
     // 1. 磁盘文件还原到该提问发送前的快照（无快照 = 仅移除消息）。
@@ -350,18 +421,28 @@ export class SessionManager {
     return ok;
   }
 
-  /** Engine-native goal (codex only). Throws for engines without a goal API. */
+  /** Engine-native goal (codex thread/goal 或 kimi KAP goal_objective)。
+   *  Throws for adapters without a goal API（UI 已按能力快照隐藏入口）。 */
   async setGoal(sessionId: string, objective: string): Promise<void> {
     const s = this.require(sessionId);
     await this.ensureRuntime(s);
-    if (!s.adapter?.setGoal) throw new Error(`引擎 ${s.meta.engine} 不支持原生 Goal`);
+    if (!s.adapter?.setGoal) throw new Error(L(`引擎 ${s.meta.engine} 不支持原生 Goal`, `Engine ${s.meta.engine} does not support native Goal`));
     await s.adapter.setGoal(objective);
   }
 
   async controlGoal(sessionId: string, action: GoalControlAction): Promise<void> {
     const s = this.require(sessionId);
-    if (!s.adapter?.controlGoal) throw new Error(`引擎 ${s.meta.engine} 不支持原生 Goal`);
+    if (!s.adapter?.controlGoal) throw new Error(L(`引擎 ${s.meta.engine} 不支持原生 Goal`, `Engine ${s.meta.engine} does not support native Goal`));
     await s.adapter.controlGoal(action);
+  }
+
+  /** 原生 swarm 模式开关（kimi KAP）。无原生面的引擎抛错 — UI 已按
+   *  capabilities.swarm 分流到提示词引导，正常不会走到这。 */
+  async setSwarm(sessionId: string, active: boolean): Promise<void> {
+    const s = this.require(sessionId);
+    await this.ensureRuntime(s);
+    if (!s.adapter?.setSwarm) throw new Error(L(`引擎 ${s.meta.engine} 不支持原生 Swarm`, `Engine ${s.meta.engine} does not support native Swarm`));
+    await s.adapter.setSwarm(active);
   }
 
   async setModel(sessionId: string, modelId: string): Promise<void> {
@@ -604,27 +685,55 @@ export class SessionManager {
     // 空会话（无客户端历史）恢复失败时静默降级 — 没发过消息的线程
     // 引擎侧常未落盘（no rollout），报错纯噪音。
     const quietResumeFallback = resumeSessionId ? this.getMessages(meta.id).length === 0 : undefined;
+    // 多根工作区的其余根目录（提示注入只解决「认知」，有访问控制的
+    // 引擎还需原生硬放行）。读当前 settings 而非建会时快照 — 目录
+    // 增删后的懒唤醒/重启自动生效。
+    const wsFolders = meta.workspaceId
+      ? settings.workspaces.find((w) => w.id === meta.workspaceId)?.folders ?? []
+      : [];
+    const extraRoots = wsFolders.filter((f) => f !== meta.cwd);
     if (meta.engine === 'kimi') {
       // 路由开：镜像 home（base_url 指向本地 chat 前端）；关：不设
       // KIMI_CODE_HOME → kimi 直接用用户自己的 ~/.kimi-code 配置。
+      // 多根工作区：kimi 无原生多根通道 — 仅靠 contextSeed 提示注入，
+      // 好在 kimi 的文件工具允许绝对路径访问工作区外目录。
       let kimiHome: string | undefined;
       if (settings.routing.kimi) {
         const kimiCfg = readKimiConfig();
-        if (!kimiCfg.exists) throw new Error(`未找到 Kimi Code 配置（${kimiCfg.configPath}），无法启用路由`);
+        if (!kimiCfg.exists) throw new Error(L(`未找到 Kimi Code 配置（${kimiCfg.configPath}），无法启用路由`, `Kimi Code config not found (${kimiCfg.configPath}) — cannot enable routing`));
         const port = await this.proxy.ensureKimiFront(resolveKimiRouteUpstreams(kimiCfg));
         kimiHome = buildKimiRouteMirror(app.getPath('userData'), kimiCfg, port);
       }
-      return new KimiAdapter(
-        {
-          kimiHome,
-          cwd: meta.cwd,
-          modelId: meta.modelId,
-          permissionMode: meta.permissionMode,
-          resumeSessionId,
-          quietResumeFallback,
-        },
-        (event) => this.onEngineEvent(meta.id, event),
-      );
+      const kimiOpts = {
+        kimiHome,
+        cwd: meta.cwd,
+        modelId: meta.modelId,
+        permissionMode: meta.permissionMode,
+        resumeSessionId,
+        quietResumeFallback,
+      };
+      const sink = (event: EngineEvent): void => this.onEngineEvent(meta.id, event);
+      // 通道选路：KAP（kimi web REST+WS，goal/steer/fork/真实 usage 全原生）
+      // 优先，失败降级 ACP。会话粒度粘性：已有引擎历史的 ACP 会话不迁
+      // KAP（两侧引擎代际不同，跨通道 resume 必丢上下文）；降级只发生
+      // 在会话启动时，不做回合中热切。
+      const stickyAcp =
+        meta.kimiChannel === 'acp' && !!resumeSessionId && this.getMessages(meta.id).length > 0;
+      if (settings.kimiPreferKap && !stickyAcp) {
+        try {
+          await this.kapHost.ensure(kimiHome);
+          meta.kimiChannel = 'kap';
+          return new KimiKapAdapter({ ...kimiOpts, host: this.kapHost }, sink);
+        } catch (err) {
+          // KAP 起不来（未安装/版本不支持 web 子命令/端口被占且探测失败）
+          // → 降级 ACP 兼容兜底；证据入兼容审计，对用户仅提示一次。
+          const msg = err instanceof Error ? err.message : String(err);
+          compatAudit.record('kimi', 'rejected-method', 'kap-server unavailable', msg);
+          console.warn(`[kap-host] KAP 不可用，降级 ACP: ${msg}`);
+        }
+      }
+      meta.kimiChannel = 'acp';
+      return new KimiAdapter(kimiOpts, sink);
     }
     if (meta.engine === 'codex') {
       // 路由开：纯 `-c` 命令行覆盖指向本地 responses 前端（零文件写入）；
@@ -635,7 +744,7 @@ export class SessionManager {
       if (settings.routing.codex) {
         const kimiCfg = readKimiConfig();
         const ups = resolveCodexRouteUpstreams(codexCfg, kimiCfg);
-        if (!ups.chat && !ups.responses) throw new Error('Codex 路由无可用上游端点（见设置-模型页）');
+        if (!ups.chat && !ups.responses) throw new Error(L('Codex 路由无可用上游端点（见设置-模型页）', 'Codex routing has no usable upstream endpoint (see Settings → Engines)'));
         const port = await this.proxy.ensureCodexFront(ups);
         overrideArgs = codexRouteOverrideArgs(port);
         // 路由模式下模型名驱动路由：候选 = kimi 配置的模型别名。
@@ -651,13 +760,6 @@ export class SessionManager {
       // 直连未显式选模型时加载 ~/.codex/config.toml 的默认 model —
       // UI 与实际生效模型一致，且下发值等于 codex 自身默认，不改变行为。
       const directModelId = meta.modelId || codexCfg.model || '';
-      // 多根工作区：其余根目录并入 codex workspace-write 沙盒的可写根
-      // （提示注入只解决「认知」，codex 是唯一有 OS 沙盒会硬拦写的引擎）。
-      // 读当前 settings 而非建会时快照 — 目录增删后的懒唤醒/重启自动生效。
-      const wsFolders = meta.workspaceId
-        ? settings.workspaces.find((w) => w.id === meta.workspaceId)?.folders ?? []
-        : [];
-      const extraWritableRoots = wsFolders.filter((f) => f !== meta.cwd);
       return new CodexAdapter(
         {
           cwd: meta.cwd,
@@ -666,7 +768,9 @@ export class SessionManager {
           resumeThreadId: resumeSessionId,
           quietResumeFallback,
           configOverrideArgs: overrideArgs,
-          extraWritableRoots,
+          // 其余根目录并入 workspace-write 沙盒可写根（codex 是唯一有
+          // OS 沙盒会硬拦写的引擎）。
+          extraWritableRoots: extraRoots,
           modelProvider: settings.routing.codex ? 'cyberslots' : undefined,
           availableModels,
         },
@@ -683,6 +787,9 @@ export class SessionManager {
           permissionMode: meta.permissionMode,
           resumeSessionId,
           quietResumeFallback,
+          // opencode 引擎侧无多根概念 — 其余根目录经会话级
+          // external_directory 规则预放行，免逐次弹权限卡。
+          extraDirs: extraRoots,
         },
         this.opencodeHost,
         this.opencodeHub,
@@ -700,6 +807,8 @@ export class SessionManager {
           permissionMode: meta.permissionMode,
           resumeSessionId,
           quietResumeFallback,
+          // 其余根目录走 omp 原生 multi-root（spawn 级 --add-dir）。
+          extraDirs: extraRoots,
         },
         (event) => this.onEngineEvent(meta.id, event),
       );
@@ -723,7 +832,32 @@ export class SessionManager {
         (event) => this.onEngineEvent(meta.id, event),
       );
     }
-    throw new Error(`未知引擎: ${meta.engine}`);
+    if (meta.engine === 'claude') {
+      // 常驻 `claude -p --input-format stream-json --output-format stream-json`
+      // 子进程（双向 stream-json）。模型/凭据完全委托 claude 自身
+      // （OAuth token / ANTHROPIC_API_KEY），无协议路由。多根工作区的其余
+      // 根目录经 --add-dir 放行（首个根是进程 cwd）。
+      return new ClaudeAdapter(
+        {
+          cwd: meta.cwd,
+          modelId: meta.modelId,
+          permissionMode: meta.permissionMode,
+          resumeSessionId,
+          quietResumeFallback,
+          extraDirs: extraRoots,
+          // 赛马角色会话（meta.raceId）无人值守：自动放行权限/计划审批，防死锁。
+          unattended: !!meta.raceId,
+          // claude 原生分叉：首个 prompt 以 --fork-session 从此父 id 分支。
+          forkFromSessionId: meta.forkPendingFromId,
+          // 额外 MCP 服务器配置（可选；~/.claude MCP 仍自动加载）。
+          mcpConfigPath: settings.claudeMcpConfig || undefined,
+          // 自定义启动命令/路径（空 = 自动探测）— 支持完整路径或 PATH 命令名（如 cc）。
+          cliEntry: settings.claudeCliPath || undefined,
+        },
+        (event) => this.onEngineEvent(meta.id, event),
+      );
+    }
+    throw new Error(L(`未知引擎: ${meta.engine}`, `Unknown engine: ${meta.engine}`));
   }
 
   private onEngineEvent(sessionId: string, event: EngineEvent): void {
@@ -742,6 +876,11 @@ export class SessionManager {
         // opencode 服务端会话重建后的新 id）必须合并进 meta 并落盘 —— 否则
         // 重启后 resumeSessionId 为空，续接断链（上下文丢失）。
         Object.assign(s.meta, event.patch);
+        // claude 原生分叉已实例化（拿到新 engineSessionId）→ 清分叉待就标记，
+        // 否则重启/唤醒会对已分支的会话再次 --fork-session（重复分叉）。
+        if (s.meta.forkPendingFromId && event.patch.engineSessionId) {
+          s.meta.forkPendingFromId = undefined;
+        }
         this.persistMetas();
       } else if (event.type === 'models.update') {
         s.meta.modelId = event.current;
@@ -795,16 +934,16 @@ export class SessionManager {
         event.stopReason === 'background'
       )
         return;
-      new Notification({ title: `任务完成：${meta.title}`, body: '回到窗口查看结果' }).show();
+      new Notification({ title: L(`任务完成：${meta.title}`, `Task done: ${meta.title}`), body: L('回到窗口查看结果', 'Return to the window to view the result') }).show();
     } else if (event.type === 'goal.update' && event.goal?.status === 'complete' && prefs.taskComplete) {
       new Notification({
-        title: `Goal 执行完成：${meta.title}`,
+        title: L(`Goal 执行完成：${meta.title}`, `Goal completed: ${meta.title}`),
         body: event.goal.objective.slice(0, 100),
       }).show();
     } else if (event.type === 'permission.request' && prefs.question) {
-      new Notification({ title: `需要你的确认：${meta.title}`, body: event.title }).show();
+      new Notification({ title: L(`需要你的确认：${meta.title}`, `Needs your confirmation: ${meta.title}`), body: event.title }).show();
     } else if (event.type === 'error' && prefs.error) {
-      new Notification({ title: `出错了：${meta.title}`, body: event.message.slice(0, 120) }).show();
+      new Notification({ title: L(`出错了：${meta.title}`, `Error: ${meta.title}`), body: event.message.slice(0, 120) }).show();
     }
   }
 
@@ -973,24 +1112,151 @@ function reconcilePersistedMessages(messages: UnifiedMessage[]): UnifiedMessage[
   return changed ? out : messages;
 }
 
-const SEED_MAX_CHARS = 12_000;
+// ------------------------------------------------------------ history seed
+//
+// 跨引擎切换 / fork 降级 / 回退重播的上下文种子。目标：在纯文本通道里
+// 最大化保真 —— 覆盖全部消息类型（工具轨迹/计划/权限决策/错误），分层
+// 压缩（最近回合全保真含工具输出预览、更早回合瘦身、再超预算才整轮省略
+// 并留提问摘要），取代旧版“只留 user/text + 尾部 12k 硬截断”的重度有损序列化。
+// thinking/turn_end 不入种子：内部推理跨模型重放易被模仿且性价比极低，
+// 统计行无信息量 —— 与 oh-my-pi 跨 provider 丢弃 thinking 的取舍一致。
 
-/** Compact user/assistant transcript used as fallback-fork context. */
-function serializeHistory(messages: UnifiedMessage[]): string {
-  const lines: string[] = [];
-  for (const m of messages) {
-    if (m.kind === 'user') lines.push(`用户: ${m.text}`);
-    else if (m.kind === 'text') lines.push(`助手: ${m.text}`);
+const SEED_MAX_CHARS = 40_000; // 总预算（≈ 1–2 万 token，六引擎窗口均 ≥128k）
+const SEED_RECENT_TURNS = 6; // 最近 N 轮全保真（含工具输出/补丁预览）
+const SEED_FULL_TEXT_CAP = 6_000; // 全保真轮次单条正文上限
+const SEED_TOOL_OUT_CAP = 700; // 工具输出/补丁预览上限（仅全保真轮次）
+const SEED_OLD_TEXT_CAP = 500; // 压缩轮次正文截断
+
+function clip(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…（截断 ${s.length - max} 字）` : s;
+}
+
+function optionName(options: PermissionOptionView[], id?: string): string {
+  if (!id) return '未回答';
+  if (id === '__cancelled__') return '未回答（已取消）';
+  return options.find((o) => o.optionId === id)?.name ?? id;
+}
+
+/** 单条消息 → transcript 片段；null = 不入种子。lastPlanId：只保留最终计划快照。 */
+function seedLine(m: UnifiedMessage, full: boolean, lastPlanId: string | undefined): string | null {
+  switch (m.kind) {
+    case 'user': {
+      const extras: string[] = [];
+      if (m.attachments?.length) extras.push(`附件: ${m.attachments.join(', ')}`);
+      if (m.selections?.length)
+        extras.push(`引用: ${m.selections.map((s) => `${s.path}#L${s.startLine}-${s.endLine}`).join(', ')}`);
+      return `【用户】${clip(m.text, full ? SEED_FULL_TEXT_CAP : SEED_OLD_TEXT_CAP)}${extras.length ? `\n（${extras.join('；')}）` : ''}`;
+    }
+    case 'text':
+      return `【助手】${clip(m.text, full ? SEED_FULL_TEXT_CAP : SEED_OLD_TEXT_CAP)}`;
+    case 'tool_call': {
+      if (m.toolKind === 'think') return null; // 思考类工具对续接无信息量
+      const marks: string[] = [];
+      if (m.locations?.length) marks.push(`@ ${m.locations.join(', ')}`);
+      if (m.content?.changeKind) marks.push({ add: '新增文件', modify: '修改文件', delete: '删除文件' }[m.content.changeKind]);
+      if (m.content?.additions !== undefined || m.content?.deletions !== undefined)
+        marks.push(`+${m.content?.additions ?? 0}/-${m.content?.deletions ?? 0}`);
+      if (m.content?.matches !== undefined) marks.push(`${m.content.matches} 处命中`);
+      if (m.content?.exitCode !== undefined && m.content.exitCode !== 0) marks.push(`exit ${m.content.exitCode}`);
+      if (m.status === 'failed') marks.push('失败');
+      else if (m.status === 'canceled') marks.push('被中断');
+      let line = `· [${m.toolName ?? m.toolKind}] ${m.title}${marks.length ? `（${marks.join('，')}）` : ''}`;
+      if (full) {
+        // 补丁优于输出预览（编辑类工具的 patch 信息密度更高）。
+        const out = m.content?.patch ?? m.content?.text;
+        if (out?.trim()) line += `\n  ↳ ${clip(out.trim(), SEED_TOOL_OUT_CAP).replace(/\n/g, '\n    ')}`;
+      }
+      return line;
+    }
+    case 'plan': {
+      if (m.id !== lastPlanId) return null; // 中间态计划被后续快照取代
+      const box = { pending: '[ ]', in_progress: '[~]', completed: '[x]' } as const;
+      return `【计划】\n${m.entries.map((e) => `  ${box[e.status]} ${e.content}`).join('\n')}`;
+    }
+    case 'permission':
+      return `【权限】${m.title} → ${optionName(m.options, m.answeredOptionId)}`;
+    case 'ask_user':
+      return `【AI 提问】${clip(m.question, SEED_OLD_TEXT_CAP)} → 用户回答: ${m.answeredNote ?? optionName(m.options, m.answeredOptionId)}`;
+    case 'error':
+      return `【错误】${clip(m.message, 300)}`;
+    case 'system':
+      return `【系统】${clip(m.text, 300)}`;
+    default:
+      return null; // thinking / turn_end
   }
-  let transcript = lines.join('\n\n');
+}
+
+/** Maximal-fidelity transcript used as engine-switch / fallback-fork / undo context. */
+function serializeHistory(messages: UnifiedMessage[]): string {
+  // 按用户提问切轮：一轮 = 一条 user 消息到下一条 user 之前（首轮前的引导消息自成一组）。
+  const turns: UnifiedMessage[][] = [];
+  let cur: UnifiedMessage[] = [];
+  for (const m of messages) {
+    if (m.kind === 'user' && cur.length) {
+      turns.push(cur);
+      cur = [];
+    }
+    cur.push(m);
+  }
+  if (cur.length) turns.push(cur);
+
+  const lastPlanId = [...messages].reverse().find((m) => m.kind === 'plan')?.id;
+
+  // 会话概览：全程改动过的文件清单 —— 即使早期轮次被省略，这条关键线索也不丢。
+  const edited = new Set<string>();
+  for (const m of messages) {
+    if (m.kind !== 'tool_call') continue;
+    const editish = m.content?.changeKind !== undefined || m.content?.additions !== undefined || m.toolKind === 'edit';
+    if (editish) for (const loc of m.locations ?? []) edited.add(loc);
+  }
+
+  const renderTurn = (turn: UnifiedMessage[], full: boolean): string =>
+    turn
+      .map((m) => seedLine(m, full, lastPlanId))
+      .filter((l): l is string => l !== null)
+      .join('\n');
+
+  const recentStart = Math.max(0, turns.length - SEED_RECENT_TURNS);
+  let dropped = 0;
+  const assemble = (): string => {
+    const parts: string[] = [];
+    if (dropped > 0) {
+      // 被省略轮次不默默蒸发 —— 留提问摘要行，新引擎至少知道聊过什么。
+      const qs = turns
+        .slice(0, dropped)
+        .map((t) => t.find((m) => m.kind === 'user'))
+        .filter((m): m is Extract<UnifiedMessage, { kind: 'user' }> => !!m)
+        .map((m) => clip(m.text.replace(/\s+/g, ' '), 60));
+      parts.push(`…（最早 ${dropped} 轮已省略，其间用户问过：${qs.join(' / ') || '（无提问记录）'}）`);
+    }
+    for (let i = dropped; i < turns.length; i++) {
+      const body = renderTurn(turns[i]!, i >= recentStart);
+      if (body) parts.push(body);
+    }
+    return parts.join('\n\n');
+  };
+
+  let transcript = assemble();
+  // 超预算：从最早轮次起整轮省略（最近 SEED_RECENT_TURNS 轮保底不丢）。
+  while (transcript.length > SEED_MAX_CHARS && dropped < recentStart) {
+    dropped++;
+    transcript = assemble();
+  }
   if (transcript.length > SEED_MAX_CHARS) {
+    // 保底轮次仍超预算（单轮超长工具输出等极端情形）— 尾部硬截断兑底。
     transcript = `…（更早内容已截断）\n${transcript.slice(-SEED_MAX_CHARS)}`;
   }
+
+  const overview = edited.size
+    ? `本会话此前已改动的文件（磁盘上即当前状态）：\n${[...edited].slice(0, 40).join('\n')}\n\n`
+    : '';
+
   return [
-    '以下是本分支会话从父会话继承的对话历史，供你了解上下文：',
+    '以下是本会话此前的对话与执行历史（可能由另一个 AI 引擎执行），请接续上下文继续工作：',
     '<history>',
-    transcript,
+    overview + transcript,
     '</history>',
+    '历史中的工具调用与文件改动都已真实执行完毕，请勿重复执行；磁盘文件以当前实际内容为准。',
     '请基于以上上下文回答用户接下来的消息。',
   ].join('\n');
 }

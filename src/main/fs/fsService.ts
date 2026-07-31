@@ -5,14 +5,15 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { cp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep, extname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { app, shell } from 'electron';
+import { app, BrowserWindow, dialog, shell } from 'electron';
 
-import type { FileContent, FsNode, OpenTarget } from '@shared/ipc';
+import type { FileContent, FsNode, OpenerAvailability, OpenerId, OpenTarget } from '@shared/ipc';
+import { L } from '../i18n';
 
 const execFileAsync = promisify(execFile);
 const PREVIEW_CAP = 512 * 1024; // 512 KB
@@ -107,13 +108,9 @@ export async function openIn(target: OpenTarget, path: string): Promise<void> {
       return;
     }
     case 'vscode':
-      await spawnDetached(['code', quoted]);
-      return;
     case 'cursor':
-      await spawnDetached(['cursor', quoted]);
-      return;
     case 'antigravity':
-      await spawnDetached(['antigravity', quoted]);
+      await openEditor(target, path);
       return;
     case 'wt':
       await spawnDetached(['wt', '-d', quoted]);
@@ -127,11 +124,13 @@ export async function openIn(target: OpenTarget, path: string): Promise<void> {
       return;
     }
     case 'gitbash': {
-      // Git Bash: open a login shell rooted at the path.
-      const bash = process.env.PROGRAMFILES
-        ? join(process.env.PROGRAMFILES, 'Git', 'git-bash.exe')
-        : 'git-bash.exe';
-      await spawnDetached([bash], quoted);
+      // Git Bash：用绝对路径 + shell:false 启动——含空格的安装路径（
+      // C:\Program Files\Git）经 cmd 会被拆成 "C:\Program"，历史上
+      // “点了没反应”就是这个坑；--cd 定位到目标目录。
+      for (const exe of gitBashCandidates()) {
+        if (await launchExe(exe, [`--cd=${path}`], path)) return;
+      }
+      await reportMissing('gitbash');
       return;
     }
     default:
@@ -178,11 +177,122 @@ async function hasCommand(cmd: string): Promise<boolean> {
   }
 }
 
+// -------- external openers（编辑器 / Git Bash 的健壮解析与启动）--------
+
+/** 各 opener 的展示名（缺失提示用）。 */
+const OPENER_NAMES: Partial<Record<OpenTarget, string>> = {
+  vscode: 'VS Code',
+  cursor: 'Cursor',
+  antigravity: 'Antigravity',
+  gitbash: 'Git Bash',
+};
+
+/** Windows 上各编辑器可执行文件的常见安装路径（首个存在者即用）。
+ *  注意 Antigravity 安装目录名为 "Antigravity IDE"（带空格）。 */
+function editorCandidates(target: OpenTarget): string[] {
+  if (process.platform !== 'win32') return [];
+  const { LOCALAPPDATA: LA, PROGRAMFILES: PF } = process.env;
+  const PF86 = process.env['PROGRAMFILES(X86)'];
+  const j = (base: string | undefined, ...rest: string[]): string => (base ? join(base, ...rest) : '');
+  const list =
+    target === 'vscode'
+      ? [j(LA, 'Programs', 'Microsoft VS Code', 'Code.exe'), j(PF, 'Microsoft VS Code', 'Code.exe'), j(PF86, 'Microsoft VS Code', 'Code.exe')]
+      : target === 'cursor'
+        ? [j(LA, 'Programs', 'cursor', 'Cursor.exe'), j(LA, 'Programs', 'Cursor', 'Cursor.exe')]
+        : target === 'antigravity'
+          ? [
+              j(LA, 'Programs', 'Antigravity IDE', 'Antigravity IDE.exe'),
+              j(LA, 'Programs', 'Antigravity', 'Antigravity.exe'),
+              j(PF, 'Antigravity IDE', 'Antigravity IDE.exe'),
+            ]
+          : [];
+  return list.filter(Boolean);
+}
+
+/** PATH 上可尝试的命令名（绝对路径找不到时的跨平台/自定义安装兑底）。 */
+const EDITOR_PATH_CMDS: Partial<Record<OpenTarget, string[]>> = {
+  vscode: ['code'],
+  cursor: ['cursor'],
+  antigravity: ['antigravity', 'antigravity-ide'],
+};
+
+/** Git Bash 常见安装路径。 */
+function gitBashCandidates(): string[] {
+  const { PROGRAMFILES: PF, LOCALAPPDATA: LA } = process.env;
+  const PF86 = process.env['PROGRAMFILES(X86)'];
+  return [PF && join(PF, 'Git', 'git-bash.exe'), PF86 && join(PF86, 'Git', 'git-bash.exe'), LA && join(LA, 'Programs', 'Git', 'git-bash.exe')].filter(
+    (p): p is string => Boolean(p),
+  );
+}
+
+/** 用绝对路径启动 GUI 程序（shell:false — args 走数组，含空格路径不被 cmd 拆断）。 */
+async function launchExe(exe: string, args: string[], cwd?: string): Promise<boolean> {
+  if (!existsSync(exe)) return false;
+  const { spawn } = await import('node:child_process');
+  spawn(exe, args, { cwd, detached: true, stdio: 'ignore', windowsHide: false }).unref();
+  return true;
+}
+
+/** 用 PATH 上的命令启动（.cmd 需 shell:true；path 手动加引号防空格被拆）。 */
+async function launchOnPath(cmd: string, path: string): Promise<boolean> {
+  if (!(await hasCommand(cmd))) return false;
+  await spawnDetached([cmd, `"${path}"`]);
+  return true;
+}
+
+/** 打开编辑器：优先绝对路径（最稳），回退 PATH 命令；都没有则提示缺失。 */
+async function openEditor(target: OpenTarget, path: string): Promise<void> {
+  for (const exe of editorCandidates(target)) {
+    if (await launchExe(exe, [path])) return;
+  }
+  for (const cmd of EDITOR_PATH_CMDS[target] ?? []) {
+    if (await launchOnPath(cmd, path)) return;
+  }
+  await reportMissing(target);
+}
+
+/** 未检测到目标程序时弹原生提示（避免历史上“点了没反应”的静默失败）。 */
+async function reportMissing(target: OpenTarget): Promise<void> {
+  const name = OPENER_NAMES[target] ?? target;
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const opts = {
+    type: 'warning' as const,
+    message: L(`未检测到 ${name}`, `${name} not detected`),
+    detail: L(`没有找到 ${name} 的可执行文件，请确认已安装后重试。`, `Could not find an executable for ${name}. Make sure it is installed, then retry.`),
+    buttons: [L('知道了', 'OK')],
+  };
+  if (win) await dialog.showMessageBox(win, opts);
+  else await dialog.showMessageBox(opts);
+}
+
+/** 单个 opener 是否本机可用：任一绝对路径候选存在，或任一 PATH 命令存在。
+ *  与 openIn 实际启动用的同一份 candidates——“检测说有 = 打开一定能开”。 */
+async function isOpenerAvailable(id: OpenerId): Promise<boolean> {
+  const exePaths = id === 'gitbash' ? gitBashCandidates() : editorCandidates(id);
+  if (exePaths.some((p) => existsSync(p))) return true;
+  const cmds = id === 'gitbash' ? [] : EDITOR_PATH_CMDS[id] ?? [];
+  for (const cmd of cmds) {
+    if (await hasCommand(cmd)) return true;
+  }
+  return false;
+}
+
+/** 探测全部「外部打开」目标的本机可用性（进程级缓存，force 重探）。
+ *  启动后由渲染层拉一次；菜单据此隐藏未安装项（而非点了才弹缺失提示）。 */
+let openerCache: OpenerAvailability | undefined;
+export async function detectOpeners(force = false): Promise<OpenerAvailability> {
+  if (openerCache && !force) return openerCache;
+  const ids: OpenerId[] = ['vscode', 'cursor', 'antigravity', 'gitbash'];
+  const results = await Promise.all(ids.map((id) => isOpenerAvailable(id)));
+  openerCache = Object.fromEntries(ids.map((id, i) => [id, results[i]!])) as OpenerAvailability;
+  return openerCache;
+}
+
 /** Throw if `target` escapes `root` (path-traversal / symlink guard). */
 function assertInside(root: string, target: string): void {
   const rel = relative(resolve(root), target);
   if (rel === '') return;
   if (rel.startsWith('..') || (rel.includes('..' + sep))) {
-    throw new Error(`路径越界，拒绝访问工作区之外：${target}`);
+    throw new Error(L(`路径越界，拒绝访问工作区之外：${target}`, `Path escapes the workspace, access denied: ${target}`));
   }
 }

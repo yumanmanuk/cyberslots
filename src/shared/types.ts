@@ -10,7 +10,17 @@
 
 // ---------------------------------------------------------------- engines
 
-export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp' | 'antigravity';
+export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp' | 'antigravity' | 'claude';
+
+/** 引擎展示名 — renderer 徽标与主进程系统公告共用（单一真源，勿在别处再定义）。 */
+export const ENGINE_LABELS: Record<EngineId, string> = {
+  codex: 'Codex',
+  kimi: 'Kimi Code',
+  opencode: 'opencode',
+  omp: 'Oh My Pi',
+  antigravity: 'Antigravity',
+  claude: 'Claude Code',
+};
 
 /** Session permission mode — union of both engines' surfaces (kimi: default/plan/auto/yolo). */
 export type PermissionMode = 'default' | 'plan' | 'auto' | 'yolo';
@@ -32,6 +42,20 @@ export interface ModelInfo {
   maxContextSize?: number;
   /** Thinking/reasoning levels this model supports (empty = none). */
   thinkingLevels?: string[];
+}
+
+/** 会话级能力快照 — 由主进程在 adapter 构建后按可选方法存在性计算
+ *（单一真源 = EngineAdapter 接口），经 session.meta patch 推给 UI 做
+ * 控件显隐。同一引擎不同通道能力可不同（kimi KAP 有 goal/steer，
+ * ACP 没有），所以挂在会话而非引擎 id 上。 */
+export interface SessionCapabilities {
+  goal: boolean;
+  steer: boolean;
+  fork: boolean;
+  compact: boolean;
+  /** 引擎原生 swarm 模式开关（kimi KAP swarm_mode）；无则 UI 退回
+   *  提示词引导（swarmBoost 前缀）。旧快照缺此字段 = 不支持。 */
+  swarm?: boolean;
 }
 
 export interface SessionMeta {
@@ -66,6 +90,30 @@ export interface SessionMeta {
    * first prompt when the engine has no native session/fork. Cleared after use.
    */
   contextSeed?: string;
+  /**
+   * Sidechat 分支起始时从父会话继承的历史条数。上下文仍完整保留
+   * （native engineSessionId 或 contextSeed），此计数仅供 SideChatPanel
+   * 隐藏这段继承历史——分支面板只显示分支内新产生的问答，不重复渲染主对话。
+   */
+  forkSeedCount?: number;
+  /**
+   * 引擎切换分支（forkToEngine 产物）：数据上仍是新会话（干净的分支模型，
+   * 父会话原生上下文完整保留可无损回切），但视觉上接管父会话 —— 侧栏沿
+   * parentId 链折叠，同一条对话永远只显示链上最新叶子。
+   */
+  chained?: boolean;
+  /**
+   * Claude 原生分叉待就：新会话首个 prompt 时以 --resume <此 id> --fork-session
+   * 从父会话分叉出独立副本（引擎侧真分支，无需重放历史）。
+   * 分叉实例化（首个 result 回新 session_id）后由主进程清空。
+   */
+  forkPendingFromId?: string;
+  /** 能力快照（启动过一次后才有）；缺省时 UI 按引擎 id 兼容兑底。 */
+  capabilities?: SessionCapabilities;
+  /** kimi 会话实际走的通道：kap（kimi web REST+WS，全能力）/
+   *  acp（stdio，窄面兜底）。会话粒度一选定终身 — 两侧引擎代际
+   *  不同（v1/v2），跨通道 resume 不保证成功。 */
+  kimiChannel?: 'kap' | 'acp';
 }
 
 // ---------------------------------------------------------- message model
@@ -90,6 +138,9 @@ export interface ToolCallContent {
   exitCode?: number;
   /** omp 子代理（task）进度流：最新进度行 + 尾部输出（卡内滚动）。 */
   progress?: { line: string; tail?: string[] };
+  /** 子代理免审批标记（仅 omp headless 子代理强制 yolo 时置位）——
+   *  其他引擎的子代理走同一审批通道，不置此标，TaskCard 不显该标。 */
+  autoApproved?: boolean;
   /** 工具输出图片（generate_image / inspect_image）：data URI 或文件路径。 */
   images?: string[];
 }
@@ -153,6 +204,9 @@ export type UnifiedMessage =
       turnId: number;
       requestId: string;
       title: string;
+      /** 富确认正文（plan_review 计划全文 / goal_start objective / 长命令），
+       *  卡内滚动展示；缺省 = 纯标题卡。 */
+      body?: string;
       toolCallId?: string;
       options: PermissionOptionView[];
       /** Filled once answered — UI locks the card. */
@@ -165,6 +219,8 @@ export type UnifiedMessage =
       turnId: number;
       requestId: string;
       question: string;
+      /** 问题补充正文（KAP question 的 header/body）。 */
+      body?: string;
       options: PermissionOptionView[];
       answeredOptionId?: string;
       /** 用户在提问卡输入框里的自定义回答原文（Other: …），仅增不改。 */
@@ -312,6 +368,8 @@ export type EngineEvent =
       requestId: string;
       isQuestion: boolean;
       title: string;
+      /** 富确认正文（计划全文/objective/长命令），可选。 */
+      body?: string;
       toolCallId?: string;
       options: PermissionOptionView[];
     }
@@ -320,6 +378,8 @@ export type EngineEvent =
   | { type: 'models.update'; current: string; available: string[] }
   | { type: 'modes.update'; current: PermissionMode; available: PermissionMode[] }
   | { type: 'usage.update'; used: number; size: number; costUsd?: number }
+  /** 引擎原生 swarm 模式状态（kimi KAP；开关回声与引擎自发退出同源）。 */
+  | { type: 'swarm.update'; active: boolean }
   /** Engine-side goal state changed (null = cleared/none). */
   | { type: 'goal.update'; goal: GoalInfo | null }
   | {
@@ -329,6 +389,10 @@ export type EngineEvent =
       usage?: UsageInfo;
       durationMs?: number;
       apiDurationMs?: number;
+      /** 引擎自发回合（stopReason='background'）中、仍属用户可见回答的那些
+       *  （如 goal 续跑）标为 true：渲染层依旧不派发队列/不触压缩（保护不变），
+       *  但依然生成 turn_end 统计行（复制回答 + token）。compaction 等不置。 */
+      showStats?: boolean;
     }
   | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider'; quotaExhausted?: boolean };
 
@@ -388,6 +452,12 @@ export interface KimiConfigModel {
   alias: string;
   model: string;
   maxContextSize?: number;
+  /** 思考深度面板值域（config.toml support_efforts 合成，对齐 kimi CLI
+   *  buildThinkingOption：always_thinking 模型无 off 行；无档位声明或仅
+   *  单值 = 无可选 → 缺省，控件隐藏）。 */
+  efforts?: string[];
+  /** 默认档（default_effort，overrides 优先）。 */
+  defaultEffort?: string;
 }
 
 export interface KimiConfigProvider {
@@ -403,9 +473,23 @@ export interface KimiConfigSnapshot {
   home: string;
   configPath: string;
   exists: boolean;
+  /** CLI 版本（npm 包 package.json 快路径，兜底 `kimi --version` 探测）。 */
+  version?: string;
   defaultModel?: string;
   providers: KimiConfigProvider[];
   error?: string;
+  /** KAP 通道（kimi web server）可用性探测：启动/设置页展示用。 */
+  kap?: KapDetection;
+}
+
+/** KAP 通道静态探测结果（不 spawn，纯文件/注册表扫描）。 */
+export interface KapDetection {
+  /** kimi CLI 入口可定位（npm 全局安装）。 */
+  installed: boolean;
+  /** CLI 版本（package.json）。 */
+  version?: string;
+  /** 实例注册表里有活的 kimi web server（pid 存活）。 */
+  running: boolean;
 }
 
 export interface CodexConfigProvider {
@@ -423,6 +507,8 @@ export interface CodexConfigSnapshot {
   home: string;
   configPath: string;
   exists: boolean;
+  /** CLI 版本（npm 包 package.json 快路径，兜底 `codex --version` 探测）。 */
+  version?: string;
   model?: string;
   reasoningEffort?: string;
   /** 配置里的 model_provider（未设 = 内置 openai）。 */
@@ -561,6 +647,22 @@ export interface AntigravityCatalog {
   error?: string;
 }
 
+/** Claude Code CLI (`claude`) 只读快照（静态探测，不进会话）。永不写入 ~/.claude。
+ *  认证真源是 CLI 自身（OAuth token / ANTHROPIC_API_KEY），本程序不管理凭据。 */
+export interface ClaudeConfigSnapshot {
+  installed: boolean;
+  version?: string;
+  cliPath?: string;
+  /** 已登录（OAuth）或检测到 ANTHROPIC_API_KEY — 仅展示布尔态，绝不外泄凭据。 */
+  loggedIn?: boolean;
+  /** 认证方式：oauth（claude login）/ apikey（ANTHROPIC_API_KEY 环境变量）/ none。 */
+  authMethod?: 'oauth' | 'apikey' | 'none';
+  /** 第三方网关自定义模型映射（settings.json env 的 ANTHROPIC_MODEL /
+   *  ANTHROPIC_DEFAULT_*_MODEL(_NAME) 推导）：别名 → 自定义模型显示名。 */
+  modelLabels?: Record<string, string>;
+  error?: string;
+}
+
 /** 单个 Antigravity 账号（本程序导入池；凭据副本存 userData/agy-accounts.json）。 */
 export interface AgyAccount {
   id: string;
@@ -631,6 +733,7 @@ export interface EngineConfigsSnapshot {
   opencode: OpencodeConfigSnapshot;
   omp: OmpConfigSnapshot;
   antigravity: AntigravityConfigSnapshot;
+  claude: ClaudeConfigSnapshot;
   routeSupport: { kimi: RouteSupport; codex: RouteSupport };
 }
 
@@ -672,11 +775,9 @@ export type AppLanguage = 'zh' | 'en';
 export type ThemeMode = 'light' | 'dark' | 'system';
 /** system 解析后的实际明暗值。 */
 export type ResolvedMode = 'light' | 'dark';
-export type ThemePalette = 'notion' | 'solarized' | 'everforest';
 
-/** 渲染进程推给主进程的已解析外观（原生标题栏/窗口底色联动）。 */
+/** 渲染进程推给主进程的已解析外观（原生标题栏/窗口底色联动）。皮肤已收敛为单一 notion 主题，只剩明暗一维。 */
 export interface WindowAppearance {
-  palette: ThemePalette;
   mode: ResolvedMode;
 }
 
@@ -705,8 +806,6 @@ export interface TitleGenSettings {
 export interface AppSettings {
   /** 明暗模式：浅色 / 深色 / 跟随系统。 */
   themeMode: ThemeMode;
-  /** 配色主题（阅读向色板，每套含明、暗两个变体）。 */
-  themePalette: ThemePalette;
   language: AppLanguage;
   defaultPermissionMode: PermissionMode;
   sendKey: 'enter' | 'ctrl-enter';
@@ -726,6 +825,9 @@ export interface AppSettings {
   /** opencode 隐藏模型黑名单（slug = providerID/modelID）。默认全显示，
    *  只影响本程序内的选择器/赛马配置展示 — 不写 opencode 配置文件。 */
   opencodeHiddenModels: string[];
+  /** omp 隐藏模型黑名单（slug = provider/modelID）。默认全显示，
+   *  只影响本程序内的选择器/赛马配置展示 — 不写 ~/.omp。 */
+  ompHiddenModels: string[];
   /** antigravity 新会话的默认模型 slug（空 = 用适配器内置默认 claude-sonnet-4-6）。
    *  仅作用于「未显式选模型」的新会话；已有会话与显式选择不受影响。 */
   antigravityDefaultModel?: string;
@@ -736,12 +838,27 @@ export interface AppSettings {
    *  后主动检测当前账号余量，低于阈值就换到有 buffer 的账号（普通会话
    *  静默换、赛马换后 raceResume）；真耗尽报错时作兜底。 */
   antigravityAutoSwitch: boolean;
-  /** 自动切号额度阈值（剩余百分比 0–100）。任一时间窗剩余低于此
-   *  值即视为不足；挑目标账号时要求两个窗都 ≥ 此值（buffer 门槛防拖抽）。 */
-  antigravityQuotaThreshold: number;
+  /** 自动切号 5 小时窗额度阈值（剩余百分比 0–100）。该窗剩余低于此值
+   *  即视为不足；5 小时窗桶小消耗快、最多 5 小时自愈，阈值宜设较高提前预切。 */
+  antigravityQuotaThreshold5h: number;
+  /** 自动切号 7 天窗额度阈值（剩余百分比 0–100）。7 天窗桶大恢复慢，
+   *  同样的剩余百分比可用时长远长于 5 小时窗，阈值宜设较低 —— 否则全池
+   *  账号 7 天窗同时低于阈值时合格集合恒空，自动切彻底失效。
+   *  挑目标账号时要求每个窗剩余都 ≥ 各自阈值（buffer 门槛防拖抽）。 */
+  antigravityQuotaThreshold7d: number;
   /** 引擎选择列表的展示顺序（新建会话、侧栏快捷创建、切换引擎、
    *  赛马角色下拉统一生效）。缺失/非法项由读取端剔除并补全到末尾。 */
   engineOrder: EngineId[];
+  /** Claude 额外 MCP 服务器配置文件路径（→ claude --mcp-config）。空 = 不传；
+   *  无论如何 claude 自身的 ~/.claude MCP 仍自动加载，此项仅叠加额外服务器。 */
+  claudeMcpConfig?: string;
+  /** kimi 新会话优先走 KAP 通道（kimi web REST+WS，goal/steer/fork/真实
+   *  usage 全原生）；失败自动降级 ACP。关闭 = 强制走稳定的 ACP 窄面。 */
+  kimiPreferKap: boolean;
+  /** Claude 自定义启动命令/路径（空 = 自动探测 npm/native/PATH）。
+   *  可填完整路径（cli.js/.cmd/.exe）或 PATH 上的命令名（如 cc）；
+   *  不支持 shell 别名（Set-Alias/alias 非可执行文件，spawn 无法解析）。 */
+  claudeCliPath?: string;
 }
 
 // ------------------------------------------------------------ cron tasks

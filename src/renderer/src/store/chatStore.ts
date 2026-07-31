@@ -10,12 +10,14 @@ import { useRaceStore } from './raceStore';
 
 import type {
   AppSettings,
+  AgyQuotaGroup,
   AgyQuotaInfo,
   CodeSelection,
   CodexCatalogModel,
   CompatAuditSnapshot,
   ContextFallbackRule,
   CronTask,
+  KimiConfigModel,
   EngineConfigsSnapshot,
   EngineEvent,
   EngineEventEnvelope,
@@ -30,7 +32,7 @@ import type {
   UnifiedMessage,
   WorkspaceInfo,
 } from '@shared/types';
-import type { SessionCreateRequest } from '@shared/ipc';
+import type { SessionCreateRequest, OpenerAvailability } from '@shared/ipc';
 import { isRaceActive } from '@shared/race';
 import { serializeSelections, selectionRangeLabel } from '../selections';
 
@@ -57,6 +59,8 @@ export interface SessionUiState {
   models: { current: string; available: string[] };
   modes: { current: PermissionMode; available: PermissionMode[] };
   commands: SlashCommandInfo[];
+  /** 引擎原生 swarm 模式状态（kimi KAP；swarm.update 推送，含自发退出）。 */
+  swarm?: boolean;
   /** Timestamp of the latest engine event — drives the heartbeat indicator. */
   lastActivityAt?: number;
   /** 持久化历史已加载。不能拿「ui 条目存在」当依据 — 任意 main 侧
@@ -101,6 +105,8 @@ interface ChatState {
   sending: Record<string, boolean>;
   /** 回退后待回填输入框的提问（nonce 驱动 Composer 侧 effect）。 */
   composerDrafts: Record<string, { text: string; nonce: number } | undefined>;
+  /** 输入框未发送草稿（按会话；切走时保存、切回恢复）。纯内存 — 重启不保留。 */
+  drafts: Record<string, string>;
   /** 侧边栏折叠态（localStorage 持久）。 */
   sidebarCollapsed: boolean;
   /** 主会话 → 右侧 sidechat 分支会话 id 列表（支持多个分支 tab）。 */
@@ -109,15 +115,25 @@ interface ChatState {
   terminals: Record<string, TerminalTab[] | undefined>;
   /** 会话 → 待右侧预览的 plan 文档消息 id（plan 模式回合结束时自动设置）。 */
   planPreview: Record<string, string | undefined>;
+  /** 会话 → 待右侧打开的文件预览（AI 正文文件 chip 点击；nonce 驱动重复点击）。
+   *  ChatView 只负责开 files tab（不清除），WorkspacePanel 消费后清除。 */
+  pendingFilePreview: Record<string, { path: string; nonce: number } | undefined>;
   /** codex model_catalog_json 目录（init 时读取，↻/选择器打开时刷新；模型/思考深度选择器用）。 */
   codexCatalog: CodexCatalogModel[];
   /** ~/.codex/config.toml 的 model_reasoning_effort（codex 全局默认档）。 */
   codexDefaultEffort?: string;
+  /** kimi config.toml 模型条目（含思考档位元数据；思考深度选择器用）。 */
+  kimiModels: KimiConfigModel[];
+  /** claude 自定义模型别名显示名（~/.claude settings env 推导；模型选择器用）。 */
+  claudeModelLabels: Record<string, string> | null;
   /** 重读引擎配置快照并同步 codex 目录/默认档；返回快照供调用方复用（一次 IPC 两处受益）。 */
   refreshEngineConfigs(): Promise<EngineConfigsSnapshot>;
   /** 各引擎本机可用性（CLI 安装/配置存在）：null = 尚未探测（不置灰）。
    *  引擎选择入口据此把未安装项置灰展示（可见不可选）。 */
   engineAvailability: Record<EngineId, boolean> | null;
+  /** 「外部打开」程序的本机可用性（VS Code / Cursor / Antigravity / Git Bash）：
+   *  null = 尚未探测（菜单先全显）；探测后菜单隐藏未安装项。 */
+  openerAvailability: OpenerAvailability | null;
   /** opencode 模型目录（懒加载 — 首个 opencode 会话的选择器触发，
    *  来自 /config/providers；拉取会按需启动 opencode server）。 */
   opencodeCatalog: OpencodeCatalog | null;
@@ -148,6 +164,8 @@ interface ChatState {
   removeTerminal(sessionId: string, termId: string): void;
   toggleSidebar(): void;
   setPlanPreview(sessionId: string, messageId: string | undefined): void;
+  /** AI 正文文件 chip 点击 → 右侧 files tab 打开该文件预览（仅 work 会话；相对路径按 cwd 拼绝对）。 */
+  requestFilePreview(sessionId: string, rawPath: string): void;
   forkToEngine(id: string, engine: SessionMeta['engine']): Promise<void>;
   compactSession(): Promise<void>;
   /** Antigravity 切号弹窗目标会话 id（null = 关闭）。低额/无额时自动置位。 */
@@ -196,6 +214,8 @@ interface ChatState {
   steerQueued(sessionId: string, id: string): Promise<'steered' | 'moved' | 'head' | 'none'>;
   setGoal(objective: string): Promise<void>;
   controlGoal(action: GoalControlAction): Promise<void>;
+  /** 原生 swarm 开关（仅 capabilities.swarm 会话；其余引擎用 swarmBoost 前缀）。 */
+  setSwarm(sessionId: string, active: boolean): Promise<void>;
   renameSession(id: string, title: string): Promise<void>;
   /** 归档/还原：仅影响侧栏展示，数据与引擎会话全保留（区别于删除）。 */
   archiveSession(id: string, archived: boolean): Promise<void>;
@@ -311,15 +331,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selections: {},
   sending: {},
   composerDrafts: {},
+  drafts: {},
   sidebarCollapsed: localStorage.getItem('cs.sidebarCollapsed') === '1',
   sidechats: {},
   terminals: {},
   planPreview: {},
+  pendingFilePreview: {},
   codexCatalog: [],
   codexDefaultEffort: undefined,
+  kimiModels: [],
+  claudeModelLabels: null,
   opencodeCatalog: null,
   ompCatalog: null,
   engineAvailability: null,
+  openerAvailability: null,
   agySwitchFor: null,
   compatAudit: null,
 
@@ -359,7 +384,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           codexCatalog: snap.codex.catalogModels ?? [],
           codexDefaultEffort: snap.codex.reasoningEffort,
-          // 可用性：opencode/omp 有真实 CLI 探测；kimi/codex 用配置存在性
+          kimiModels: (snap.kimi.providers ?? []).flatMap((p) => p.models),
+          claudeModelLabels: snap.claude.modelLabels ?? null,
+          // 可用性：opencode/omp/antigravity/claude 有真实 CLI 探测；kimi/codex 用配置存在性
           // 近似（装过并登录/初始化过才会有 config.toml）。
           engineAvailability: {
             kimi: snap.kimi.exists,
@@ -367,6 +394,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             opencode: snap.opencode.installed,
             omp: snap.omp.installed,
             antigravity: snap.antigravity.installed,
+            claude: snap.claude.installed,
           },
         });
         return snap;
@@ -385,6 +413,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ sessions, settings });
     // codex 配置快照 — catalog 目录 + 默认思考深度（选择器的元信息源）。
     void get().refreshEngineConfigs();
+    // 「外部打开」程序可用性 — 启动后探测一次，菜单据此隐藏未安装项。
+    void window.cyberslots.openersDetect().then((a) => set({ openerAvailability: a })).catch(() => undefined);
     unsubscribe?.();
     unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
       applyEnvelope(set, get, envelope);
@@ -565,12 +595,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ planPreview: { ...s.planPreview, [sessionId]: messageId } }));
   },
 
-  /** 换引擎继续聊：history-replay branch onto the other engine. */
+  requestFilePreview(sessionId, rawPath) {
+    const meta = get().sessions.find((m) => m.id === sessionId);
+    // 非 work 会话没有文件面板 — chip 仅作展示，点击无动作。
+    if (!meta || meta.chatMode !== 'work') return;
+    let path = rawPath;
+    if (!/^([a-zA-Z]:[\\/]|\/)/.test(rawPath)) {
+      // 相对路径按 cwd 的分隔符风格拼接成绝对路径。
+      const sep = meta.cwd.includes('\\') ? '\\' : '/';
+      const rel = rawPath.replace(/^\.[\\/]/, '').replace(/[\\/]/g, sep);
+      path = `${meta.cwd.replace(/[\\/]+$/, '')}${sep}${rel}`;
+    }
+    set((s) => ({ pendingFilePreview: { ...s.pendingFilePreview, [sessionId]: { path, nonce: Date.now() } } }));
+  },
+
+  /** 换引擎继续聊：history-replay branch onto the other engine。
+   *  空白会话主进程原地换引擎（返回同 id，不产生分支）— 此时重置该会话
+   *  的 per-session ui：旧引擎推过的模型/模式/命令残留会在新引擎首次推送前
+   *  误显示；消息本为空（主进程以 messages.length===0 判定），无历史可丢。 */
   async forkToEngine(id, engine) {
     set({ creating: true, creatingEngine: engine });
     try {
       const meta = await window.cyberslots.sessionForkEngine(id, engine);
-      set((s) => ({ sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)] }));
+      const inPlace = meta.id === id;
+      set((s) => ({
+        sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
+        ...(inPlace ? { ui: { ...s.ui, [id]: emptyUi() } } : {}),
+      }));
       get().selectSession(meta.id);
     } finally {
       set({ creating: false, creatingEngine: null });
@@ -598,9 +649,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 引擎前缀/机器人指令仍保持最前）。
     text = serializeSelections(selections) + text;
     // enginePrefix（如 sidechat 只读指令）优先于 swarm 前缀，且不入气泡。
+    // 原生 swarm 会话（kimi KAP）不叠加提示词前缀 — swarm_mode 由引擎
+    // 强制，再拼引导语只会污染提问。
+    const nativeSwarm = !!get().sessions.find((m) => m.id === sessionId)?.capabilities?.swarm;
     const finalText = enginePrefix
       ? `${enginePrefix}\n\n${text}`
-      : swarmBoost
+      : swarmBoost && !nativeSwarm
         ? `请优先使用 AgentSwarm 并行子代理拆解与执行以下任务（可并行的子任务尽量委派给子代理）：\n${text}`
         : text;
     const userMsg: UnifiedMessage = {
@@ -619,8 +673,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ sending: { ...s.sending, [sessionId]: true } }));
     // First user message becomes the session title.
     const session = get().sessions.find((s) => s.id === sessionId);
-    if (session && session.title === '新会话') {
-      const title = typedText.slice(0, 24) || (selections?.length ? `${selections[0]!.fileName} ${selectionRangeLabel(selections[0]!)}` : '') || '新会话';
+    if (session && isDefaultTitle(session.title)) {
+      const title = typedText.slice(0, 24) || (selections?.length ? `${selections[0]!.fileName} ${selectionRangeLabel(selections[0]!)}` : '') || session.title;
       autoTitleSession(get, set, sessionId, typedText, title);
     }
     try {
@@ -688,7 +742,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       await window.cyberslots.sessionCancel(sessionId);
     } catch (err) {
       // 中止被引擎拒绝/请求失败必须显性化 — 静默吞掉的话「点停止没反应」无从排查。
-      announceSystem(sessionId, `⚠ 中止失败：${err instanceof Error ? err.message : String(err)}`);
+      const emsg = err instanceof Error ? err.message : String(err);
+      announceSystem(
+        sessionId,
+        (get().settings?.language ?? 'zh') === 'zh' ? `⚠ 中止失败：${emsg}` : `⚠ Cancel failed: ${emsg}`,
+      );
     }
   },
 
@@ -707,7 +765,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   async setModel(modelId) {
     const { activeSessionId } = get();
-    if (activeSessionId) await window.cyberslots.sessionSetModel(activeSessionId, modelId);
+    if (!activeSessionId) return;
+    try {
+      await window.cyberslots.sessionSetModel(activeSessionId, modelId);
+    } catch (err) {
+      // 引擎拒绝/请求失败必须显性化 — 静默吞掉的话「切模型没反应」无从排查。
+      announceSystem(activeSessionId, `⚠ 切换模型失败（${modelId}）：${err instanceof Error ? err.message : String(err)}`);
+    }
   },
 
   async setMode(mode) {
@@ -862,8 +926,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
     // 首条消息即会话标题（与普通提问同规则）。
     const session = get().sessions.find((s) => s.id === activeSessionId);
-    if (session && session.title === '新会话') {
-      autoTitleSession(get, set, activeSessionId, objective, objective.slice(0, 24) || '新会话');
+    if (session && isDefaultTitle(session.title)) {
+      autoTitleSession(get, set, activeSessionId, objective, objective.slice(0, 24) || session.title);
     }
     try {
       await window.cyberslots.sessionGoalSet(activeSessionId, objective);
@@ -878,7 +942,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             kind: 'error',
             id: crypto.randomUUID(),
             turnId: -1,
-            message: `Goal 设置失败：${err instanceof Error ? err.message : String(err)}`,
+            message:
+              (get().settings?.language ?? 'zh') === 'zh'
+                ? `Goal 设置失败：${err instanceof Error ? err.message : String(err)}`
+                : `Goal setup failed: ${err instanceof Error ? err.message : String(err)}`,
             createdAt: Date.now(),
           },
         ],
@@ -889,6 +956,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async controlGoal(action) {
     const { activeSessionId } = get();
     if (activeSessionId) await window.cyberslots.sessionGoalControl(activeSessionId, action);
+  },
+
+  async setSwarm(sessionId, active) {
+    // 乐观翻转；失败回滚（引擎真实状态随后经 swarm.update 回声纠正）。
+    mutateUi(set, sessionId, (ui) => ({ ...ui, swarm: active }));
+    try {
+      await window.cyberslots.sessionSetSwarm(sessionId, active);
+    } catch {
+      mutateUi(set, sessionId, (ui) => ({ ...ui, swarm: !active }));
+    }
   },
 
   async renameSession(id, title) {
@@ -975,21 +1052,31 @@ export function announceSystem(sessionId: string, text: string): void {
  *  主动+兜底并发）只允许一个切换在途，其余静默跳过。 */
 let agyAutoSwitchInflight = false;
 
+/** 时间窗标签 → 对应阈值：5小时/7天各自独立配置（主进程已把分组名归一
+ *  为时间窗标签）；未知窗标签（后端新增分组等）取两者中较低的阈值 ——
+ *  宽松兜底，避免误触发切号/误杀候选账号。 */
+function agyWindowThreshold(group: string, t5h: number, t7d: number): number {
+  return group === '5小时' ? t5h : group === '7天' ? t7d : Math.min(t5h, t7d);
+}
+
 /** 从额度快照挑一个可切换的目标账号。三道硬门槛：查得到(ok) + 非当前账号
- *  + 两个时间窗剩余都 ≥ 阈值（任一窗低就快堵，Claude 组双窗同时约束）。
- *  合格池按「短板窗」min(各窗剩余) 最厚优先 —— 可用寿命由更紧的窗决定，
- *  短板最厚 = 切过去最耐用、最不易立刻再触发。无合格返回 undefined。 */
+ *  + 每个时间窗剩余都 ≥ 各自阈值（5小时/7天独立门槛，任一窗低就快堵）。
+ *  合格池按「短板窗」min(各窗剩余 - 各窗阈值) 最厚优先 —— 两窗尺度不同，
+ *  可用寿命由更贴近自身阈值的窗决定，相对余量最厚 = 切过去最耐用、
+ *  最不易立刻再触发。无合格返回 undefined。 */
 export function pickAgySwitchTarget(
   quotas: AgyQuotaInfo[],
   currentEmail: string | undefined,
-  threshold: number,
+  t5h: number,
+  t7d: number,
 ): AgyQuotaInfo | undefined {
-  const minRemain = (q: AgyQuotaInfo): number => Math.min(...q.groups.map((g) => 100 - g.utilization));
+  const margin = (g: AgyQuotaGroup): number => 100 - g.utilization - agyWindowThreshold(g.group, t5h, t7d);
+  const minMargin = (q: AgyQuotaInfo): number => Math.min(...q.groups.map(margin));
   const eligible = quotas.filter(
-    (q) => q.ok && q.email !== currentEmail && q.groups.length > 0 && q.groups.every((g) => 100 - g.utilization >= threshold),
+    (q) => q.ok && q.email !== currentEmail && q.groups.length > 0 && q.groups.every((g) => margin(g) >= 0),
   );
   if (eligible.length === 0) return undefined;
-  return [...eligible].sort((a, b) => minRemain(b) - minRemain(a))[0];
+  return [...eligible].sort((a, b) => minMargin(b) - minMargin(a))[0];
 }
 
 /** 自动切号编排：挑号 → 覆写 keyring → 按会话类型接回。
@@ -1002,11 +1089,12 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
   if (agyAutoSwitchInflight) return;
   const meta = get().sessions.find((m) => m.id === sessionId);
   if (!meta || meta.engine !== 'antigravity') return;
-  const threshold = get().settings?.antigravityQuotaThreshold ?? 15;
+  const t5h = get().settings?.antigravityQuotaThreshold5h ?? 15;
+  const t7d = get().settings?.antigravityQuotaThreshold7d ?? 5;
   agyAutoSwitchInflight = true;
   try {
     const [snap, quotas] = await Promise.all([window.cyberslots.agyAccountsList(), window.cyberslots.agyQuota(true)]);
-    const target = pickAgySwitchTarget(quotas, snap.active, threshold);
+    const target = pickAgySwitchTarget(quotas, snap.active, t5h, t7d);
     if (!target) {
       // 无合格目标：耗尽兜底 → 打开手动弹窗（switchAgyAccount 已赛马感知）；主动 → 静默放弃。
       if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
@@ -1019,12 +1107,22 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
         useChatStore.setState({ agySwitchFor: null });
         void window.cyberslots.raceResume(meta.raceId);
       } else {
-        announceSystem(sessionId, `🔀 额度耗尽，已自动切换账号：${from} → ${target.email}，正在继续任务…`);
+        announceSystem(
+          sessionId,
+          (useChatStore.getState().settings?.language ?? 'zh') === 'zh'
+            ? `🔀 额度耗尽，已自动切换账号：${from} → ${target.email}，正在继续任务…`
+            : `🔀 Quota exhausted — switched account automatically: ${from} → ${target.email}, resuming the task…`,
+        );
         void get().sendPromptTo(sessionId, '继续');
       }
     } else if (!meta.raceId) {
       // 主动预切：赛马靠编排器下一回合自然用新号，不插播公告；普通会话公告一条。
-      announceSystem(sessionId, `🔀 额度将尽（低于 ${threshold}%），已自动切换账号：${from} → ${target.email}`);
+      announceSystem(
+        sessionId,
+        (useChatStore.getState().settings?.language ?? 'zh') === 'zh'
+          ? `🔀 额度将尽（剩余低于阈值 5小时${t5h}%/7天${t7d}%），已自动切换账号：${from} → ${target.email}`
+          : `🔀 Quota running low (below thresholds 5h ${t5h}% / 7d ${t7d}%) — switched account automatically: ${from} → ${target.email}`,
+      );
     }
   } catch {
     if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
@@ -1033,7 +1131,8 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
   }
 }
 
-/** 主动阈值切号：回合正常收尾后查当前活动账号余量，任一窗低于阈值就预切。
+/** 主动阈值切号：回合正常收尾后查当前活动账号余量，任一窗低于其
+ *  对应阈值（5小时/7天独立配置）就预切。
  *  赛马场景下若同场还有角色在跑则跳过（避免并行回合中途换全局 keyring；
  *  主动切是「未耗尽的预切」，晚一回合无害，交给下次收尾或兜底）。 */
 async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<void> {
@@ -1045,11 +1144,14 @@ async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<v
     );
     if (siblingRunning) return;
   }
-  const threshold = get().settings?.antigravityQuotaThreshold ?? 15;
+  const t5h = get().settings?.antigravityQuotaThreshold5h ?? 15;
+  const t7d = get().settings?.antigravityQuotaThreshold7d ?? 5;
   try {
     const q = await window.cyberslots.agyActiveQuota();
     if (!q.ok || q.groups.length === 0) return;
-    if (q.groups.some((g) => 100 - g.utilization < threshold)) await autoSwitchAgy(get, sessionId, 'threshold');
+    if (q.groups.some((g) => 100 - g.utilization < agyWindowThreshold(g.group, t5h, t7d))) {
+      await autoSwitchAgy(get, sessionId, 'threshold');
+    }
   } catch {
     /* 主动检测失败不打扰 */
   }
@@ -1058,6 +1160,11 @@ async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<v
 
 function mutateUi(set: SetFn, sessionId: string, fn: (ui: SessionUiState) => SessionUiState): void {
   set((s) => ({ ui: { ...s.ui, [sessionId]: fn(s.ui[sessionId] ?? emptyUi()) } }));
+}
+
+/** 默认标题哨兵：主进程按当前语言建会话（新会话 / New chat），两种都视为未命名。 */
+function isDefaultTitle(title: string | undefined): boolean {
+  return title === '新会话' || title === 'New chat';
 }
 
 /** 首条消息自动命名：先立即落截取式标题（侧栏不空窗）；设置为 AI
@@ -1141,6 +1248,9 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       return;
     case 'commands.update':
       mutateUi(set, sessionId, (ui) => ({ ...ui, commands: event.commands }));
+      return;
+    case 'swarm.update':
+      mutateUi(set, sessionId, (ui) => ({ ...ui, swarm: event.active }));
       return;
     case 'usage.update':
       mutateUi(set, sessionId, (ui) => {
@@ -1533,6 +1643,7 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
               turnId: event.turnId,
               requestId: event.requestId,
               question: event.title,
+              body: event.body,
               options: event.options,
               createdAt: now,
             }
@@ -1542,6 +1653,7 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
               turnId: event.turnId,
               requestId: event.requestId,
               title: event.title,
+              body: event.body,
               toolCallId: event.toolCallId,
               options: event.options,
               createdAt: now,
@@ -1573,7 +1685,9 @@ function foldMessage(messages: UnifiedMessage[], event: EngineEvent): UnifiedMes
         }
         return m;
       });
-      if (event.stopReason === 'error' || event.stopReason === 'background') return closed;
+      // background/error 不产统计行 —— 但引擎自发回合里属用户可见回答的
+      // （showStats，如 goal 续跑）例外：照常生成 turn_end，否则无复制回答/token 行。
+      if ((event.stopReason === 'error' || event.stopReason === 'background') && !event.showStats) return closed;
       return [
         ...closed,
         {

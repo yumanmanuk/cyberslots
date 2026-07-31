@@ -11,7 +11,7 @@ import { CircleGauge, Clock } from 'lucide-react';
 import type { AgyActiveQuota, ProviderQuotaInfo, QuotaProviderId, UsageStatsResult } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { BrandSpinner } from './brand';
-import { useT } from '../i18n';
+import { agyWindowLabel, useT } from '../i18n';
 
 export const QUOTA_LABELS: Record<QuotaProviderId, string> = {
   kimi: 'Kimi',
@@ -220,7 +220,7 @@ export function AgyQuotaRow({ data, roomy }: { data: AgyActiveQuota; roomy?: boo
             return roomy ? (
               /* 宽松模式：与 QuotaRow 同宽成列（w-52 块 + w-12/w-12 子列，百分比右对齐） */
               <span key={g.group} className="flex w-52 items-center whitespace-nowrap">
-                <span className="w-12 text-ink-faint">{g.group}</span>
+                <span className="w-12 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
                 <span className={`w-12 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
                   <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
                   {remain}%
@@ -235,7 +235,7 @@ export function AgyQuotaRow({ data, roomy }: { data: AgyActiveQuota; roomy?: boo
             ) : (
               /* 紧凑模式（悬浮小窗）：与 QuotaRow 同宽成列（w-11/w-11 子列，百分比右对齐） */
               <span key={g.group} className="flex items-center whitespace-nowrap">
-                <span className="w-11 text-ink-faint">{g.group}</span>
+                <span className="w-11 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
                 <span className={`w-11 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
                   <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
                   {remain}%

@@ -16,17 +16,18 @@ import { X } from 'lucide-react';
 
 import type { AgyAccount, AgyQuotaInfo } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { agyWindowLabel, useT } from '../i18n';
 import { BrandHero, BrandSpinner } from './brand';
 import { EngineIcon } from './EngineIcon';
 
-function fmtReset(sec?: number): string {
+function fmtReset(sec: number | undefined, t: ReturnType<typeof useT>): string {
   if (sec == null || sec <= 0) return '';
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  if (d > 0) return `${d}天${h}小时后重置`;
-  if (h > 0) return `${h}小时${m}分后重置`;
-  return `${m}分后重置`;
+  if (d > 0) return t('agyResetInDays', { d, h });
+  if (h > 0) return t('agyResetInHours', { h, m });
+  return t('agyResetInMins', { m });
 }
 
 /** 剩余量配色：>30% 绿 / 10–30% 橙 / <10% 红。 */
@@ -42,6 +43,7 @@ function barColor(remain: number): string {
 }
 
 export default function AntigravityAccountDialog(): JSX.Element | null {
+  const t = useT();
   const sessionId = useChatStore((s) => s.agySwitchFor);
   const close = useChatStore((s) => s.closeAgySwitch);
   const doSwitch = useChatStore((s) => s.switchAgyAccount);
@@ -126,24 +128,24 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
         <div className="mb-1 flex items-center justify-between">
           <span className="flex items-center gap-2 text-sm font-semibold">
             <EngineIcon engine="antigravity" size={15} />
-            切换 Antigravity 账号
+            {t('agySwitchTitle')}
           </span>
           <button onClick={close} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
             <X size={16} />
           </button>
         </div>
         <div className="mb-3 text-[12px] leading-5 text-ink-soft">
-          选一个还有额度的账号切过去，切换后会自动发送「继续」接回当前任务。额度按「分组周额度」显示剩余量。
+          {t('agySwitchDesc')}
         </div>
 
         {loading ? (
           <div className="flex flex-col items-center justify-center gap-2 py-10 text-ui text-ink-soft">
             <BrandHero size={56} />
-            <span>正在读取账号池…</span>
+            <span>{t('agyReadingPool')}</span>
           </div>
         ) : accounts.length === 0 ? (
           <div className="py-8 text-center text-ui text-ink-soft">
-            {error ?? '尚未导入账号 — 请到「设置 → 模型 → Antigravity 账号」导入后再切换'}
+            {error ?? t('agyNoAccounts')}
           </div>
         ) : (
           <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
@@ -163,7 +165,7 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
                 >
                   <div className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{a.email}</span>
-                    {isActive && <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">当前</span>}
+                    {isActive && <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">{t('agyCurrent')}</span>}
                     {busy && <BrandSpinner size={13} />}
                   </div>
                   {q && q.ok && q.groups.length > 0 ? (
@@ -173,28 +175,28 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
                         return (
                           <div key={g.group} className="flex items-center gap-2 text-[11px]">
                             {/* w-40：容得下「Claude and GPT · 5小时」全名，避免被截成「· …」被误当成 loading */}
-                            <span className="w-40 shrink-0 truncate text-ink-faint" title={g.group}>{g.group}</span>
+                            <span className="w-40 shrink-0 truncate text-ink-faint" title={g.group}>{agyWindowLabel(t, g.group)}</span>
                             <span className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-bg-input">
                               <span className={`absolute inset-y-0 left-0 rounded-full ${barColor(remain)}`} style={{ width: `${remain}%` }} />
                             </span>
                             <span className={`w-10 shrink-0 text-right font-mono ${remainColor(remain)}`}>{remain}%</span>
                             {g.resetsInSeconds != null && (
-                              <span className="w-24 shrink-0 truncate text-right text-ink-faint">{fmtReset(g.resetsInSeconds)}</span>
+                              <span className="w-24 shrink-0 truncate text-right text-ink-faint">{fmtReset(g.resetsInSeconds, t)}</span>
                             )}
                           </div>
                         );
                       })}
                     </div>
                   ) : q && !q.ok ? (
-                    <span className="text-[11px] text-ink-faint">额度查询失败：{q.error?.slice(0, 60)}</span>
+                    <span className="text-[11px] text-ink-faint">{t('agyQuotaFailedDetail', { err: q.error?.slice(0, 60) ?? '' })}</span>
                   ) : q ? (
                     // ok 但 0 组：响应成功却解析不出分组（字段漂移，主进程已留档）——明示而非假装还在加载。
-                    <span className="text-[11px] text-ink-faint">无额度数据</span>
+                    <span className="text-[11px] text-ink-faint">{t('agyNoQuotaData')}</span>
                   ) : quotaFailed ? (
-                    <span className="text-[11px] text-ink-faint">额度查询失败</span>
+                    <span className="text-[11px] text-ink-faint">{t('agyQuotaFailed')}</span>
                   ) : (
                     <span className="flex items-center gap-1.5 text-[11px] text-ink-faint">
-                      <BrandSpinner size={11} /> 额度加载中…
+                      <BrandSpinner size={11} /> {t('agyQuotaLoading')}
                     </span>
                   )}
                 </button>
@@ -203,7 +205,7 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
           </div>
         )}
 
-        {error && accounts.length > 0 && <div className="mt-2 text-[12px] text-err">切换失败：{error}</div>}
+        {error && accounts.length > 0 && <div className="mt-2 text-[12px] text-err">{t('agySwitchFailed', { err: error })}</div>}
       </div>
     </div>
   );

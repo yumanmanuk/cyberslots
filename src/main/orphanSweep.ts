@@ -12,7 +12,7 @@
 import { spawnSync } from 'node:child_process';
 
 const PS_SCRIPT = `
-$patterns = @('*kimi-code*main.mjs* acp*', '*codex*app-server*', '*ai-server*-server.js*', '*opencode*serve --hostname 127.0.0.1*');
+$patterns = @('*kimi-code*main.mjs* acp*', '*codex*app-server*', '*ai-server*-server.js*', '*opencode*serve --hostname 127.0.0.1*', '*claude-code*cli.js*--input-format stream-json*');
 $alive = @{}; Get-Process | ForEach-Object { $alive[$_.Id] = $true };
 $killed = @();
 Get-CimInstance Win32_Process | ForEach-Object {

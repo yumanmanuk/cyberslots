@@ -4,10 +4,12 @@
  * supports * , - / (dom AND dow, simplified vs. POSIX OR).
  */
 
+import { L } from '../i18n';
+
 /** Throws with a readable message when the expression is malformed. */
 export function validateCron(expr: string): void {
   const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) throw new Error('cron 表达式必须是 5 段：分 时 日 月 周');
+  if (parts.length !== 5) throw new Error(L('cron 表达式必须是 5 段：分 时 日 月 周', 'A cron expression must have 5 fields: min hour day month weekday'));
   const ranges: Array<[number, number]> = [
     [0, 59],
     [0, 23],
@@ -18,14 +20,14 @@ export function validateCron(expr: string): void {
   parts.forEach((field, i) => {
     for (const part of field.split(',')) {
       if (!/^(\*|\d+(-\d+)?)(\/\d+)?$/.test(part)) {
-        throw new Error(`第 ${i + 1} 段 "${part}" 不合法（支持 * , - /）`);
+        throw new Error(L(`第 ${i + 1} 段 "${part}" 不合法（支持 * , - /）`, `Field ${i + 1} "${part}" is invalid (supports * , - /)`));
       }
       const [range] = part.split('/');
       if (range !== '*') {
         const nums = range!.split('-').map(Number);
         const [lo, hi] = ranges[i]!;
         for (const n of nums) {
-          if (n < lo || n > hi) throw new Error(`第 ${i + 1} 段数值 ${n} 超出范围 ${lo}-${hi}`);
+          if (n < lo || n > hi) throw new Error(L(`第 ${i + 1} 段数值 ${n} 超出范围 ${lo}-${hi}`, `Field ${i + 1} value ${n} is out of range ${lo}-${hi}`));
         }
       }
     }

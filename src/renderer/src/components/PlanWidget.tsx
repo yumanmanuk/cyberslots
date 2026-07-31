@@ -8,11 +8,13 @@ import { Check, ChevronRight } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { useT } from '../i18n';
 import { BrandSpinner } from './brand';
 
 type PlanMsg = Extract<UnifiedMessage, { kind: 'plan' }>;
 
 export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.Element | null {
+  const t = useT();
   const plan = useChatStore((s) => {
     const msgs = s.ui[sessionId]?.messages ?? [];
     for (let i = msgs.length - 1; i >= 0; i--) {
@@ -39,7 +41,7 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
         className="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] transition hover:bg-bg-hover"
       >
         <ChevronRight size={12} className={`shrink-0 text-ink-faint transition-transform ${open ? 'rotate-90' : ''}`} />
-        <span className="shrink-0 font-medium text-ink">待办</span>
+        <span className="shrink-0 font-medium text-ink">{t('todoLabel')}</span>
         {/* 收起态不展示当前任务文本 — 只留进度，详情点开看。 */}
         <span className="flex-1" />
         <span className="shrink-0 tabular-nums text-ink-faint">

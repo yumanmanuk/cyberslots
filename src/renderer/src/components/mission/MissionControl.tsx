@@ -20,12 +20,13 @@ import {
 
 import type { CronTask, SessionMeta, WorkspaceInfo } from '@shared/types';
 import type { RaceGroup, RaceStage } from '@shared/race';
-import { RACE_STAGE_LABELS, RACE_STAGE_ORDER, raceHostArchived } from '@shared/race';
+import { RACE_STAGE_ORDER, raceHostArchived } from '@shared/race';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
-import { useT } from '../../i18n';
+import { raceStageKey, useT } from '../../i18n';
 import SessionCard, { defaultAllowOption, findPendingRequest } from './SessionCard';
 import { BrandHero, BrandSpinner } from '../brand';
+import { RaceHorse } from '../RaceHorse';
 import { fmtEta, nextRunAt } from './cronNext';
 
 type ChipId = 'all' | 'projects' | 'chats' | string;
@@ -355,7 +356,7 @@ function RaceStrip({ races }: { races: RaceGroup[] }): JSX.Element {
   return (
     <div className="rounded-xl border border-line bg-bg-panel px-3 py-2">
       <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-soft">
-        <span className="text-[12px] leading-none">🏇</span>
+        <RaceHorse size={18} className="shrink-0" />
         {t('mcRaceLane')}
       </div>
       <div className="flex flex-col gap-1.5">
@@ -374,14 +375,14 @@ function RaceStrip({ races }: { races: RaceGroup[] }): JSX.Element {
                 {RACE_STAGE_ORDER.slice(1, -1).map((st, i) => (
                   <span
                     key={st}
-                    title={RACE_STAGE_LABELS[st]}
+                    title={t(raceStageKey(st))}
                     className={`h-1 w-5 rounded-full transition-colors ${i + 1 < idx ? 'bg-accent' : i + 1 === idx ? 'bg-accent animate-pulse' : 'bg-line'
                       }`}
                   />
                 ))}
               </span>
               <span className="w-16 shrink-0 text-[11px] text-ink-soft">
-                {g.stage === 'repairing' ? RACE_STAGE_LABELS.repairing : RACE_STAGE_LABELS[g.stage]}
+                {t(raceStageKey(g.stage))}
               </span>
               {waiting ? (
                 <span className="shrink-0 animate-pulse rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-medium text-warn">
@@ -413,7 +414,7 @@ function RaceDecisionCard({ race, selected }: { race: RaceGroup; selected: boole
         }`}
     >
       <div className="flex items-center gap-2">
-        <span className="shrink-0 text-[13px] leading-none">🏇</span>
+        <RaceHorse size={18} className="shrink-0" />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{race.prompt}</span>
       </div>
       <div className="mt-1.5 text-[12px] text-ink-soft">{t('mcRaceDecisionDesc')}</div>
@@ -540,7 +541,7 @@ function EmptyHero(): JSX.Element {
           onClick={() => useRaceStore.getState().openSetup()}
           className="flex items-center gap-1.5 rounded-xl border border-line px-4 py-2 text-[13px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
         >
-          <span className="text-[13px] leading-none">🏇</span>
+          <RaceHorse size={18} className="shrink-0" />
           {t('mcStartRace')}
         </button>
       </div>

@@ -10,6 +10,7 @@ import { ChevronDown, Image as ImageIcon, RefreshCw, Search, Star } from 'lucide
 
 import type { OpencodeModelEntry } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { useT } from '../i18n';
 import { BrandSpinner } from './brand';
 
 const RECENT_KEY = 'cs.opencodeRecentModels';
@@ -30,6 +31,7 @@ function writeList(key: string, list: string[]): void {
 }
 
 export default function OpencodeModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
+  const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const uiModels = useChatStore((s) => s.ui[sessionId]?.models);
   const catalog = useChatStore((s) => s.opencodeCatalog);
@@ -51,7 +53,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
   const hidden = useMemo(() => new Set(hiddenList ?? []), [hiddenList]);
   // bySlug 用全量目录 — 当前模型即使被隐藏，触发钮/详情卡仍能解析展示名。
   const bySlug = useMemo(() => new Map((catalog?.models ?? []).map((m) => [m.slug, m])), [catalog]);
-  // 列表只展示未隐藏的模型（设置 → 模型 → opencode 卡片可管理黑名单）。
+  // 列表只展示未隐藏的模型（设置 → 引擎 → opencode 卡片可管理黑名单）。
   const models = useMemo(() => (catalog?.models ?? []).filter((m) => !hidden.has(m.slug)), [catalog, hidden]);
   // 恢复态兜底：models.update 未到时用持久化的 meta.modelId。
   const current = uiModels?.current || meta?.modelId || '';
@@ -85,7 +87,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
     return (
       <button className="flex items-center gap-1.5 rounded-lg px-2 py-1 text-ui text-ink-faint" disabled>
         <BrandSpinner size={12} />
-        模型加载中…
+        {t('ocModelLoading')}
       </button>
     );
   }
@@ -133,7 +135,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
         {m.inputModalities?.includes('image') && <ImageIcon size={10} />}
       </span>
       <button
-        title={favs.includes(m.slug) ? '取消收藏' : '收藏'}
+        title={favs.includes(m.slug) ? t('ocUnfav') : t('ocFav')}
         onClick={(e) => {
           e.stopPropagation();
           toggleFav(m.slug);
@@ -158,7 +160,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
         title={activeEntry?.displayName ?? current}
         className="flex w-full min-w-0 items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
-        <span className="min-w-0 truncate font-medium">{activeEntry?.displayName ?? (current || '选择模型')}</span>
+        <span className="min-w-0 truncate font-medium">{activeEntry?.displayName ?? (current || t('ocPickModel'))}</span>
         <ChevronDown size={12} className="shrink-0" />
       </button>
       {open && (
@@ -174,12 +176,12 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                 </div>
                 <div className="mb-2 truncate font-mono text-[10px] text-ink-faint">{detail.slug}</div>
                 <div className="space-y-1 text-[10.5px] leading-4 text-ink-soft">
-                  <DetailRow k="能力" v={[detail.toolCall && 'Tool calling', detail.reasoning && 'Reasoning', detail.attachment && '附件'].filter(Boolean).join(' · ') || '—'} />
-                  <DetailRow k="输入/输出" v={`${(detail.inputModalities ?? ['text']).join(',')} → ${(detail.outputModalities ?? ['text']).join(',')}`} />
-                  {/* 不做「免费」判定 — 自定义 provider 的 0/0 只是未定价兑底，只陈述价格事实。 */}
-                  <DetailRow k="价格 $/1M" v={detail.costInput == null && detail.costOutput == null ? '未定价' : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
-                  {detail.contextWindow ? <DetailRow k="上下文" v={fmtCtx(detail.contextWindow)} /> : null}
-                  {detail.efforts?.length ? <DetailRow k="思考档位" v={detail.efforts.join(' / ')} /> : null}
+                  <DetailRow k={t('ocDetailCapability')} v={[detail.toolCall && 'Tool calling', detail.reasoning && 'Reasoning', detail.attachment && t('ocDetailAttachment')].filter(Boolean).join(' · ') || '—'} />
+                  <DetailRow k={t('ocDetailIO')} v={`${(detail.inputModalities ?? ['text']).join(',')} → ${(detail.outputModalities ?? ['text']).join(',')}`} />
+                  {/* 不做「免费」判定 — 自定义 provider 的 0/0 只是未定价兜底，只陈述价格事实。 */}
+                  <DetailRow k={t('ocDetailPrice')} v={detail.costInput == null && detail.costOutput == null ? t('ocDetailUnpriced') : `In $${detail.costInput ?? '?'} · Out $${detail.costOutput ?? '?'}`} />
+                  {detail.contextWindow ? <DetailRow k={t('ocDetailContext')} v={fmtCtx(detail.contextWindow)} /> : null}
+                  {detail.efforts?.length ? <DetailRow k={t('ocDetailEfforts')} v={detail.efforts.join(' / ')} /> : null}
                 </div>
               </div>
             )}
@@ -191,11 +193,11 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                   autoFocus
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="搜索模型…"
+                  placeholder={t('ocSearchModel')}
                   className="w-full bg-transparent text-ui outline-none placeholder:text-ink-faint"
                 />
                 <button
-                  title="刷新模型目录"
+                  title={t('ocRefreshCatalog')}
                   onClick={() => void loadCatalog(true)}
                   className="shrink-0 rounded p-0.5 text-ink-faint transition hover:text-ink"
                 >
@@ -206,23 +208,23 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
               <div className="max-h-72 overflow-y-auto py-1">
                 {catalog?.error && (
                   <div className="px-3 py-2 text-[11px] leading-5 text-err">
-                    模型目录加载失败：{catalog.error}
+                    {t('ocCatalogFailed', { err: catalog.error })}
                   </div>
                 )}
                 {!catalog && (
                   <div className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-ink-faint">
-                    <BrandSpinner size={11} /> 加载中…
+                    <BrandSpinner size={11} /> {t('ocLoading')}
                   </div>
                 )}
                 {favModels.length > 0 && !q && (
                   <>
-                    <GroupTitle label="收藏" />
+                    <GroupTitle label={t('ocGroupFav')} />
                     {favModels.map(row)}
                   </>
                 )}
                 {recentModels.length > 0 && !q && (
                   <>
-                    <GroupTitle label="最近使用" />
+                    <GroupTitle label={t('ocGroupRecent')} />
                     {recentModels.map(row)}
                   </>
                 )}
@@ -233,24 +235,24 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
                   </div>
                 ))}
                 {catalog && !filtered.length && !catalog.error && (
-                  <div className="px-3 py-2 text-[11px] text-ink-faint">无匹配模型</div>
+                  <div className="px-3 py-2 text-[11px] text-ink-faint">{t('ocNoMatch')}</div>
                 )}
               </div>
               {/* provider 引导 + 隐藏模型管理入口（不做连接管理 — 委托 opencode 自身） */}
               <div className="flex items-center gap-2 border-t border-line px-3 py-1.5 text-[10px] text-ink-faint">
                 <span className="min-w-0 flex-1 truncate">
-                  连接更多 provider：在终端运行 <span className="font-mono">opencode auth login</span>
+                  {t('ocConnectMore')} <span className="font-mono">opencode auth login</span>
                 </span>
                 {hidden.size > 0 && (
                   <button
-                    title="在设置 → 模型 中管理展示哪些模型"
+                    title={t('ocManageHiddenTitle')}
                     onClick={() => {
                       setOpen(false);
                       useChatStore.setState({ settingsOpen: true });
                     }}
                     className="shrink-0 rounded px-1 py-px transition hover:bg-bg-hover hover:text-ink"
                   >
-                    已隐藏 {hidden.size} 个
+                    {t('ocHiddenCount', { n: hidden.size })}
                   </button>
                 )}
               </div>

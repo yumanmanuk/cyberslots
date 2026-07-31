@@ -5,15 +5,17 @@
  */
 
 import type { RaceAdoptStrategy, RaceRole } from '@shared/race';
+import { L } from '../i18n';
 
 /**
- * Read-only guard for engines without a read-only sandbox mode (kimi).
- * Codex/opencode racers run in `plan` mode instead and don't need this.
+ * Read-only guard for engines without a usable read-only sandbox
+ * (kimi / antigravity — 两者在赛马里以 auto 自动批准跑，靠本护栏兑底).
+ * Codex/opencode/omp racers run in `plan` mode instead and don't need this.
  */
 export const READONLY_GUARD =
-  '【只读约束】本轮只做分析与规划，严禁修改、创建或删除任何文件，也不要执行有副作用的命令。仅输出文字。';
+  '【只读约束】本轮只做分析与规划，严禁修改、创建或删除任何文件（包括把方案/报告写成 .md 等文档），也不要执行有副作用的命令。完整内容必须直接作为回复正文输出，不得以「见某文件」代替。';
 
-/** Prepend the read-only guard for kimi read-only roles. */
+/** Prepend the read-only guard for kimi/agy read-only roles. */
 export function withGuard(text: string, needsGuard: boolean): string {
   return needsGuard ? `${READONLY_GUARD}\n\n${text}` : text;
 }
@@ -23,6 +25,7 @@ export function planPrompt(task: string): string {
   return [
     '你正在参加一场"方案赛马"：请针对下面的任务，独立产出一份**简洁、可执行的实施方案**。',
     '要求：分点列出关键步骤；标注风险与回滚考量；不要写代码，只给方案。',
+    '交卷方式：完整方案直接作为回复正文输出；不要写入任何文件，也不要只给文件路径或「见报告」式的摘要。',
     '',
     '【任务】',
     task,
@@ -50,7 +53,7 @@ export function rebuttalPrompt(ownPlan: string, opponents: Array<{ label: string
     '## 🛡 辩护（只谈你自己方案中的设计点）',
     '预判对手可能对你方案的质疑，对容易被误读或看似激进的设计做出澄清与理由说明。',
     '',
-    '语言精炼，分条陈述。',
+    '语言精炼，分条陈述；完整内容直接作为回复正文输出，不要写入任何文件。',
     '',
     oppBlocks,
     '',
@@ -187,9 +190,9 @@ export function roleSessionTitle(role: RaceRole, racePrompt: string): string {
     racerA: '🏇A',
     racerB: '🏇B',
     racerC: '🏇C',
-    judge: '⚖裁判',
-    builder: '🔨执行',
-    auditor: '🛡审计',
+    judge: L('⚖裁判', '⚖Judge'),
+    builder: L('🔨执行', '🔨Build'),
+    auditor: L('🛡审计', '🛡Audit'),
   };
   return `${tag[role]} · ${head}`;
 }

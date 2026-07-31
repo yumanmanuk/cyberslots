@@ -26,12 +26,24 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
   const sendKey = useChatStore((s) => s.settings?.sendKey ?? 'enter');
-  const [text, setText] = useState('');
+  // 未发送草稿按分支会话保留（卸载时写回 store，与主 Composer 同机制）。
+  const [text, setText] = useState(() => useChatStore.getState().drafts[sessionId] ?? '');
+  const textRef = useRef(text);
+  textRef.current = text;
+  useEffect(() => {
+    return () => {
+      useChatStore.setState((s) => ({ drafts: { ...s.drafts, [sessionId]: textRef.current } }));
+    };
+  }, [sessionId]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
   const messages = ui?.messages ?? [];
+  // 分支起始继承的历史仅作上下文（引擎侧仍完整可见），面板不重复渲染主对话——
+  // 只显示分支内新产生的问答；forkSeedCount 为 fork 时的历史条数。
+  const seed = meta?.forkSeedCount ?? 0;
+  const visible = seed > 0 ? messages.slice(seed) : messages;
   const sending = useChatStore((s) => !!s.sending[sessionId]);
   const busy = meta?.status === 'running' || meta?.status === 'awaiting' || sending;
 
@@ -89,7 +101,11 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
         className="min-h-0 flex-1 overflow-y-auto"
       >
         <div ref={contentRef} className="flex flex-col gap-3 px-3 py-3 text-[13px]">
-          <MessageList sessionId={sessionId} messages={messages} />
+          {visible.length === 0 && !busy ? (
+            <p className="px-1 py-8 text-center text-[12px] leading-5 text-ink-faint">{t('sidechatEmpty')}</p>
+          ) : (
+            <MessageList sessionId={sessionId} messages={visible} />
+          )}
         </div>
       </div>
 
@@ -108,7 +124,7 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
           />
           <div className="flex items-center gap-1.5 px-3 pb-2.5">
             <MiniModelPicker sessionId={sessionId} />
-            {(meta?.engine === 'codex' || meta?.engine === 'opencode') && <EffortPicker sessionId={sessionId} align="left" />}
+            {(meta?.engine === 'codex' || meta?.engine === 'opencode' || meta?.engine === 'kimi') && <EffortPicker sessionId={sessionId} align="left" />}
             <div className="flex-1" />
             {busy ? (
               <button

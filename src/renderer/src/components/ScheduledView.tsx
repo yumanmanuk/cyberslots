@@ -10,6 +10,7 @@ import { CalendarClock, Pencil, Play, Plus, Trash2, X } from 'lucide-react';
 
 import type { CronTask } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
+import { useT } from '../i18n';
 import { BrandHero, BrandSpinner } from './brand';
 
 const EMPTY: CronTask = {
@@ -24,6 +25,7 @@ const EMPTY: CronTask = {
 };
 
 export default function ScheduledView(): JSX.Element | null {
+  const t = useT();
   const open = useChatStore((s) => s.cronOpen);
   const tasks = useChatStore((s) => s.cronTasks);
   const loadCron = useChatStore((s) => s.loadCron);
@@ -70,7 +72,7 @@ export default function ScheduledView(): JSX.Element | null {
       >
         <div className="flex items-center justify-between border-b border-line px-5 py-3">
           <span className="flex items-center gap-2 text-sm font-semibold">
-            <CalendarClock size={15} /> 定时任务
+            <CalendarClock size={15} /> {t('scheduled')}
           </span>
           <div className="flex items-center gap-1">
             <button
@@ -80,7 +82,7 @@ export default function ScheduledView(): JSX.Element | null {
               }}
               className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-ui text-ink-soft hover:bg-bg-hover"
             >
-              <Plus size={13} /> 新建
+              <Plus size={13} /> {t('cronNew')}
             </button>
             <button onClick={close} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
               <X size={16} />
@@ -95,15 +97,15 @@ export default function ScheduledView(): JSX.Element | null {
             <div className="flex flex-col items-center gap-2 py-14 text-ui text-ink-faint">
               {/* 面板内容区级等待按规范用 BrandHero */}
               <BrandHero size={48} />
-              读取定时任务…
+              {t('cronLoading')}
             </div>
           ) : tasks.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-14 text-center text-ui leading-7 text-ink-faint">
               <BrandHero size={56} />
               <div>
-                还没有定时任务
+                {t('cronEmpty')}
                 <br />
-                新建一个：按 cron 计划自动向引擎发送 prompt，结果落到新会话并系统通知
+                {t('cronEmptyHint')}
               </div>
             </div>
           ) : (
@@ -144,11 +146,12 @@ function TaskRow({
 }): JSX.Element {
   /* 立即运行会真正拉起引擎会话 — 进行中态用品牌 spinner 替换图标（同 MissionControl） */
   const [running, setRunning] = useState(false);
+  const t = useT();
   return (
     <div className={`rounded-xl border border-line px-4 py-3 ${task.enabled ? 'bg-bg' : 'bg-bg-panel/50 opacity-70'}`}>
       <div className="flex items-center gap-2">
         <button
-          title={task.enabled ? '点击停用' : '点击启用'}
+          title={task.enabled ? t('cronToggleOff') : t('cronToggleOn')}
           onClick={onToggle}
           className={`h-4 w-7 rounded-full transition ${task.enabled ? 'bg-accent' : 'bg-bg-active'}`}
         >
@@ -157,7 +160,7 @@ function TaskRow({
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{task.name}</span>
         <code className="rounded-md bg-bg-active px-1.5 py-0.5 font-mono text-[11px] text-ink-soft">{task.cron}</code>
         <button
-          title="立即运行"
+          title={t('mcCronRunNow')}
           disabled={running}
           onClick={() => {
             setRunning(true);
@@ -167,18 +170,18 @@ function TaskRow({
         >
           {running ? <BrandSpinner size={13} /> : <Play size={13} />}
         </button>
-        <button title="编辑" onClick={onEdit} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+        <button title={t('cronEdit')} onClick={onEdit} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <Pencil size={13} />
         </button>
-        <button title="删除" onClick={onDelete} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-err">
+        <button title={t('cronDelete')} onClick={onDelete} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-err">
           <Trash2 size={13} />
         </button>
       </div>
       <div className="mt-1.5 line-clamp-2 pl-9 text-[11.5px] text-ink-faint">{task.prompt}</div>
       {task.lastRunAt && (
         <div className="mt-1 pl-9 text-[10.5px] text-ink-faint">
-          上次运行 {new Date(task.lastRunAt).toLocaleString()} ·{' '}
-          <span className={task.lastResult === 'ok' ? 'text-ok' : 'text-err'}>{task.lastResult === 'ok' ? '成功' : '失败'}</span>
+          {t('cronLastRun', { time: new Date(task.lastRunAt).toLocaleString() })} ·{' '}
+          <span className={task.lastResult === 'ok' ? 'text-ok' : 'text-err'}>{task.lastResult === 'ok' ? t('cronOk') : t('cronFail')}</span>
         </div>
       )}
     </div>
@@ -200,39 +203,40 @@ function TaskForm({
   error: string;
   saving: boolean;
 }): JSX.Element {
+  const t = useT();
   const pickFolder = async (): Promise<void> => {
     const dir = await window.cyberslots.dialogPickFolder();
     if (dir) onChange({ ...task, cwd: dir });
   };
   return (
     <div className="space-y-3">
-      <Field label="任务名">
+      <Field label={t('cronFieldName')}>
         <input
           value={task.name}
           onChange={(e) => onChange({ ...task, name: e.target.value })}
-          placeholder="例如：每日晨报"
+          placeholder={t('cronNamePlaceholder')}
           className="w-full rounded-lg border border-line bg-bg-input px-2.5 py-1.5 text-ui outline-none focus:border-accent"
         />
       </Field>
-      <Field label="Cron 计划（分 时 日 月 周）">
+      <Field label={t('cronFieldCron')}>
         <input
           value={task.cron}
           onChange={(e) => onChange({ ...task, cron: e.target.value })}
           spellCheck={false}
           className="w-56 rounded-lg border border-line bg-bg-input px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-accent"
         />
-        <span className="ml-2 text-[11px] text-ink-faint">如 0 9 * * 1-5 = 工作日每天 9:00</span>
+        <span className="ml-2 text-[11px] text-ink-faint">{t('cronExample')}</span>
       </Field>
       <Field label="Prompt">
         <textarea
           value={task.prompt}
           onChange={(e) => onChange({ ...task, prompt: e.target.value })}
           rows={4}
-          placeholder="触发时发送给引擎的任务指令"
+          placeholder={t('cronPromptPlaceholder')}
           className="w-full resize-y rounded-lg border border-line bg-bg-input px-2.5 py-1.5 text-ui outline-none focus:border-accent"
         />
       </Field>
-      <Field label="工作目录（留空 = 纯对话）">
+      <Field label={t('cronFieldCwd')}>
         <div className="flex items-center gap-2">
           <input
             value={task.cwd}
@@ -242,14 +246,14 @@ function TaskForm({
             className="flex-1 rounded-lg border border-line bg-bg-input px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-accent"
           />
           <button onClick={() => void pickFolder()} className="rounded-lg border border-line px-3 py-1.5 text-ui text-ink-soft hover:bg-bg-hover">
-            选择…
+            {t('cronPickFolder')}
           </button>
         </div>
       </Field>
       {error && <div className="rounded-lg bg-err/10 px-3 py-2 text-ui text-err">{error}</div>}
       <div className="flex justify-end gap-2 pt-1">
         <button onClick={onCancel} className="rounded-lg border border-line px-4 py-1.5 text-ui text-ink-soft hover:bg-bg-hover">
-          取消
+          {t('cancel')}
         </button>
         <button
           onClick={onSubmit}
@@ -257,7 +261,7 @@ function TaskForm({
           className="flex items-center gap-1.5 rounded-lg bg-accent px-4 py-1.5 text-ui font-medium text-white hover:opacity-90 disabled:opacity-60"
         >
           {saving && <BrandSpinner size={12} />}
-          保存任务
+          {t('cronSave')}
         </button>
       </div>
     </div>

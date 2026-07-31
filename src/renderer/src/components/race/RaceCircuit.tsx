@@ -7,13 +7,14 @@ import { Check } from 'lucide-react';
 
 import type { RaceStage } from '@shared/race';
 import { RACE_STAGE_ORDER } from '@shared/race';
+import { useT, type MsgKey } from '../../i18n';
 
-const NODES: { label: string; icon: string; stage: RaceStage }[] = [
-  { label: '双规划', icon: '⚑', stage: 'planning' },
-  { label: '交叉反驳', icon: '⚔', stage: 'rebuttal' },
-  { label: '裁判', icon: '⚖', stage: 'judging' },
-  { label: '执行', icon: '🔨', stage: 'building' },
-  { label: '审计', icon: '🛡', stage: 'auditing' },
+const NODES: { labelKey: MsgKey; icon: string; stage: RaceStage }[] = [
+  { labelKey: 'raceStagePlanning', icon: '⚑', stage: 'planning' },
+  { labelKey: 'raceStageRebuttal', icon: '⚔', stage: 'rebuttal' },
+  { labelKey: 'raceRoleJudge', icon: '⚖', stage: 'judging' },
+  { labelKey: 'raceStageBuilding', icon: '🔨', stage: 'building' },
+  { labelKey: 'raceRoleAuditor', icon: '🛡', stage: 'auditing' },
 ];
 
 /** 进度秩：repairing 视作已到审计段（修复意味着审计发生过）。
@@ -57,6 +58,7 @@ export default function RaceCircuit({
   /** 提供则节点可点击回看（仅已到达的节点）。 */
   onPick?: (stage: RaceStage) => void;
 }): JSX.Element {
+  const t = useT();
   const active = activeIndex(stage);
   const progress = stageRank(stage);
   // repairing 无专属节点，归到执行节点（与 active 同口径）。
@@ -64,6 +66,7 @@ export default function RaceCircuit({
   return (
     <div className="mx-auto flex w-full max-w-3xl items-start px-6 py-4">
       {NODES.map((n, i) => {
+        const label = t(n.labelKey);
         const done = active > i;
         const isActive = active === i;
         const reached = progress >= stageRank(n.stage);
@@ -71,11 +74,11 @@ export default function RaceCircuit({
         // 回看态：正在看的节点与实际进行节点不同时，给它一道环高亮。
         const isViewing = !!onPick && viewIdx === i && viewIdx !== active;
         return (
-          <div key={n.label} className="flex flex-1 items-start last:flex-none">
+          <div key={n.stage} className="flex flex-1 items-start last:flex-none">
             <div
               className={`group flex w-16 shrink-0 flex-col items-center gap-1.5 ${clickable ? 'cursor-pointer' : ''}`}
               onClick={clickable ? () => onPick!(n.stage) : undefined}
-              title={clickable ? `查看「${n.label}」环节（只读，不打断执行）` : undefined}
+              title={clickable ? t('raceCircuitViewTitle', { label }) : undefined}
             >
               <div
                 className={`flex h-9 w-9 items-center justify-center rounded-full border text-[15px] transition ${done
@@ -88,11 +91,11 @@ export default function RaceCircuit({
                 {done ? <Check size={15} /> : n.icon}
               </div>
               <span className={`text-[11px] ${isActive ? 'font-semibold text-accent' : done ? 'text-ink-soft' : 'text-ink-faint'}`}>
-                {n.label}
+                {label}
               </span>
               {/* 修复回环：审计节点下方标注轮次 */}
               {i === 4 && stage === 'repairing' && (
-                <span className="text-[10px] text-err">⟲ 修复第 {repairRound} 轮</span>
+                <span className="text-[10px] text-err">{t('raceRepairRound', { n: repairRound })}</span>
               )}
             </div>
             {i < NODES.length - 1 && (

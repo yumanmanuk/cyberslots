@@ -8,6 +8,7 @@ import { ChevronDown, ChevronRight, FileText, Folder, FolderOpen, RefreshCw } fr
 
 import type { FsNode } from '@shared/ipc';
 import { BrandSpinner } from '../brand';
+import { useT } from '../../i18n';
 
 interface Props {
   /** workspace 全部根目录（首个为 primary）；普通项目传单元素数组。 */
@@ -49,6 +50,7 @@ const GIT_COLORS: Record<string, string> = {
 };
 
 export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
+  const t = useT();
   const [children, setChildren] = useState<Record<string, FsNode[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // 多根时根分组可折叠 — 记「已折叠」而非「已展开」，默认全展开。
@@ -189,19 +191,19 @@ export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
     >
       <div className="flex items-center justify-between px-2 py-1.5">
         <span className="truncate font-mono text-[11px] text-ink-faint" title={multi ? roots.join('\n') : roots[0]}>
-          {multi ? `${roots.length} 个项目` : roots[0]!.split(/[\\/]/).pop()}
+          {multi ? t('treeProjectCount', { n: roots.length }) : roots[0]!.split(/[\\/]/).pop()}
         </span>
-        <button onClick={() => void refresh()} title="刷新" className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
+        <button onClick={() => void refresh()} title={t('treeRefresh')} className="rounded-md p-1 text-ink-faint hover:bg-bg-hover hover:text-ink">
           <RefreshCw size={12} />
         </button>
       </div>
       <div className="flex-1 overflow-y-auto px-1 pb-2">
         {error && <div className="px-2 py-1 text-[11px] text-err">{error}</div>}
-        {dragOver && <div className="px-2 py-1 text-[11px] text-accent">松开导入到 {roots[0]!.split(/[\\/]/).pop()}</div>}
+        {dragOver && <div className="px-2 py-1 text-[11px] text-accent">{t('treeDropImport', { name: roots[0]!.split(/[\\/]/).pop() ?? '' })}</div>}
         {/* 根目录未到达（undefined）= 读盘中，与空目录（[]）区分 — 避免初载瞬间的无指示空白 */}
         {children[roots[0]!] === undefined && !error ? (
           <div className="flex items-center gap-2 px-2 py-2 text-[12px] text-ink-faint">
-            <BrandSpinner size={12} /> 读取目录…
+            <BrandSpinner size={12} /> {t('treeReadingDir')}
           </div>
         ) : multi ? (
           // 多根：每个项目一个可折叠分组（VS Code 多根风格），primary 在首。

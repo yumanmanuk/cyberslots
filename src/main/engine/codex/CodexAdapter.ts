@@ -22,6 +22,7 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
 import { NdjsonRpc } from './rpc';
@@ -167,13 +168,13 @@ export class CodexAdapter implements EngineAdapter {
       this.emit({
         type: 'error',
         source: 'engine',
-        message: `codex 进程意外退出 (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
+        message: `${L('codex 进程意外退出', 'codex process exited unexpectedly')} (code=${code} signal=${signal ?? 'none'})\n${this.stderrTail.slice(-8).join('\n')}`,
       });
       this.emit({ type: 'session.status', status: 'error', detail: 'engine-exited' });
     });
     child.on('error', (err) => {
       if (this.disposed) return;
-      this.emit({ type: 'error', source: 'client', message: `无法启动 codex CLI: ${err.message}` });
+      this.emit({ type: 'error', source: 'client', message: `${L('无法启动 codex CLI', 'Failed to launch the codex CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
 
@@ -235,7 +236,7 @@ export class CodexAdapter implements EngineAdapter {
       const res = await withTimeout(this.rpc!.request<Json>(method, params), INIT_TIMEOUT_MS, method);
       const thread = res.thread as Json | undefined;
       const id = String(thread?.id ?? '');
-      if (!id) throw new Error(`${method} 未返回 thread id`);
+      if (!id) throw new Error(L(`${method} 未返回 thread id`, `${method} returned no thread id`));
       return id;
     } catch (err) {
       if (method === 'thread/resume') {
@@ -244,7 +245,7 @@ export class CodexAdapter implements EngineAdapter {
           this.emit({
             type: 'error',
             source: 'engine',
-            message: `线程恢复失败，已新建线程继续: ${errorMessage(err)}`,
+            message: `${L('线程恢复失败，已新建线程继续', 'Thread resume failed — started a new thread to continue')}: ${errorMessage(err)}`,
           });
         }
         const { threadId: _drop, ...rest } = params;
@@ -333,7 +334,7 @@ export class CodexAdapter implements EngineAdapter {
   private flushPendingCancel(): void {
     if (!this.cancelRequested || !this.activeCodexTurnId) return;
     void this.cancel().catch((err) => {
-      this.emit({ type: 'error', source: 'engine', message: `中止失败：${errorMessage(err)}` });
+      this.emit({ type: 'error', source: 'engine', message: `${L('中止失败：', 'Cancel failed: ')}${errorMessage(err)}` });
     });
   }
 
@@ -403,7 +404,7 @@ export class CodexAdapter implements EngineAdapter {
       await this.requireRpc().request('thread/compact/start', { threadId: this.threadId });
     } catch (err) {
       // 显性化压缩失败（如回合进行中被引擎拒绝），不再静默。
-      this.emit({ type: 'error', source: classifyError(err), message: `压缩失败：${errorMessage(err)}` });
+      this.emit({ type: 'error', source: classifyError(err), message: `${L('压缩失败：', 'Compaction failed: ')}${errorMessage(err)}` });
       throw err;
     }
   }
@@ -555,7 +556,7 @@ export class CodexAdapter implements EngineAdapter {
             type: 'tool.upsert',
             turnId: this.turnId,
             toolCallId: this.compactReportId,
-            title: `已压缩上下文：${fmtTokensK(this.compactBeforeUsed)} → ${fmtTokensK(used)} tokens`,
+            title: L(`已压缩上下文：${fmtTokensK(this.compactBeforeUsed)} → ${fmtTokensK(used)} tokens`, `Context compacted: ${fmtTokensK(this.compactBeforeUsed)} → ${fmtTokensK(used)} tokens`),
             toolKind: 'other',
             status: 'completed',
           });
@@ -635,7 +636,7 @@ export class CodexAdapter implements EngineAdapter {
       }
       case 'error': {
         const err = params.error as Json | undefined;
-        this.emit({ type: 'error', turnId, source: 'provider', message: String(err?.message ?? '未知引擎错误') });
+        this.emit({ type: 'error', turnId, source: 'provider', message: String(err?.message ?? L('未知引擎错误', 'Unknown engine error')) });
         return;
       }
       default:
@@ -690,7 +691,7 @@ export class CodexAdapter implements EngineAdapter {
           type: 'tool.upsert',
           turnId,
           toolCallId: id,
-          title: paths.length ? `修改 ${paths.map((p) => p.split(/[\\/]/).pop()).join(', ')}` : '修改文件',
+          title: paths.length ? `${L('修改', 'Edit')} ${paths.map((p) => p.split(/[\\/]/).pop()).join(', ')}` : L('修改文件', 'Edit files'),
           toolKind: 'edit',
           status: mapItemStatus(String(item.status ?? 'inProgress')),
           locations: paths.length ? paths : undefined,
@@ -712,7 +713,7 @@ export class CodexAdapter implements EngineAdapter {
           type: 'tool.upsert',
           turnId,
           toolCallId: id,
-          title: `搜索: ${String(item.query ?? '')}`,
+          title: `${L('搜索', 'Search')}: ${String(item.query ?? '')}`,
           toolKind: 'fetch',
           status: 'completed',
         });
@@ -737,7 +738,7 @@ export class CodexAdapter implements EngineAdapter {
           type: 'tool.upsert',
           turnId,
           toolCallId: id,
-          title: status === 'completed' ? '已压缩上下文' : '正在压缩上下文…',
+          title: status === 'completed' ? L('已压缩上下文', 'Context compacted') : L('正在压缩上下文…', 'Compacting context…'),
           toolKind: 'other',
           status,
         });
@@ -761,12 +762,12 @@ export class CodexAdapter implements EngineAdapter {
       const isExec = method.startsWith('item/commandExecution');
       const requestId = randomUUID();
       const title = isExec
-        ? `执行命令: ${String(params.command ?? '(见工具卡片)')}`
-        : `写入文件${params.reason ? `（${String(params.reason)}）` : ''}`;
+        ? `${L('执行命令', 'Run command')}: ${String(params.command ?? L('(见工具卡片)', '(see tool card)'))}`
+        : `${L('写入文件', 'Write file')}${params.reason ? `（${String(params.reason)}）` : ''}`;
       const options: PermissionOptionView[] = [
-        { optionId: 'accept', name: '允许一次', kind: 'allow_once' },
-        { optionId: 'acceptForSession', name: '本会话总是允许', kind: 'allow_always' },
-        { optionId: 'decline', name: '拒绝', kind: 'reject_once' },
+        { optionId: 'accept', name: L('允许一次', 'Allow once'), kind: 'allow_once' },
+        { optionId: 'acceptForSession', name: L('本会话总是允许', 'Always allow in this session'), kind: 'allow_always' },
+        { optionId: 'decline', name: L('拒绝', 'Reject'), kind: 'reject_once' },
       ];
       const busyKey = `approval:${requestId}`;
       this.busyAdd(busyKey);
@@ -915,7 +916,7 @@ function errorMessage(err: unknown): string {
 function withTimeout<T>(promise: Promise<T>, ms: number, tag: string): Promise<T> {
   let timer: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${tag} 超时 (${ms}ms)`)), ms);
+    timer = setTimeout(() => reject(new Error(L(`${tag} 超时 (${ms}ms)`, `${tag} timed out (${ms}ms)`))), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
 }

@@ -10,6 +10,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { downloadMarkdown } from '../../planDoc';
+import { useT } from '../../i18n';
 
 export default function ArtifactZoom({
   title,
@@ -20,6 +21,7 @@ export default function ArtifactZoom({
   text: string;
   onClose: () => void;
 }): JSX.Element {
+  const t = useT();
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') onClose();
@@ -37,14 +39,14 @@ export default function ArtifactZoom({
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-5 py-3">
           <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{title}</span>
           <button
-            title="下载 md"
+            title={t('raceDownloadMd')}
             onClick={() => downloadMarkdown(title, text)}
             className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
           >
             <Download size={14} />
           </button>
           <button
-            title="关闭（Esc）"
+            title={t('raceZoomClose')}
             onClick={onClose}
             className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
           >

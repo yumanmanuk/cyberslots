@@ -12,15 +12,57 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
-/** 与应用配色对齐的终端主题（读 CSS 变量，明暗自动跟随）。 */
+/** 与应用配色对齐的终端主题（读 CSS 变量，明暗自动跟随）。
+ *  ANSI 16 色必须按明暗各配一套 —— xterm 默认调色板是深底设计，
+ *  浅色奶油底上亮黄/亮白（PSReadLine 命令名、数字等）会糊成看不清；
+ *  浅色版整体压深并向主题暖调靠（yellow → 深金 --accent 系）。 */
 function readTheme(): Record<string, string> {
   const cs = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
+  const dark = document.documentElement.dataset.mode === 'dark';
+  const ansi = dark
+    ? {
+        black: '#3a3733',
+        red: '#d14d41',
+        green: '#66a06b',
+        yellow: '#cea54b',
+        blue: '#6f9fd2',
+        magenta: '#b97fb5',
+        cyan: '#5aa8a0',
+        white: '#cecdc3',
+        brightBlack: '#84817a',
+        brightRed: '#e0685c',
+        brightGreen: '#7fb984',
+        brightYellow: '#e3c078',
+        brightBlue: '#8cb4e0',
+        brightMagenta: '#cf9ccb',
+        brightCyan: '#79c2ba',
+        brightWhite: '#f1efe4',
+      }
+    : {
+        black: '#37352f',
+        red: '#b3392f',
+        green: '#34794f',
+        yellow: '#8a681c',
+        blue: '#3a6ea5',
+        magenta: '#8f4e94',
+        cyan: '#247e76',
+        white: '#6f6c64', // 浅底上 white/brightWhite 映射为深墨 — 可读性优先
+        brightBlack: '#79766c',
+        brightRed: '#c5493f',
+        brightGreen: '#3a8f5f',
+        brightYellow: '#96721f',
+        brightBlue: '#2f5f94',
+        brightMagenta: '#7d4287',
+        brightCyan: '#1e6b64',
+        brightWhite: '#37352f',
+      };
   return {
     background: v('--bg-input', '#1e1e1e'),
     foreground: v('--ink', '#d4d4d4'),
-    cursor: v('--accent', '#e6b450'),
+    cursor: v('--accent', '#cea54b'),
     selectionBackground: v('--bg-active', '#264f78'),
+    ...ansi,
   };
 }
 
@@ -68,8 +110,16 @@ export default function TerminalPanel({ termId, cwd, width, hidden }: { termId: 
     ro.observe(host);
     term.focus();
 
+    // 运行时切明暗模式 → 重读主题（含 ANSI 调色板），否则旧终端留着
+    // 另一套明暗的颜色会直接不可读。
+    const mo = new MutationObserver(() => {
+      term.options.theme = readTheme();
+    });
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-mode'] });
+
     return () => {
       ro.disconnect();
+      mo.disconnect();
       offData();
       inputDisp.dispose();
       term.dispose();

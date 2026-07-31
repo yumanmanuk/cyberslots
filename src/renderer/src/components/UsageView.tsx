@@ -31,8 +31,9 @@ import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
 import { AgyQuotaRow, fmtInt, fmtShort, QuotaRow, useActiveAgyQuota, useProviderQuotas } from './UsageQuota';
 
 // kimi 不参与用量统计（无可靠的真实 token 上报），筛选器列其余引擎
-// （omp 走 pi-ai 的真实 usage 上报，antigravity 走 agy result.usage，均计入统计）。
-const ENGINES: EngineId[] = ['codex', 'opencode', 'omp', 'antigravity'];
+// （omp 走 pi-ai 的真实 usage 上报，antigravity 走 agy result.usage，
+//   claude 走 result.usage + total_cost_usd，均计入统计）。
+const ENGINES: EngineId[] = ['codex', 'opencode', 'omp', 'antigravity', 'claude'];
 
 // 趋势图序列色 — 固定品牌色（明暗主题下均有足够对比度），与 cc-switch 同源。
 const COLOR_INPUT = '#3b82f6';

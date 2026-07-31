@@ -11,7 +11,7 @@
 import { create } from 'zustand';
 
 import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig, RaceRoleConfigs, RaceStage } from '@shared/race';
-import { RACE_ROLE_LABELS } from '@shared/race';
+import { raceRoleKey, translate } from '../i18n';
 import { announceSystem, useChatStore } from './chatStore';
 
 interface RaceState {
@@ -44,6 +44,8 @@ interface RaceState {
   adopt(strategy: RaceAdoptStrategy, comment?: string): Promise<void>;
   /** ④a 反悔：撤回采纳决策（裁判尚未出方案时），回到选策略关口。 */
   revokeAdopt(): Promise<void>;
+  /** 让裁判按既定策略重新出方案（换裁判引擎后手动重跑，v+1 覆盖）。 */
+  rerunJudge(): Promise<void>;
   /** ④c 批注 → 裁判修订。 */
   revise(annotation: string): Promise<void>;
   /** 定稿 → Builder。 */
@@ -120,7 +122,7 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
         next.eliminated = [...(g.eliminated ?? []), event.role];
         // 剔除痕迹回流宿主对话；若错误横幅正是被剔者贡献的，一并清掉。
         if (g.parentSessionId) {
-          announceSystem(g.parentSessionId, `✂ 赛马中已剔除${RACE_ROLE_LABELS[event.role]}，剩余选手继续比赛`);
+          announceSystem(g.parentSessionId, translate('raceAnnounceEliminated', { role: translate(raceRoleKey(event.role)) }));
         }
         return { races: { ...s.races, [raceId]: next }, errors: { ...s.errors, [raceId]: undefined } };
       }
@@ -143,8 +145,8 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
           announceSystem(
             g.parentSessionId,
             event.delivered
-              ? `🏇 赛马完成：「${g.prompt.slice(0, 40)}」· 审计通过，成果已交付（最终方案 v${g.finalPlanVersion}）。点输入栏 🏇 可回看全程与产物`
-              : `🏇 赛马已结束：「${g.prompt.slice(0, 40)}」（未交付：中止或修复轮次耗尽）。点输入栏 🏇 可回看`,
+              ? translate('raceAnnounceDoneDelivered', { prompt: g.prompt.slice(0, 40), v: g.finalPlanVersion })
+              : translate('raceAnnounceDoneEnded', { prompt: g.prompt.slice(0, 40) }),
           );
         }
         break;
@@ -187,7 +189,7 @@ export const useRaceStore = create<RaceState>((set, get) => ({
     const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed });
     // 发起痕迹回流宿主对话 —— 历史里能翻到“这里跑过一场赛马”。
     if (parentSessionId) {
-      announceSystem(parentSessionId, `🏇 已发起赛马：「${prompt.slice(0, 40)}」—— 双方规划中，点输入栏 🏇 进入观战`);
+      announceSystem(parentSessionId, translate('raceAnnounceStarted', { prompt: prompt.slice(0, 40) }));
     }
     set((s) => ({
       races: { ...s.races, [g.id]: g },
@@ -271,6 +273,13 @@ export const useRaceStore = create<RaceState>((set, get) => ({
     await window.cyberslots.raceRevokeAdopt(raceId);
     set((s) => ({ errors: { ...s.errors, [raceId]: undefined } }));
     refreshRace(set, raceId); // adopt 已清，拉权威快照回到选策略关口
+  },
+
+  async rerunJudge() {
+    const raceId = get().activeRaceId;
+    if (!raceId) return;
+    set((s) => ({ errors: { ...s.errors, [raceId]: undefined } }));
+    await window.cyberslots.raceRerunJudge(raceId);
   },
 
   async retryRacer(role) {

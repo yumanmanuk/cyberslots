@@ -22,6 +22,7 @@ import type {
   PermissionMode,
   ProviderQuotaInfo,
   SessionMeta,
+  SlashCommandInfo,
   UnifiedMessage,
   UsageStatsQuery,
   UsageStatsResult,
@@ -56,6 +57,7 @@ export const IPC = {
   sessionSteer: 'session:steer',
   sessionGoalSet: 'session:goal-set',
   sessionGoalControl: 'session:goal-control',
+  sessionSetSwarm: 'session:set-swarm',
   sessionMarkRead: 'session:mark-read',
   sessionSetArchived: 'session:set-archived',
   sessionAssignWorkspace: 'session:assign-workspace',
@@ -93,6 +95,7 @@ export const IPC = {
   fsImport: 'fs:import',
   fsIsDir: 'fs:is-dir',
   openIn: 'sys:open-in',
+  openersDetect: 'sys:openers-detect',
   attachmentSaveTemp: 'attachment:save-temp',
   slashList: 'slash:list',
   // 面板内嵌终端
@@ -106,6 +109,7 @@ export const IPC = {
   raceGet: 'race:get',
   raceAdopt: 'race:adopt',
   raceRevokeAdopt: 'race:revoke-adopt',
+  raceRerunJudge: 'race:rerun-judge',
   raceRevise: 'race:revise',
   raceFinalize: 'race:finalize',
   raceResume: 'race:resume',
@@ -170,13 +174,21 @@ export interface FileContent {
 
 export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt' | 'terminal';
 
+/** 需本机安装才可用的「外部打开」目标（explorer/wt/terminal 系统自带，不检测）。 */
+export type OpenerId = 'vscode' | 'cursor' | 'antigravity' | 'gitbash';
+
+/** 各外部打开程序的本机可用性（可执行文件存在或命令在 PATH）。 */
+export type OpenerAvailability = Record<OpenerId, boolean>;
+
 /** 斜线命令候选项（skill / command），来源：引擎全局目录或会话项目目录。 */
 export interface SlashItem {
   /** 触发名（不含斜线），如 imagegen / codereview。 */
   name: string;
   /** 一句话描述（SKILL.md frontmatter description，或 md 首个有效行）。 */
   description: string;
-  kind: 'skill' | 'command';
+  /** builtin = 引擎运行时推送、且未能回贴到本地源文件的命令（无源文件，
+   *  展示为「引擎」）。已回贴到本地 skill/command 文件的推送项会标 skill/command。 */
+  kind: 'skill' | 'command' | 'builtin';
   /** global = 引擎用户目录；project = 会话工作目录。 */
   scope: 'global' | 'project';
   /** 所属引擎生态；generic = 通用目录（.agents/skills，各引擎均可读）。 */
@@ -189,6 +201,9 @@ export interface SlashListRequest {
   /** 会话工作目录（'' = 纯聊天模式，仅扫全局目录）。 */
   cwd: string;
   engine: EngineId;
+  /** 引擎运行时推送的命令（commands.update）—主进程用全生态扫描索引
+   *  给它们回贴来源（全局/项目 + skill/command 类别），未命中保留 builtin。 */
+  pushedCommands?: SlashCommandInfo[];
 }
 
 /** 本会话被 AI 编辑的单个文件（含行级增删与变更类型），供「变更」面板接受/回退。 */
@@ -245,6 +260,8 @@ export interface CyberSlotsApi {
   /** Engine-native goal (codex thread/goal). */
   sessionGoalSet(sessionId: string, objective: string): Promise<void>;
   sessionGoalControl(sessionId: string, action: GoalControlAction): Promise<void>;
+  /** 原生 swarm 模式开关（kimi KAP agent_config.swarm_mode）。 */
+  sessionSetSwarm(sessionId: string, active: boolean): Promise<void>;
   sessionMarkRead(sessionId: string): Promise<void>;
   /** 归档/还原：归档仅从侧栏隐藏，数据与引擎会话全保留（区别于删除）。 */
   sessionSetArchived(sessionId: string, archived: boolean): Promise<void>;
@@ -307,6 +324,8 @@ export interface CyberSlotsApi {
   /** 路径是否目录（拖放到输入框时区分文件夹/文件引用）。 */
   fsIsDir(path: string): Promise<boolean>;
   openIn(target: OpenTarget, path: string): Promise<void>;
+  /** 探测「外部打开」目标程序的本机可用性（VS Code / Cursor / Antigravity / Git Bash）；进程级缓存。 */
+  openersDetect(force?: boolean): Promise<OpenerAvailability>;
   /** 粘贴/拖拽的二进制写临时文件，返回绝对路径（图片附件）。 */
   attachmentSaveTemp(bytes: Uint8Array, ext: string): Promise<string>;
   /** 斜线命令候选：扫描引擎全局 + 项目级 skills/commands（输入 / 唤起补全菜单）。 */
@@ -335,6 +354,8 @@ export interface CyberSlotsApi {
   raceAdopt(raceId: string, strategy: RaceAdoptStrategy, comment?: string): Promise<void>;
   /** ④a 反悔：撤回采纳决策（仅裁判尚未出方案时），回到选策略关口。 */
   raceRevokeAdopt(raceId: string): Promise<void>;
+  /** 让裁判按既定策略重新出方案（换裁判引擎后手动重跑，v+1 覆盖）。 */
+  raceRerunJudge(raceId: string): Promise<void>;
   /** 裁判融合方案的批注修订循环。 */
   raceRevise(raceId: string, annotation: string): Promise<void>;
   /** 定稿裁判方案 → 交给 Builder 执行。 */

@@ -78,10 +78,10 @@ export default function UndoConfirmDialog({
                   <span className="min-w-0 flex-1 truncate">{c.name}</span>
                   {c.sessions > 1 && (
                     <span
-                      title={`${c.sessions} 个会话都编辑了此文件；回退会一并影响它们`}
+                      title={t('wsMultiSessionTitle', { n: c.sessions })}
                       className="shrink-0 rounded bg-warn/15 px-1 text-[10px] text-warn"
                     >
-                      {c.sessions} 会话
+                      {t('wsSessionsBadge', { n: c.sessions })}
                     </span>
                   )}
                   <span className="font-mono text-[11px] text-ok">+{c.adds}</span>

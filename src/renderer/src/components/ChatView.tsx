@@ -8,12 +8,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import {
-  Bot,
+  ArrowDown,
   FileDiff,
   FolderTree,
   MessagesSquare,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   SquareTerminal,
 } from 'lucide-react';
 
@@ -25,7 +26,10 @@ import Composer from './Composer';
 import PermissionSheet from './PermissionSheet';
 import QuestionPin from './QuestionPin';
 import RightDock, { SIDE_PENDING, SIDE_PREFIX, TERM_PREFIX } from './RightDock';
+import { RaceHorse } from './RaceHorse';
+import OpenInRail from './OpenInRail';
 import TurnRail from './TurnRail';
+import DotMenu from './DotMenu';
 import { BrandHero, BrandSpinner } from './brand';
 
 export default function ChatView({ sessionId }: { sessionId: string }): JSX.Element {
@@ -36,16 +40,36 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const sidechatIds = useChatStore((s) => s.sidechats[sessionId]) ?? [];
   const terms = useChatStore((s) => s.terminals[sessionId]) ?? [];
   const planPreviewId = useChatStore((s) => s.planPreview[sessionId]);
+  const pendingFilePreview = useChatStore((s) => s.pendingFilePreview[sessionId]);
   const openSidechat = useChatStore((s) => s.openSidechat);
+  // Open in 的文件夹候选：cwd 置首（primary）+ workspace 其他根去重（同 RightDock termFolders）。
+  const workspace = useChatStore((s) => s.settings?.workspaces.find((w) => w.id === meta?.workspaceId));
   const [panelOpen, setPanelOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('files');
   const [sidechatOpening, setSidechatOpening] = useState(false);
+  // 标题内联重命名（⋯ 菜单触发）：Enter/blur 提交，Esc 取消，空标题不提交。
+  const [renaming, setRenaming] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  // 与 stickToBottom 同源的 state 镜像 — 仅用于「回到底部」按钮显隐（ref 不触发重渲染）。
+  const [atBottom, setAtBottom] = useState(true);
 
   const messages = ui?.messages ?? [];
   const isWork = meta?.chatMode === 'work';
+  const openFolders =
+    isWork && meta
+      ? [meta.cwd, ...(workspace?.folders ?? []).filter((f) => f !== meta.cwd)].filter(Boolean)
+      : [];
+
+  // 切会话时复位贴底状态 — 组件实例跨会话复用，避免上个会话的离底状态泄漏到新会话。
+  useEffect(() => {
+    stickToBottom.current = true;
+    setAtBottom(true);
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [sessionId]);
 
   // Auto-follow the stream unless the user scrolled up.
   useEffect(() => {
@@ -74,7 +98,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
 
   // 当前会话可用的 tab 集合（顺序 = dock tab 栏顺序）。
   const allTabs = [
-    ...(isWork ? ['files', 'changes', 'agents'] : []),
+    ...(isWork ? ['files', 'changes'] : []),
     ...terms.map((tm) => `${TERM_PREFIX}${tm.id}`),
     ...sidechatIds.map((id) => `${SIDE_PREFIX}${id}`),
     ...(sidechatOpening ? [SIDE_PENDING] : []), // fork 进行中的占位 tab
@@ -90,6 +114,18 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     }
   }, [planPreviewId]);
 
+  // AI 正文文件 chip 点击 → 开 files tab（信号不在这清除 — 由 WorkspacePanel
+  // 挂载后消费并清除，保证点击时 dock 未开也能正确落地）。
+  useEffect(() => {
+    if (pendingFilePreview) {
+      setActiveTab('files');
+      setPanelOpen(true);
+    }
+  }, [pendingFilePreview]);
+
+  // 切会话时退出重命名编辑态（组件实例跨会话复用）。
+  useEffect(() => setRenaming(false), [sessionId]);
+
   // 切会话 / 关 tab 后校验 activeTab 合法性：失效则回退首个 tab 或收起。
   useEffect(() => {
     if (!panelOpen || allTabs.includes(activeTab)) return;
@@ -101,7 +137,18 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const onScroll = (): void => {
     const el = scrollRef.current;
     if (!el) return;
-    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickToBottom.current = near;
+    setAtBottom(near);
+  };
+
+  const scrollToBottom = (): void => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 先恢复贴底跟随（平滑滚动途中新消息到达时由 ResizeObserver 接管直接贴底）。
+    stickToBottom.current = true;
+    setAtBottom(true);
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
   };
 
   const openTab = (tab: string): void => {
@@ -113,6 +160,14 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const toggleTab = (tab: string): void => {
     if (panelOpen && activeTab === tab) setPanelOpen(false);
     else openTab(tab);
+  };
+
+  /** 提交重命名：仅非空且有变化才落库（renameSession 已同步侧栏）。 */
+  const commitRename = (): void => {
+    setRenaming(false);
+    const next = titleDraft.trim();
+    if (!next || !meta || next === meta.title) return;
+    void useChatStore.getState().renameSession(sessionId, next);
   };
 
   /** 新开终端 tab；cwd 由调用方选定（rail 默认 primary，"+"菜单可选其他根）。 */
@@ -134,14 +189,17 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   };
 
   /** rail 终端钮：已在终端 tab → 收起；有终端 → 激活最近一个；
-   *  没有 → 在默认目录（workspace 的 primary 根）新开。 */
-  const onRailTerminal = (): void => {
+   *  没有 → 多目录 workspace 先弹菜单选目录（返回 'menu' 交给钮内下拉），
+   *  单目录直接在 cwd 新开。 */
+  const onRailTerminal = (): 'menu' | undefined => {
     if (panelOpen && activeTab.startsWith(TERM_PREFIX)) {
       setPanelOpen(false);
       return;
     }
     if (terms.length) openTab(`${TERM_PREFIX}${terms[terms.length - 1]!.id}`);
+    else if (openFolders.length > 1) return 'menu';
     else if (meta) addTerminalTab(meta.cwd);
+    return;
   };
 
   /** rail sidechat 钮：每次点击都新建一个分支 tab（关 tab 即清理分支）。 */
@@ -204,21 +262,16 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           >
             <FileDiff size={16} />
           </RailButton>
-          <RailButton
-            title={t('railAgents')}
-            active={panelOpen && activeTab === 'agents'}
-            onClick={() => toggleTab('agents')}
-          >
-            <Bot size={16} />
-          </RailButton>
           <div className="my-1 h-px w-5 bg-line" />
-          <RailButton
+          <TermRailButton
             title={t('railTerminal')}
             active={panelOpen && activeTab.startsWith(TERM_PREFIX)}
+            folders={openFolders}
             onClick={onRailTerminal}
-          >
-            <SquareTerminal size={16} />
-          </RailButton>
+            onPickFolder={addTerminalTab}
+          />
+          {/* 用外部程序打开当前工作目录（workspace 多根时菜单内选文件夹） */}
+          <OpenInRail folders={openFolders} />
         </>
       )}
       {meta && (
@@ -240,7 +293,36 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       {/* 中间列保底宽度 — 防右侧 dock 把会话流/Composer 挤成条（溢出时由 dock 一侧收缩） */}
       <div className="flex h-full min-w-[340px] flex-1 flex-col">
         <header className="flex h-12 shrink-0 items-center gap-3 px-5">
-          <span className="min-w-0 truncate text-sm font-medium">{meta?.title ?? '会话'}</span>
+          {renaming ? (
+            <input
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitRename();
+                else if (e.key === 'Escape') setRenaming(false);
+              }}
+              onBlur={commitRename}
+              className="w-64 rounded-md border border-line bg-bg-input px-2 py-0.5 text-sm font-medium outline-none transition focus:border-accent"
+            />
+          ) : (
+            <span className="min-w-0 truncate text-sm font-medium">{meta?.title ?? t('sessionFallback')}</span>
+          )}
+          {meta && (
+            <DotMenu
+              hoverReveal={false}
+              items={[
+                {
+                  icon: <Pencil size={13} />,
+                  label: t('renameChat'),
+                  onClick: () => {
+                    setTitleDraft(meta.title ?? '');
+                    setRenaming(true);
+                  },
+                },
+              ]}
+            />
+          )}
           {isWork && meta && (
             <span className="truncate rounded-md bg-bg-panel px-2 py-[3px] font-mono text-[11px] leading-none text-ink-soft">{meta.cwd}</span>
           )}
@@ -261,9 +343,9 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
                   <BrandHero size={64} />
                   {meta?.status === 'starting' ? (
                     /* 启动不阻塞输入 — 消息会在引擎就绪后自动投递 */
-                    <span className="text-[14px]">引擎后台启动中，可直接发送消息</span>
+                    <span className="text-[14px]">{t('chatStartingBanner')}</span>
                   ) : (
-                    <span className="text-[14px]">发送第一条消息开始对话</span>
+                    <span className="text-[14px]">{t('chatFirstMessage')}</span>
                   )}
                 </div>
               )}
@@ -273,6 +355,16 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           <TurnRail sessionId={sessionId} scrollRef={scrollRef} />
           {/* 当前提问滚出上缘后钉在顶部的提问胶囊（点击回跳） */}
           <QuestionPin sessionId={sessionId} scrollRef={scrollRef} />
+          {/* 离底时悬浮在滚动区底缘中央的「回到底部」（Composer 上方，与 QuestionPin 同款胶囊样式） */}
+          {!atBottom && (
+            <button
+              onClick={scrollToBottom}
+              title={t('scrollToBottom')}
+              className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border border-line bg-bg-active p-2 text-ink-soft shadow-md transition-colors hover:text-ink"
+            >
+              <ArrowDown size={14} />
+            </button>
+          )}
         </div>
 
         <PermissionSheet sessionId={sessionId} />
@@ -312,27 +404,29 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
  *  「↗ 打开执行会话」等入口跳进来后，靠这条横幅看清自己在哪、
  *  一键回赛马视图或回发起该赛马的宿主对话。 */
 function RaceCrumb({ raceId }: { raceId: string }): JSX.Element | null {
+  const t = useT();
   const race = useRaceStore((s) => s.races[raceId]);
   const openRace = useRaceStore((s) => s.openRace);
   const selectSession = useChatStore((s) => s.selectSession);
   if (!race) return null;
   return (
     <div className="mx-5 mb-1 flex shrink-0 items-center gap-2 rounded-lg border border-line bg-bg-panel/70 px-3 py-1.5 text-[12px] text-ink-soft">
+      <RaceHorse size={16} className="shrink-0" />
       <span className="min-w-0 flex-1 truncate" title={race.prompt}>
-        🏇 赛马「{race.prompt}」的角色会话
+        {t('chatRaceRoleBanner', { prompt: race.prompt })}
       </span>
       <button
         onClick={() => openRace(raceId)}
         className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
       >
-        ↩ 返回赛马
+        {t('chatBackToRace')}
       </button>
       {race.parentSessionId && (
         <button
           onClick={() => selectSession(race.parentSessionId!)}
           className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
         >
-          返回发起对话
+          {t('chatBackToHost')}
         </button>
       )}
     </div>
@@ -382,7 +476,7 @@ function Heartbeat({ sessionId, busy, awaiting }: { sessionId: string; busy: boo
   }
 
   return (
-    <div className="flex items-center gap-1.5" title={`距上次引擎事件 ${idleSec}s`}>
+    <div className="flex items-center gap-1.5" title={t('chatIdleSince', { s: idleSec })}>
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
       <span className={`text-[11px] tabular-nums ${tone}`}>{label}</span>
     </div>
@@ -457,5 +551,94 @@ function RailButton({
     >
       {children}
     </button>
+  );
+}
+
+const termBasename = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+
+/**
+ * TermRailButton — rail 终端钮：onClick 返回 'menu' 时（多目录 workspace
+ * 要新开终端）弹出向左菜单选工作目录，交互与下方 OpenInRail 一致
+ * （fixed 定位规避 overflow 裁剪，Esc/点空处关闭）；条目样式同 RightDock
+ * 「+」菜单（新终端 · 目录名 + primary 徽标）。
+ */
+function TermRailButton({
+  title,
+  active,
+  folders,
+  onClick,
+  onPickFolder,
+}: {
+  title: string;
+  active: boolean;
+  folders: string[];
+  onClick: () => 'menu' | undefined;
+  onPickFolder: (cwd: string) => void;
+}): JSX.Element {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  // 下拉锚点：同 OpenInRail — rail 在最右列且外层 overflow-clip，fixed 向左展开。
+  const dropStyle = (): React.CSSProperties => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return {};
+    return { position: 'fixed', top: r.top, right: Math.max(8, window.innerWidth - r.left + 6) };
+  };
+
+  return (
+    <div className="relative">
+      <button
+        ref={btnRef}
+        title={title}
+        onClick={() => {
+          if (open) setOpen(false);
+          else if (onClick() === 'menu') setOpen(true);
+        }}
+        className={`flex h-8 w-8 items-center justify-center rounded-lg transition ${
+          active || open ? 'bg-accent-soft text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+        }`}
+      >
+        <SquareTerminal size={16} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div
+            style={dropStyle()}
+            className="z-20 max-h-[70vh] min-w-52 overflow-y-auto rounded-lg border border-line bg-bg-input py-1 shadow-lg"
+          >
+            {folders.map((f, i) => (
+              <button
+                key={f}
+                title={f}
+                onClick={() => {
+                  setOpen(false);
+                  onPickFolder(f);
+                }}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink transition hover:bg-bg-hover"
+              >
+                <SquareTerminal size={13} className="shrink-0 text-ink-soft" />
+                <span className="min-w-0 flex-1 truncate">
+                  {t('dockNewTerminal')} · {termBasename(f)}
+                </span>
+                {i === 0 && (
+                  <span className="shrink-0 rounded border border-line px-1 text-[9.5px] text-ink-faint">{t('primaryFolder')}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }

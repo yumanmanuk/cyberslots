@@ -20,6 +20,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 
 import type { EngineEvent, PermissionMode, ToolCallContent, UsageInfo } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { queryActiveAgyQuota } from './agyAccounts';
 import { resolveAgyCli } from './resolveAntigravity';
@@ -144,7 +145,7 @@ export class AntigravityAdapter implements EngineAdapter {
         }
       });
       child.on('error', (err) => {
-        this.emit({ type: 'error', turnId, source: 'client', message: `无法启动 agy CLI: ${err.message}` });
+        this.emit({ type: 'error', turnId, source: 'client', message: `${L('无法启动 agy CLI', 'Failed to launch the agy CLI')}: ${err.message}` });
         this.emit({ type: 'turn.ended', turnId, stopReason: 'error' });
         finish();
       });
@@ -158,7 +159,7 @@ export class AntigravityAdapter implements EngineAdapter {
             type: 'error',
             turnId,
             source: classifyError(tail),
-            message: `agy 退出 code=${code}\n${tail}`.trim(),
+            message: `${L('agy 退出', 'agy exited with')} code=${code}\n${tail}`.trim(),
           });
           this.emit({ type: 'turn.ended', turnId, stopReason: 'error', durationMs: Date.now() - started });
         }
@@ -174,8 +175,10 @@ export class AntigravityAdapter implements EngineAdapter {
   private buildArgs(promptText: string, effort?: string): string[] {
     const args = ['-p', promptText, '--output-format', 'stream-json', '--print-timeout', PRINT_TIMEOUT];
     if (this.modelId) args.push('--model', this.modelId);
-    // effort 仅对 claude 系有效；gemini flash slug 已含档位，再加 --effort 会冲突报错（坑①）。
-    if (effort && /^claude/i.test(this.modelId)) args.push('--effort', effort);
+    // effort 仅对档位独立的 claude 系有效；gemini flash slug 已含档位（坑①）、
+    // claude …-thinking slug 同理档位烧死（实测 --effort 直报 not supported），
+    // 两类都不能再带 --effort，否则 agy 拒启、回合秒死。
+    if (effort && /^claude/i.test(this.modelId) && !/thinking/i.test(this.modelId)) args.push('--effort', effort);
     if (this.conversationId) args.push('--conversation', this.conversationId);
     // 赛马全自动（auto/yolo）免交互批准；default/plan 尊重 settings（软拒绝）。
     if (this.mode === 'yolo' || this.mode === 'auto') args.push('--dangerously-skip-permissions');
@@ -256,15 +259,21 @@ export class AntigravityAdapter implements EngineAdapter {
       case 'tool': {
         const info = (step.tool_info ?? {}) as Record<string, unknown>;
         const name = str(step.tool_name) ?? str(info.name);
+        const kind = mapToolKind(name);
+        // 从 parameters 提取命令行/文件路径充当标题 —— 裸工具名（view_file/
+        // run_command）在展开明细里没有信息量，对齐 kimi/codex 的观感
+        // （「Read duration.js」而非「Read view_file」）。
+        const subject = toolSubject(info, kind);
         this.emit({
           type: 'tool.upsert',
           turnId,
           toolCallId: `${turnId}:${String(step.step_index ?? this.turnId)}`,
-          title: name,
-          toolKind: mapToolKind(name),
+          title: subject ?? name,
+          toolKind: kind,
           toolName: name,
           status: str((info.error as Record<string, unknown>)?.type) ? 'failed' : 'completed',
           content: mapToolContent(info),
+          locations: kind === 'read' && subject ? [subject] : undefined,
         });
         return;
       }
@@ -283,7 +292,7 @@ export class AntigravityAdapter implements EngineAdapter {
     this.captureCid(result.conversation_id);
     const status = String(result.status ?? '');
     if (status === 'ERROR' || status === 'INVALID') {
-      const msg = str(result.error) || '运行失败';
+      const msg = str(result.error) || L('运行失败', 'Run failed');
       this.emit({ type: 'error', turnId, source: classifyError(msg), message: msg });
       // agy 把模型侧一切失败（429 额度耗尽/401/过载…）统一包装成
       // “Agent execution terminated due to error.”，真实原因只写 cli.log 不进
@@ -317,13 +326,16 @@ export class AntigravityAdapter implements EngineAdapter {
       const exhausted = q.groups.filter((g) => g.utilization >= 99.95);
       if (exhausted.length === 0) return;
       const windows = exhausted
-        .map((g) => `${g.group}额度${g.resetsInSeconds != null ? `（${fmtReset(g.resetsInSeconds)}后重置）` : ''}`)
-        .join('、');
+        .map((g) => L(`${g.group}额度${g.resetsInSeconds != null ? `（${fmtReset(g.resetsInSeconds)}后重置）` : ''}`, `${g.group} quota${g.resetsInSeconds != null ? ` (resets in ${fmtReset(g.resetsInSeconds)})` : ''}`))
+        .join(L('、', ', '));
       this.emit({
         type: 'error',
         turnId,
         source: 'provider',
-        message: `当前账号${q.email ? ` ${q.email}` : ''}的 ${windows} 已耗尽，请切换账号后重试。`,
+        message: L(
+          `当前账号${q.email ? ` ${q.email}` : ''}的 ${windows} 已耗尽，请切换账号后重试。`,
+          `The ${windows} of the current account${q.email ? ` ${q.email}` : ''} is exhausted — switch accounts and retry.`,
+        ),
         // 结构化标记：渲染层据此触发自动切号/兜底弹窗（不靠文案字符串匹配）。
         quotaExhausted: true,
       });
@@ -357,6 +369,41 @@ function mapToolKind(name: string | undefined): string {
   return 'other';
 }
 
+/** 从 tool_info.parameters 提取展示主体（命令行 / 文件路径 / 查询词）。
+ *  agy 参数字段命名无权威留档 → 已知键优先，兼容大小写变体；都对不上时
+ *  兜底扫描任意含路径分隔符的短字符串值（防把整段文本当路径）。 */
+function toolSubject(info: Record<string, unknown>, kind: string): string | undefined {
+  const params = (info.parameters ?? {}) as Record<string, unknown>;
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = str(params[k]);
+      if (v) return v;
+    }
+    return undefined;
+  };
+  if (kind === 'execute') return pick('CommandLine', 'command', 'Command', 'cmd');
+  const known = pick(
+    'AbsolutePath',
+    'absolute_path',
+    'TargetFile',
+    'target_file',
+    'FilePath',
+    'file_path',
+    'path',
+    'Path',
+    'SearchDirectory',
+    'Query',
+    'query',
+    'Url',
+    'url',
+  );
+  if (known) return known;
+  for (const v of Object.values(params)) {
+    if (typeof v === 'string' && v.length > 0 && v.length <= 260 && /[\\/]/.test(v) && !/\s{2,}|\n/.test(v)) return v;
+  }
+  return undefined;
+}
+
 function mapToolContent(info: Record<string, unknown>): ToolCallContent | undefined {
   const out: ToolCallContent = {};
   const output = str(info.output);
@@ -385,7 +432,7 @@ function describeEmptyError(step: Record<string, unknown>): string {
   if (step.step_index != null) meta.push(`step ${String(step.step_index)}`);
   const state = str(step.state);
   if (state) meta.push(state);
-  const head = meta.length ? `模型报告错误（${meta.join(' · ')}）` : '模型报告错误';
+  const head = meta.length ? L(`模型报告错误（${meta.join(' · ')}）`, `Model reported an error (${meta.join(' · ')})`) : L('模型报告错误', 'Model reported an error');
   // 序列化原始 step（剔除冗长/无意义字段），截断防刷屏 — 已知为空的 text/message 不重复展示。
   try {
     const rest: Record<string, unknown> = {};
@@ -401,12 +448,12 @@ function describeEmptyError(step: Record<string, unknown>): string {
   return head;
 }
 
-/** 秒 → 「2小时7分」式人话（与 IDE 的 “Resets in 2h7m” 对齐）。 */
+/** 秒 → 「2小时2分」式人话（与 IDE 的 “Resets in 2h7m” 对齐）。 */
 function fmtReset(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.round((seconds % 3600) / 60);
-  if (h > 0) return m > 0 ? `${h}小时${m}分` : `${h}小时`;
-  return m > 0 ? `${m}分钟` : '不到1分钟';
+  if (h > 0) return m > 0 ? L(`${h}小时${m}分`, `${h}h ${m}m`) : L(`${h}小时`, `${h}h`);
+  return m > 0 ? L(`${m}分钟`, `${m}m`) : L('不到1分钟', 'under a minute');
 }
 
 function str(v: unknown): string | undefined {
