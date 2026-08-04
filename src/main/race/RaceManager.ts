@@ -17,6 +17,8 @@ import { IPC } from '@shared/ipc';
 import type { EngineEvent, UsageInfo } from '@shared/types';
 import type { RaceAdoptStrategy, RaceCreateRequest, RaceEvent, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from '../engine/SessionManager';
+import type { SettingsStore } from '../config/settings';
+import { preSwitchAgyIfLagging } from '../engine/antigravity/agyAccounts';
 import { L } from '../i18n';
 import { log } from '../log/logger';
 import { RaceOrchestrator, type RaceSessionHost, type RaceSpawnSpec } from './RaceOrchestrator';
@@ -24,8 +26,10 @@ import { RaceOrchestrator, type RaceSessionHost, type RaceSpawnSpec } from './Ra
 export class RaceManager implements RaceSessionHost {
   private target: WebContents | undefined;
   private readonly orchestrator: RaceOrchestrator;
+  /** 已做过开局账号预检的赛马（每场仅一次，内存态）。 */
+  private readonly preCheckedRaces = new Set<string>();
 
-  constructor(private readonly sessions: SessionManager) {
+  constructor(private readonly sessions: SessionManager, private readonly settings: SettingsStore) {
     this.orchestrator = new RaceOrchestrator(this, this.loadPersisted());
   }
 
@@ -144,6 +148,23 @@ export class RaceManager implements RaceSessionHost {
       lastUser?.text === echo ? L('↻ 已按相同指令重试本回合（指令原文见上一条，不再重复展示）', '↻ Retried this turn with the same instruction (original above, not repeated)') : echo,
     );
     return this.sessions.prompt(sessionId, text, undefined, effort);
+  }
+
+  /** 赛马开局账号预检（步骤4）：首个 prompt 发出前对全部 agy 席位统一检查
+   *  一次（不逐席位查）——cache-only 零网络，当前账号 blocked 或落后池内最优
+   *  ≥20pp 才切公共最优账号；每场仅一次。开关关闭即全手动（总回滚兜底）；
+   *  检查失败/拿不到锁 → 直接用当前账号起跑，不阻塞开局。 */
+  async beforeRacePrompts(g: RaceGroup): Promise<void> {
+    if (!this.settings.get().antigravityAutoSwitch) return;
+    if (this.preCheckedRaces.has(g.id)) return;
+    this.preCheckedRaces.add(g.id);
+    if (!Object.values(g.roles).some((c) => c?.engine === 'antigravity')) return;
+    try {
+      const r = await preSwitchAgyIfLagging();
+      if (r.switched) log.info('race', 'pre-race agy account switched', { raceId: g.id, from: r.from, to: r.to });
+    } catch (err) {
+      log.warn('race', 'pre-race agy account check failed (starting with current account)', { raceId: g.id }, err);
+    }
   }
 
   transcript(sessionId: string): string {

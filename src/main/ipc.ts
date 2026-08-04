@@ -178,7 +178,7 @@ export function registerIpc(
   });
   handle(IPC.agyAccountRemove, (_e, id: string) => removeAgyAccount(id));
   handle(IPC.agyAccountSwitch, (_e, accountId: string) => switchAgyAccount(accountId));
-  handle(IPC.agyQuota, (_e, force?: boolean) => queryAgyQuota(!!force));
+  handle(IPC.agyQuota, (_e, force?: boolean, cachedOnly?: boolean) => queryAgyQuota(!!force, { cachedOnly: !!cachedOnly }));
   // 当前活动账号额度 — 只 1 次往返（用量小窗/大窗常显），与扫全账号的 agyQuota 解耦。
   handle(IPC.agyActiveQuota, (_e, force?: boolean) => queryActiveAgyQuota(!!force));
 

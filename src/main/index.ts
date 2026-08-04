@@ -194,7 +194,7 @@ function startApp(): void {
     terminal = new TerminalService();
     sessions = new SessionManager(settings, proxy, opencodeHost, opencodeHub, kapHost);
     cron = new CronService(sessions, settings);
-    race = new RaceManager(sessions);
+    race = new RaceManager(sessions, settings);
     registerIpc(sessions, settings, cron, opencodeHost, terminal, race);
     cron.start();
     createWindow(settings.get());

@@ -31,6 +31,7 @@ import {
   blockedUntil,
   clearBlockedIfRecovered,
   markBlockedIfExhausted,
+  pickAgyPreSwitchTarget,
   type BlockedMap,
 } from '@shared/agyPolicy';
 import { L } from '../../i18n';
@@ -506,8 +507,11 @@ let quotaInflight: Promise<AgyQuotaInfo[]> | undefined;
 const QUOTA_TTL_MS = 60_000;
 
 /** 查询账号额度（扫导入池）。带 TTL 缓存 + in-flight 去重。
- *  best-effort：单账号失败只标该账号 error。 */
-export async function queryAgyQuota(force = false): Promise<AgyQuotaInfo[]> {
+ *  best-effort：单账号失败只标该账号 error。
+ *  cachedOnly = 起跑预检的零网络语义：只读 60s TTL 缓存，缓存 miss/不新鲜
+ *  直接返回空数组（调用方据此跳过预切，绝不为预检发起真实扫描）。 */
+export async function queryAgyQuota(force = false, opts?: { cachedOnly?: boolean }): Promise<AgyQuotaInfo[]> {
+  if (opts?.cachedOnly) return quotaCache && Date.now() - quotaCache.ts < QUOTA_TTL_MS ? quotaCache.data : [];
   if (!force && quotaCache && Date.now() - quotaCache.ts < QUOTA_TTL_MS) return quotaCache.data;
   if (quotaInflight) return quotaInflight;
   quotaInflight = (async () => {
@@ -595,6 +599,40 @@ export async function queryActiveAgyQuota(force = false, opts?: { ignoreCooling?
     return data;
   })();
   return activeInflight;
+}
+
+// ------------------------------------------------------------- pre-start check
+
+/** main 侧自动切号互斥（renderer 的 agyAutoSwitchInflight 管不到 main）。
+ *  与 renderer 切号并发时后写者胜（CredWrite 单条覆写，不会撕裂），
+ *  代价仅多一次 refresh —— 起跑预检宁可放弃也不排队等待。 */
+let agyPreSwitchInflight = false;
+
+/** 起跑前统一预切（步骤4；赛马开局挂点，供 RaceManager 调用）：当前活动
+ *  账号已 blocked，或短板窗余量落后池内最优 ≥20pp → 切池内最优候选。
+ *  检查本身 cache-only 零网络（只读 60s TTL 缓存 + 内存 blocked 表）；
+ *  缓存 miss/不新鲜、拿不到互斥锁、无合格候选 → 不切换直接起跑（宁可
+ *  非最优不阻塞首条消息）。antigravityAutoSwitch 开关门控在调用方。 */
+export async function preSwitchAgyIfLagging(): Promise<{ switched: boolean; from?: string; to?: string }> {
+  if (agyPreSwitchInflight) return { switched: false };
+  const now = Date.now();
+  const snap = listAgyAccounts();
+  if (!snap.active) return { switched: false };
+  const blockedEmails = new Set<string>();
+  for (const email of [...agyBlockedUntil.keys()]) {
+    if (blockedUntil(agyBlockedUntil, email, now) !== undefined) blockedEmails.add(email);
+  }
+  const cached = quotaCache && now - quotaCache.ts < QUOTA_TTL_MS ? quotaCache.data : [];
+  const target = pickAgyPreSwitchTarget(cached, snap.active, blockedEmails);
+  if (!target) return { switched: false };
+  agyPreSwitchInflight = true;
+  try {
+    await switchAgyAccount(target.accountId);
+    log.info('engine.antigravity', 'pre-start account switch (lagging/blocked active)', { from: snap.active, to: target.email });
+    return { switched: true, from: snap.active, to: target.email };
+  } finally {
+    agyPreSwitchInflight = false;
+  }
 }
 
 const UA = 'antigravity/1.1.8 windows/amd64';

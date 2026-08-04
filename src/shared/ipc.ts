@@ -321,8 +321,10 @@ export interface CyberSlotsApi {
   /** 切换 Antigravity 账号（限导入池内；覆写 keyring + 更新 active）；返回新活动邮箱。
    *  agy 下一次调用即以新账号执行（实时读 keyring）。 */
   agyAccountSwitch(accountId: string): Promise<{ email: string }>;
-  /** Antigravity 分组周额度（扫导入池内全部账号，带缓存；force 跳缓存）。 */
-  agyQuota(force?: boolean): Promise<AgyQuotaInfo[]>;
+  /** Antigravity 分组周额度（扫导入池内全部账号，带缓存；force 跳缓存）。
+   *  cachedOnly = 只读 60s TTL 缓存、零网络（起跑预检用）：缓存 miss/不新鲜
+   *  返回空数组。 */
+  agyQuota(force?: boolean, cachedOnly?: boolean): Promise<AgyQuotaInfo[]>;
   /** 当前活动 Antigravity 账号的额度（只 1 次往返，用量小窗/大窗常显；force 跳缓存）。 */
   agyActiveQuota(force?: boolean): Promise<AgyActiveQuota>;
   /** Push the resolved appearance to main so the native title bar matches. */

@@ -66,6 +66,10 @@ export interface RaceSessionHost {
   spawn(spec: RaceSpawnSpec): Promise<string>;
   /** Dispatch a prompt to a session (awaits engine readiness internally). */
   prompt(sessionId: string, text: string, effort?: string): Promise<void>;
+  /** 开局首个 prompt 发出前的统一准备钩子（可选；如 agy 账号起跑预检 ——
+   *  对全部 agy 席位统一查一次，不逐席位查）。每次 runPlanning 入口调用，
+   *  实现方自行保证每场仅生效一次、失败不阻塞起跑。 */
+  beforeRacePrompts?(g: RaceGroup): Promise<void>;
   /** 取消会话当前回合（剔除选手时就地叫停其运行中回合）。 */
   cancelTurn(sessionId: string): void;
   /** Fold a session's assistant output into plain text (for hand-off). */
@@ -524,6 +528,8 @@ export class RaceOrchestrator {
 
   private async runPlanning(g: RaceGroup): Promise<void> {
     this.chainActive.add(g.id);
+    // 开局统一预检（首个 prompt 发出前）：cache-only，失败/无锁直接起跑。
+    await this.host.beforeRacePrompts?.(g);
     const myGen = this.gen.get(g.id) ?? 0;
     const racers = this.racersOf(g);
     const ids = await Promise.all(racers.map((r) => this.ensureRole(g, r)));

@@ -37,6 +37,7 @@ import {
   blockedEmailsOf,
   clearRateWindow,
   createRateWindow,
+  pickAgyPreSwitchTarget,
   pickAgySwitchTarget,
   rateWindowLimited,
   recordRateWindowHit,
@@ -790,7 +791,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       opencodeCatalog: get().opencodeCatalog,
       ompCatalog: get().ompCatalog,
     })?.value;
-    // 步骤3：新会话首条消息前，若当前 antigravity 账号已 blocked 则先切后发。
+    // 步骤4：新会话首条消息前，agy 账号起跑预检（当前账号 blocked 或落后
+    // 池内最优 ≥20pp 则先切后发；cache-only，miss/无锁直接起跑）。
     if (firstMessage && session?.engine === 'antigravity') {
       await maybePreCheckAgyAccount(get, sessionId);
     }
@@ -899,18 +901,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   async setMode(mode) {
-    const { activeSessionId } = get();
+    const { activeSessionId, sessions, ui } = get();
     if (!activeSessionId) return;
+    const meta = sessions.find((m) => m.id === activeSessionId);
+    const current = ui[activeSessionId]?.modes.current ?? meta?.permissionMode ?? 'default';
     try {
-      await window.cyberslots.sessionSetMode(activeSessionId, mode);
+      // The main process resolves leaving Plan back to the pre-Plan Agent permission.
+      const effective = await window.cyberslots.sessionSetMode(activeSessionId, mode);
+      const agentPermissionMode = effective === 'plan'
+        ? (current !== 'plan' ? current : meta?.agentPermissionMode)
+        : effective;
+      set((s) => ({
+        sessions: s.sessions.map((m) =>
+          m.id === activeSessionId ? { ...m, permissionMode: effective, agentPermissionMode } : m,
+        ),
+      }));
+      mutateUi(set, activeSessionId, (ui) => ({ ...ui, modes: { ...ui.modes, current: effective } }));
     } catch (err) {
-      // 与 setModel 同规：失败显性化，且不乐观更新（否则 UI 停在未生效的档位）。
+      // Same as setModel: surface failures without optimistic UI updates.
       announceSystem(activeSessionId, `⚠ 切换权限模式失败：${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    // Optimistic: kimi doesn't always push current_mode_update after
-    // setSessionMode, which left the mode switch looking dead in the UI.
-    mutateUi(set, activeSessionId, (ui) => ({ ...ui, modes: { ...ui.modes, current: mode } }));
   },
 
   async answerPermission(requestId, optionId) {
@@ -1283,6 +1294,9 @@ function raceRoleOfSession(raceId: string, sessionId: string): RaceRole | undefi
  *  - reason='threshold'（主动，回合正常收尾）：只静默换 keyring（任务没失败，
  *    下一回合自然用新号），无合格目标则静默放弃、不打扰。 */
 async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' | 'threshold'): Promise<void> {
+  // 步骤4.5：所有自动切号入口统一过总开关门控 —— 关闭即一键回到全手动
+  // （总回滚兜底语义；手动切号弹窗/按钮不经过这里，永远可用）。
+  if (!get().settings?.antigravityAutoSwitch) return;
   if (agyAutoSwitchInflight) return;
   // 步骤3：熔断——会话级或全局级窗口内自动切号次数超限 → 不再自动切；
   // exhausted / threshold 两路均公告 + 回退手动弹窗（手动切号不受限，是逃生口）。
@@ -1391,14 +1405,20 @@ async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<v
   }
 }
 
-/** 步骤4：首条消息前预检查——当前账号 blocked 时先切后发（快照 blocked
- *  表判断，零额外网络请求；blocked 才走全池扫描切号）。低额度未 blocked
- *  的场景由现有 maybeProactiveSwitchAgy 在回合后处理，不在此处阻塞。 */
+/** 步骤4：首条消息前预检查——当前账号已 blocked，或短板窗余量落后池内最优
+ *  ≥20pp（滞后阈值防敏感误切）时先切后发。只读快照 + 60s TTL 缓存
+ *  （cachedOnly），零强制刷新；缓存 miss/不新鲜 → 跳过预切，交回合后主动
+ *  切换兜底，不阻塞首条消息。拿不到 inflight 锁 / 熔断 / 无合格目标 →
+ *  autoSwitchAgy 内部早退，用当前账号直接起跑（宁可非最优不阻塞）。
+ *  总开关门控在 autoSwitchAgy 入口（4.5）；赛马开局预检在 main 统一做。 */
 async function maybePreCheckAgyAccount(get: GetFn, sessionId: string): Promise<void> {
   try {
-    const snap = await window.cyberslots.agyAccountsList();
-    if (!snap.active || !blockedEmailsOf(snap.blocked, Date.now()).has(snap.active)) return;
-    // 当前账号 blocked → 复用 threshold 路径切到合格账号。
+    if (!get().settings?.antigravityAutoSwitch) return;
+    const [snap, quotas] = await Promise.all([window.cyberslots.agyAccountsList(), window.cyberslots.agyQuota(false, true)]);
+    if (!snap.active) return;
+    if (!pickAgyPreSwitchTarget(quotas, snap.active, blockedEmailsOf(snap.blocked, Date.now()))) return;
+    // 命中预切条件 → 复用 threshold 路径（目标由 autoSwitchAgy 按统一选号
+    // 门槛重选；锁被占/熔断/无合格目标则静默放弃，直接起跑）。
     await autoSwitchAgy(get, sessionId, 'threshold');
   } catch {
     // 预检查失败不打扰 — 用当前账号起跑
@@ -1494,7 +1514,11 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         modes: { current: event.current, available: event.available.length ? event.available : ui.modes.available },
       }));
       set((s) => ({
-        sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, permissionMode: event.current } : m)),
+        sessions: s.sessions.map((m) =>
+          m.id === sessionId
+            ? { ...m, permissionMode: event.current, agentPermissionMode: event.current !== 'plan' ? event.current : m.agentPermissionMode }
+            : m,
+        ),
       }));
       return;
     case 'commands.update':

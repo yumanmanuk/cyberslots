@@ -130,6 +130,28 @@ export function shouldPreSwitch(
   return poolBestShortBoard - activeShortBoard >= lagPp;
 }
 
+/** 起跑前预切决策（步骤4，main 赛马开局与 renderer 普通会话首条消息共用）：
+ *  - 当前账号已 blocked → 切池内最优（非冷却、查得到、有分组数据的候选里
+ *    短板窗余量最大者）；
+ *  - 未 blocked 但短板窗余量落后池内最优 ≥ lagPp → 切该最优候选；
+ *  - quotas 为空（缓存 miss/不新鲜）或当前账号无数据 → undefined（跳过预切，
+ *    交回合后主动切换兜底 —— 宁可不切，不错切）。 */
+export function pickAgyPreSwitchTarget(
+  quotas: AgyQuotaInfo[],
+  activeEmail: string | undefined,
+  blockedEmails: Set<string>,
+  lagPp: number = AGY_PRE_SWITCH_LAG_PP,
+): AgyQuotaInfo | undefined {
+  if (!activeEmail) return undefined;
+  const eligible = quotas.filter((q) => q.ok && q.email !== activeEmail && !blockedEmails.has(q.email) && q.groups.length > 0);
+  if (eligible.length === 0) return undefined;
+  const best = [...eligible].sort((a, b) => shortBoardRemaining(b.groups) - shortBoardRemaining(a.groups))[0]!;
+  if (blockedEmails.has(activeEmail)) return best;
+  const active = quotas.find((q) => q.email === activeEmail && q.ok && q.groups.length > 0);
+  if (!active) return undefined;
+  return shouldPreSwitch(shortBoardRemaining(active.groups), shortBoardRemaining(best.groups), lagPp) ? best : undefined;
+}
+
 // ------------------------------------------------------------- 选号门槛
 
 /** 时间窗标签 → 对应阈值：5小时/7天各自独立配置（主进程已把分组名归一
