@@ -11,7 +11,7 @@ import { ArrowLeft, Bell, Box, ChevronRight, Eye, EyeOff, FileLock2, GripVertica
 
 import type { AgyAccountsSnapshot, AgyImportCandidate, AgyQuotaInfo, AppSettings, ClaudeConfigSnapshot, CodexConfigSnapshot, CompatAuditKind, CompatAuditSnapshot, ContextFallbackRule, EngineConfigsSnapshot, EngineId, KimiConfigSnapshot, NotificationSettings, OmpCatalog, OmpConfigSnapshot, OpencodeCatalog, OpencodeConfigSnapshot, RaceRoleDefaultSetting, RouteSupport, TitleGenSettings } from '@shared/types';
 import { isRaceActive, RACE_ROLES } from '@shared/race';
-import { announceSystem, useChatStore } from '../store/chatStore';
+import { announceSystem, drainRaceRescue, useChatStore } from '../store/chatStore';
 import { useRaceStore } from '../store/raceStore';
 import { agyWindowLabel, engineHintKey, raceRoleKey, translate, useT, type MsgKey } from '../i18n';
 import { ENGINE_LABELS, EngineIcon, useEngineOrder } from './EngineIcon';
@@ -1090,6 +1090,8 @@ function AntigravityAccountsCard(): JSX.Element {
       .agyAccountSwitch(id)
       .then((res) => {
         void window.cyberslots.agyAccountsList().then(setSnap);
+        // 步骤6：手动切号成功 → 复活曾因互斥/熔断停滞的赛马选手（精确补跑、幂等）。
+        drainRaceRescue();
         // 对话自动跟随：keyring 实时读取，各 antigravity 会话（含赛马角色）
         // 下一回合自然用新账号。给普通会话（非赛马角色，角色会话带 raceId）
         // 插一条跟随公告；赛马靠编排器下一回合自然换号，不插播（同自动切号惯例）。

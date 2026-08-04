@@ -825,6 +825,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async switchAgyAccount(accountId, continueSessionId) {
     const res = await window.cyberslots.agyAccountSwitch(accountId);
     set({ agySwitchFor: null });
+    // 步骤6：手动切号成功同样复活曾因互斥/熔断停滞的赛马选手（精确补跑、幂等）。
+    drainRaceRescue();
     // 切号后接回任务：赛马角色会话走 raceResume（重跑当前阶段，而非
     // 把「继续」发给编排器不监听的隐藏角色会话）；普通会话发「继续」
     // —— agy 从本地库重放整段历史给新账号，跨账号续接不丢上下文
@@ -1307,6 +1309,53 @@ function raceRoleOfSession(raceId: string, sessionId: string): RaceRole | undefi
   return entry?.[0];
 }
 
+// ---- 步骤6：赛马并发停滞兜底（回归修复） ----
+
+/** 一次性 pending 标记（`${raceId}:${role}` 键，(raceId, role) 限定防跨场
+ *  误触发）：autoSwitchAgy 因互斥/熔断早退时，停滞的赛马角色在此登记；
+ *  后续任意切号成功或阶段推进时精确补跑。双 agy 席位同时耗尽时，抢不到
+ *  inflight 锁/撞上熔断的一方正是靠这个机制复活。 */
+const pendingRaceRescue = new Map<string, { raceId: string; role?: RaceRole }>();
+
+/** 登记 pending（仅赛马角色会话）；role 反查不到记 undefined —— drain 时
+ *  该条目降级 raceResume（阶段链已死、精确补跑无法推进时的唯一兜底出口）。 */
+function registerRaceRescuePending(get: GetFn, sessionId: string): void {
+  const meta = get().sessions.find((m) => m.id === sessionId);
+  if (!meta?.raceId) return;
+  const role = raceRoleOfSession(meta.raceId, sessionId);
+  pendingRaceRescue.set(`${meta.raceId}:${role ?? '?'}`, { raceId: meta.raceId, role });
+}
+
+/** pending 补跑出口：精确补跑优先（retryRacerIfMissing 只补缺产物选手，
+ *  幂等）；role 缺失才降级 raceResume。一次性：先摘标记再触发，防重入。
+ *  raceId 省略 = 全量 drain（任意切号成功场景：keyring 全局单槽，一次成功
+ *  的切号对所有停滞赛马都意味着「有可用账号了」）。手动切号弹窗与设置页
+ *  的切号成功路径同样调用本出口。 */
+export function drainRaceRescue(raceId?: string): void {
+  for (const [key, p] of [...pendingRaceRescue]) {
+    if (raceId !== undefined && p.raceId !== raceId) continue;
+    pendingRaceRescue.delete(key);
+    if (p.role) void window.cyberslots.raceRetryRacerIfMissing(p.raceId, p.role);
+    else void window.cyberslots.raceResume(p.raceId);
+  }
+}
+
+/** 阶段推进同样触发 pending 补跑：泳道级重试接管推进后，链上其它曾因
+ *  互斥/熔断停滞的选手随新账号一起复活。订阅 raceStore 阶段变化
+ *  （chatStore → raceStore 单向依赖，无环）。 */
+const raceRescueStageSeen = new Map<string, string>();
+useRaceStore.subscribe((s) => {
+  for (const [raceId, g] of Object.entries(s.races)) {
+    const prev = raceRescueStageSeen.get(raceId);
+    if (prev !== g.stage) {
+      raceRescueStageSeen.set(raceId, g.stage);
+      if (prev !== undefined) drainRaceRescue(raceId);
+    }
+  }
+  // 已删除的赛马顺手摘出，防 map 泄漏。
+  for (const raceId of [...raceRescueStageSeen.keys()]) if (!s.races[raceId]) raceRescueStageSeen.delete(raceId);
+});
+
 /** 自动切号编排：挑号 → 覆写 keyring → 按会话类型接回。
  *  - reason='exhausted'（兜底，回合已因额度失败）：切后接回任务 —— 赛马
  *    走 raceResume 重跑当前阶段，普通会话发「继续」；无合格目标则回退
@@ -1317,10 +1366,16 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
   // 步骤4.5：所有自动切号入口统一过总开关门控 —— 关闭即一键回到全手动
   // （总回滚兜底语义；手动切号弹窗/按钮不经过这里，永远可用）。
   if (!get().settings?.antigravityAutoSwitch) return;
-  if (agyAutoSwitchInflight) return;
+  // 步骤6：互斥/熔断早退且为赛马角色 → 登记一次性 pending（停滞兜底，
+  // 后续任意切号成功/阶段推进时精确补跑复活）。
+  if (agyAutoSwitchInflight) {
+    registerRaceRescuePending(get, sessionId);
+    return;
+  }
   // 步骤3：熔断——会话级或全局级窗口内自动切号次数超限 → 不再自动切；
   // exhausted / threshold 两路均公告 + 回退手动弹窗（手动切号不受限，是逃生口）。
   if (agyAutoSwitchRateLimited(sessionId)) {
+    registerRaceRescuePending(get, sessionId);
     const lang = (useChatStore.getState().settings?.language ?? 'zh') as 'zh' | 'en';
     announceSystem(
       sessionId,
@@ -1372,6 +1427,9 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
         // 阶段重跑会空转/打扰在跑选手；retryRacerIfMissing 只重建并重跑
         // 缺产物的那名（切号完成后该选手必缺产物，除非对手已补齐）。
         const role = raceRoleOfSession(meta.raceId, sessionId);
+        // 本选手由此处直接补跑 → 摘掉其 pending（若有）；其余曾因互斥/熔断
+        // 停滞的赛马选手由尾部 drainRaceRescue 一并复活。
+        pendingRaceRescue.delete(`${meta.raceId}:${role ?? '?'}`);
         if (role) void window.cyberslots.raceRetryRacerIfMissing(meta.raceId, role);
         else void window.cyberslots.raceResume(meta.raceId); // 反查不到角色兜底
       } else {
@@ -1392,6 +1450,9 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
           : `🔀 Quota running low (below thresholds 5h ${t5h}% / 7d ${t7d}%) — switched account automatically: ${from} → ${target.email}`,
       );
     }
+    // 步骤6：任意自动切号成功 → 曾因互斥/熔断停滞的赛马选手精确补跑
+    // （一次性、幂等；本次直接处理的选手 pending 已在上方摘掉）。
+    drainRaceRescue();
   } catch {
     if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
   } finally {
