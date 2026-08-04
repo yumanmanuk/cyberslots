@@ -22,6 +22,7 @@ import type {
 } from '@shared/types';
 import { readOpencodeSnapshot } from '../engine/opencode/resolveOpencode';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 import { readOmpSnapshot } from '../engine/omp/resolveOmp';
 import { readAntigravitySnapshot } from '../engine/antigravity/resolveAntigravity';
 import { readClaudeSnapshot } from '../engine/claude/resolveClaude';
@@ -134,6 +135,7 @@ export function readKimiConfig(): KimiConfigSnapshot {
       snap.providers.push(entry);
     }
   } catch (err) {
+    log.warn('settings', 'engine config parse failed', { configPath: snap.configPath }, err);
     snap.error = L('配置解析失败', 'Config parse failed') + `: ${err instanceof Error ? err.message : String(err)}`;
   }
   return snap;
@@ -205,6 +207,7 @@ export function readCodexConfig(): CodexConfigSnapshot {
       snap.providers.push(entry);
     }
   } catch (err) {
+    log.warn('settings', 'engine config parse failed', { configPath: snap.configPath }, err);
     snap.error = L('配置解析失败', 'Config parse failed') + `: ${err instanceof Error ? err.message : String(err)}`;
   }
   return snap;

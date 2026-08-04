@@ -20,6 +20,7 @@ import { join } from 'node:path';
 
 import type { RouteUpstreams } from '../config/engineConfigs';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 
 const PROXY_FILES = [
   'codex-server.js',
@@ -98,10 +99,10 @@ export class AiServerHost {
         MINIMAX_API_KEY: upstreams.responses?.apiKey ?? '',
       },
     });
-    child.stdout?.on('data', (d: Buffer) => console.log(`[ai-server:${kind}]`, d.toString().trim()));
-    child.stderr?.on('data', (d: Buffer) => console.error(`[ai-server:${kind}:err]`, d.toString().trim()));
+    child.stdout?.on('data', (d: Buffer) => log.debug(`proxy.${kind}`, d.toString().trim()));
+    child.stderr?.on('data', (d: Buffer) => log.warn(`proxy.${kind}`, d.toString().trim()));
     child.once('exit', (code) => {
-      console.error(`[ai-server:${kind}] exited (code=${code})`);
+      log.warn(`proxy.${kind}`, 'ai-server front exited', { code, port: this.fronts[kind].port });
       const front = this.fronts[kind];
       if (front.child === child) {
         front.child = undefined;
@@ -115,6 +116,7 @@ export class AiServerHost {
 
     await waitForHealth(port);
     front.port = port;
+    log.info(`proxy.${kind}`, 'ai-server front ready', { port, pid: child.pid });
     return port;
   }
 

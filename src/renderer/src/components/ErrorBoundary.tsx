@@ -6,6 +6,7 @@
 import { Component, type ReactNode } from 'react';
 
 import { translate } from '../i18n';
+import { rlog } from '../log/logger';
 
 interface Props {
   children: ReactNode;
@@ -23,7 +24,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   }
 
   override componentDidCatch(error: Error, info: { componentStack?: string | null }): void {
-    console.error('[ErrorBoundary]', error, info.componentStack);
+    rlog.error('ui.error', 'component crash boundary hit', { componentStack: info.componentStack ?? undefined }, error);
   }
 
   override render(): ReactNode {

@@ -11,6 +11,8 @@
 
 import { spawnSync } from 'node:child_process';
 
+import { log } from './log/logger';
+
 const PS_SCRIPT = `
 $patterns = @('*kimi-code*main.mjs* acp*', '*codex*app-server*', '*ai-server*-server.js*', '*opencode*serve --hostname 127.0.0.1*', '*claude-code*cli.js*--input-format stream-json*');
 $alive = @{}; Get-Process | ForEach-Object { $alive[$_.Id] = $true };
@@ -29,7 +31,7 @@ Write-Output ($killed.Count);
 foreach ($k in $killed) { Write-Output $k }`;
 
 /** @returns 清掉的孤儿进程数（非 Windows 或失败时为 0）。
- *  同时通过 console.log 输出被杀进程的具体信息（PID + 命令行摘要）。 */
+ *  被杀进程的具体信息（PID + 命令行摘要）记 app.startup 日志。 */
 export function sweepOrphanEngines(): number {
   if (process.platform !== 'win32') return 0;
   const res = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', PS_SCRIPT], {
@@ -39,10 +41,13 @@ export function sweepOrphanEngines(): number {
   });
   const lines = (res.stdout ?? '').trim().split('\n').map((l) => l.trim()).filter(Boolean);
   const n = Number(lines[0] ?? '0');
-  if (!Number.isFinite(n)) return 0;
+  if (!Number.isFinite(n)) {
+    if (res.error) log.warn('app.startup', 'orphan sweep script failed', undefined, res.error);
+    return 0;
+  }
   // 后续行是被杀进程的 PID:CommandLine 摘要
   for (let i = 1; i < lines.length; i++) {
-    console.log(`[orphan-sweep] Killed: ${lines[i]}`);
+    log.info('app.startup', 'orphan engine killed', { detail: lines[i] });
   }
   return n;
 }

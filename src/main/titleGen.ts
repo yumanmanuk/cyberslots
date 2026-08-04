@@ -6,6 +6,7 @@
  */
 
 import type { TitleGenSettings } from '@shared/types';
+import { log } from './log/logger';
 
 const TIMEOUT_MS = 15_000;
 /** 标题最长字符数 — 与截取式标题上限一致，超长强截。 */
@@ -48,7 +49,7 @@ export async function generateTitle(cfg: TitleGenSettings, text: string): Promis
       }),
     });
     if (!res.ok) {
-      console.warn(`[titleGen] ${baseUrl} → HTTP ${res.status}`);
+      log.warn('titlegen', 'title generate HTTP error', { baseUrl, status: res.status });
       return null;
     }
     const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
@@ -63,7 +64,7 @@ export async function generateTitle(cfg: TitleGenSettings, text: string): Promis
       .slice(0, MAX_LEN);
     return title || null;
   } catch (err) {
-    console.warn('[titleGen] failed:', err instanceof Error ? err.message : err);
+    log.warn('titlegen', 'title generate failed, renderer falls back', undefined, err);
     return null;
   } finally {
     clearTimeout(timer);

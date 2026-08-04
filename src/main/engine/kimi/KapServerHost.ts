@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import type { KapDetection } from '@shared/types';
 import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
+import { log } from '../../log/logger';
 import { kimiSpawnEnv, resolveKimiCli } from './resolveKimi';
 
 const READY_TIMEOUT_MS = 30_000;
@@ -135,9 +136,7 @@ export class KapServerHost {
       det.running = !!adopted;
     }
     this.detection = det;
-    console.log(
-      `[kap-host] startup detect: installed=${det.installed}${det.version ? `@${det.version}` : ''} running=${det.running}`,
-    );
+    log.info('host.kap', 'startup detect', { installed: det.installed, version: det.version, running: det.running });
     return det;
   }
 
@@ -195,6 +194,7 @@ export class KapServerHost {
     this.child = child;
     this.external = false;
     this.stderrTail.length = 0;
+    log.info('host.kap', 'kimi web spawned', { command: spec.command, home, pid: child.pid });
 
     child.stderr!.setEncoding('utf8');
     child.stderr!.on('data', (d: string) => {
@@ -205,7 +205,7 @@ export class KapServerHost {
       }
     });
     child.once('exit', (code) => {
-      console.error(`[kap-host] kimi web exited (code=${code})`);
+      log.warn('host.kap', 'kimi web exited', { code, external: this.external, stderrTail: this.stderrTail.slice(-6).join(' | ') });
       if (this.child === child) this.reset();
     });
 
@@ -257,7 +257,7 @@ export class KapServerHost {
     this.generation++;
     this.info = { origin, token, gen: this.generation };
     this.homeKey = home;
-    console.log(`[kap-host] kimi web ready at ${origin}`);
+    log.info('host.kap', 'kimi web ready', { origin, external: this.external });
     return this.info;
   }
 
@@ -280,7 +280,7 @@ export class KapServerHost {
     this.homeKey = home;
     this.external = true;
     this.child = undefined;
-    console.log(`[kap-host] adopted external kimi web at ${origin}`);
+    log.info('host.kap', 'adopted external kimi web', { origin });
     return this.info;
   }
 

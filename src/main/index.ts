@@ -19,6 +19,7 @@ import { OpencodeEventHub } from './engine/opencode/OpencodeEventHub';
 import { KapServerHost } from './engine/kimi/KapServerHost';
 import { TerminalService } from './terminal/TerminalService';
 import { registerIpc } from './ipc';
+import { initLogger, log } from './log/logger';
 import { sweepOrphanEngines } from './orphanSweep';
 import { TITLEBAR_HEIGHT, applyWindowTheme, chromeFor, resolveMode } from './windowTheme';
 import type { AppSettings, WindowAppearance } from '@shared/types';
@@ -41,7 +42,7 @@ if (app.isPackaged) {
     mkdirSync(portableData, { recursive: true });
     app.setPath('userData', portableData);
   } catch (err) {
-    console.error('[main] portable data dir unavailable, falling back to default userData:', err);
+    log.error('app.startup', 'portable data dir unavailable, falling back to default userData', undefined, err);
   }
 }
 
@@ -86,10 +87,11 @@ function createWindow(appSettings: AppSettings): void {
 
   applyWindowTheme(mainWindow, appearance);
   mainWindow.once('ready-to-show', () => mainWindow?.show());
+  log.info('app.window', 'main window created', { mode: appearance.mode, isDev });
 
   // External links open in the default browser, never in-app.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
@@ -117,10 +119,10 @@ function cleanupStaleLockFiles(): void {
     try {
       if (existsSync(lockPath)) {
         unlinkSync(lockPath);
-        console.log(`[startup] Removed stale lock file: ${name}`);
+        log.info('app.startup', 'removed stale lock file', { name });
       }
     } catch (e) {
-      console.log(`[startup] Failed to remove ${name}: ${e}`);
+      log.warn('app.startup', 'failed to remove lock file', { name }, e);
     }
   }
 }
@@ -129,7 +131,7 @@ function cleanupStaleLockFiles(): void {
 // 重启电脑（Fast Startup）都可能残留握着句柄的孤儿引擎，先清掉。
 const preSweepCount = sweepOrphanEngines();
 if (preSweepCount > 0) {
-  console.log(`[startup] Pre-sweep killed ${preSweepCount} orphan engine(s)`);
+  log.info('app.startup', 'pre-sweep killed orphan engines', { count: preSweepCount });
 }
 
 // 单例锁只在生产环境启用（防用户开两份、并聚焦已有窗口）。
@@ -150,12 +152,12 @@ if (isDev) {
     if (app.requestSingleInstanceLock()) {
       startApp();
     } else if (!process.argv.includes('--cs-swept')) {
-      console.log(`[startup] Lock unavailable (swept ${swept}), relaunching once...`);
+      log.warn('app.startup', 'single-instance lock unavailable, relaunching once', { swept });
       app.relaunch({ args: [...process.argv.slice(1), '--cs-swept'] });
       app.quit();
     } else {
       // 已重试过仍拿不到 → 确有另一个真实实例在跑，聚焦它并退出本实例。
-      console.log('[startup] Another instance is running, exiting.');
+      log.info('app.startup', 'another instance is running, exiting');
       app.quit();
     }
   } else {
@@ -172,6 +174,11 @@ function startApp(): void {
   });
 
   void app.whenReady().then(() => {
+    initLogger();
+    // 主进程最后一道网：未捕获异常/未处理 rejection 全量落日志（不退出，
+    // Electron 默认行为继续；崩溃类异常交给系统 crash reporter）。
+    process.on('uncaughtException', (err) => log.error('app.error', 'uncaught exception', undefined, err));
+    process.on('unhandledRejection', (reason) => log.error('app.error', 'unhandled rejection', undefined, reason));
     // Windows toast 通知按 AUMID 归属应用；须与 electron-builder appId 一致，
     // 打包安装后通知才会显示「CyberSlots」名称与图标（否则是 electron.app.Electron）。
     if (process.platform === 'win32') app.setAppUserModelId('com.yumanmanuk.cyberslots');
@@ -191,6 +198,7 @@ function startApp(): void {
     registerIpc(sessions, settings, cron, opencodeHost, terminal, race);
     cron.start();
     createWindow(settings.get());
+    log.info('app.startup', 'app ready', { isDev, singleInstance: !isDev });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow(settings.get());
@@ -207,6 +215,7 @@ function startApp(): void {
   // 尽快退出（新旧重叠越短越好），dispose 尽力而为、不阻塑退出。
   let cleanedUp = false;
   app.on('before-quit', (event) => {
+    log.info('app.shutdown', 'before-quit: disposing services', { cleanedUp, isDev });
     cron?.stop();
     proxy?.stop();
     opencodeHost?.stop();

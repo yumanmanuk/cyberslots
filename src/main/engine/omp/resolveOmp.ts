@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import type { OmpCatalog, OmpConfigSnapshot, OmpModelEntry } from '@shared/types';
 import { L } from '../../i18n';
+import { log } from '../../log/logger';
 import type { SpawnSpec } from '../kimi/resolveKimi';
 
 export function resolveOmpCli(extraArgs: string[], explicitPath?: string): SpawnSpec {
@@ -100,24 +101,28 @@ export function fetchOmpCatalog(explicitPath?: string): Promise<OmpCatalog> {
     child.stdout.on('data', (d: string) => (out += d));
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d: string) => (err += d));
+    const fail = (msg: string, err?: unknown): void => {
+      log.warn('engine.omp', 'fetch model catalog failed', { detail: msg }, err);
+      resolve({ models: [], error: msg });
+    };
     const timer = setTimeout(() => {
       try {
         child.kill();
       } catch {
         /* ignore */
       }
-      resolve({ models: [], error: L('omp models --json 超时', 'omp models --json timed out') });
+      fail(L('omp models --json 超时', 'omp models --json timed out'));
     }, 30_000);
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ models: [], error: `${L('无法运行 omp CLI', 'Failed to run the omp CLI')}: ${e.message}` });
+      fail(`${L('无法运行 omp CLI', 'Failed to run the omp CLI')}: ${e.message}`, e);
     });
     child.on('close', () => {
       clearTimeout(timer);
       try {
         resolve({ models: normalizeCatalog(JSON.parse(out)) });
       } catch {
-        resolve({ models: [], error: err.trim().slice(0, 300) || L('模型目录解析失败（可能未登录/无凭据）', 'Failed to parse the model catalog (possibly not logged in / no credentials)') });
+        fail(err.trim().slice(0, 300) || L('模型目录解析失败（可能未登录/无凭据）', 'Failed to parse the model catalog (possibly not logged in / no credentials)'));
       }
     });
   });

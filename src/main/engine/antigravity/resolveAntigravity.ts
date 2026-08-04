@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import type { AntigravityCatalog, AntigravityConfigSnapshot, AntigravityModelEntry } from '@shared/types';
 import { L } from '../../i18n';
+import { log } from '../../log/logger';
 import type { SpawnSpec } from '../kimi/resolveKimi';
 
 export function resolveAgyCli(extraArgs: string[], explicitPath?: string): SpawnSpec {
@@ -95,23 +96,27 @@ export function fetchAntigravityCatalog(explicitPath?: string): Promise<Antigrav
     child.stdout.on('data', (d: string) => (out += d));
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d: string) => (err += d));
+    const fail = (msg: string, err?: unknown): void => {
+      log.warn('engine.antigravity', 'fetch model catalog failed', { detail: msg }, err);
+      resolve({ models: [], error: msg });
+    };
     const timer = setTimeout(() => {
       try {
         child.kill();
       } catch {
         /* ignore */
       }
-      resolve({ models: [], error: L('agy models 超时', 'agy models timed out') });
+      fail(L('agy models 超时', 'agy models timed out'));
     }, 30_000);
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ models: [], error: `${L('无法运行 agy CLI', 'Failed to run the agy CLI')}: ${e.message}` });
+      fail(`${L('无法运行 agy CLI', 'Failed to run the agy CLI')}: ${e.message}`, e);
     });
     child.on('close', () => {
       clearTimeout(timer);
       const models = parseModelsText(out);
       if (models.length) resolve({ models });
-      else resolve({ models: [], error: err.trim().slice(0, 300) || L('模型目录解析失败（可能未认证）', 'Failed to parse the model catalog (possibly unauthenticated)') });
+      else fail(err.trim().slice(0, 300) || L('模型目录解析失败（可能未认证）', 'Failed to parse the model catalog (possibly unauthenticated)'));
     });
   });
 }

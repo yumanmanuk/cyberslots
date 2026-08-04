@@ -28,6 +28,7 @@ import { app, net } from 'electron';
 import type { AgyAccount, AgyAccountsSnapshot, AgyActiveQuota, AgyImportCandidate, AgyQuotaGroup, AgyQuotaInfo } from '@shared/types';
 import { L } from '../../i18n';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 
 const KEYRING_TARGET = 'gemini:antigravity';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -162,6 +163,7 @@ export function listAgyAccounts(): AgyAccountsSnapshot {
     }));
     snap.active = readActiveEmail();
   } catch (err) {
+    log.warn('engine.antigravity', 'read import pool failed', undefined, err);
     snap.error = `${L('读取导入池失败', 'Failed to read the import pool')}: ${err instanceof Error ? err.message : String(err)}`;
   }
   return snap;
@@ -217,7 +219,10 @@ export function importAgyAccounts(ids: string[]): AgyAccountsSnapshot {
   writeImportedStore(store);
   invalidateQuotaCaches();
   const snap = listAgyAccounts();
-  if (failed.length) snap.error = L(`${failed.length} 个账号缺少凭据，未导入`, `${failed.length} account(s) missing credentials — not imported`);
+  if (failed.length) {
+    log.warn('engine.antigravity', 'some accounts skipped on import (missing credentials)', { failed: failed.length, total: ids.length });
+    snap.error = L(`${failed.length} 个账号缺少凭据，未导入`, `${failed.length} account(s) missing credentials — not imported`);
+  }
   return snap;
 }
 
@@ -455,6 +460,7 @@ export async function switchAgyAccount(accountId: string): Promise<{ email: stri
   const blob = buildKeyringBlob(acct.refreshToken, refreshed, acct.idToken);
   await credWriteBlob(blob);
   updateGoogleAccountsActive(acct.email);
+  log.info('engine.antigravity', 'account switched (keyring rewritten)', { accountId, email: acct.email });
   return { email: acct.email };
 }
 
@@ -498,6 +504,7 @@ async function queryOneAccount(account: AgyAccount): Promise<AgyQuotaInfo> {
     info.groups = await retrieveQuotaSummary(base, refreshed.access_token, projectId);
     info.ok = true;
   } catch (err) {
+    log.warn('engine.antigravity', 'account quota query failed', { email: account.email }, err);
     info.error = err instanceof Error ? err.message : String(err);
   }
   return info;

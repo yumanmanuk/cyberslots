@@ -18,6 +18,8 @@ import { join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { app } from 'electron';
 
+import { log } from '../log/logger';
+
 const execFileAsync = promisify(execFile);
 
 type GitResult = { code: number; stdout: string; stderr: string };
@@ -68,7 +70,13 @@ export class ShadowGit {
         if (!existsSync(join(gitdir, 'HEAD'))) {
           mkdirSync(gitdir, { recursive: true });
           const init = await this.git(gitdir, root, ['init', '-q']);
-          if (init.code !== 0) return null;
+          if (init.code !== 0) {
+            log.warn('changes', 'shadow git init failed — change tracking disabled for this root', {
+              root,
+              stderr: init.stderr.slice(0, 300),
+            });
+            return null;
+          }
           const configs: Array<[string, string]> = [
             ['core.autocrlf', 'false'],
             ['core.longpaths', 'true'],
@@ -90,7 +98,8 @@ export class ShadowGit {
           }
         }
         return gitdir;
-      } catch {
+      } catch (err) {
+        log.warn('changes', 'shadow git ensure failed — change tracking disabled for this root', { root }, err);
         return null;
       }
     })();

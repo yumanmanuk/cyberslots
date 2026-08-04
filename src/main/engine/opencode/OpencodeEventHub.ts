@@ -12,6 +12,7 @@
  */
 
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 import type { OpencodeServerHost } from './OpencodeServerHost';
 
 export interface OpencodeSseEvent {
@@ -152,7 +153,7 @@ export class OpencodeEventHub {
       try {
         fn(evt);
       } catch (err) {
-        console.error('[opencode-hub] listener error:', err);
+        log.error('host.opencode', 'event hub listener error', undefined, err);
       }
     }
   }

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { AppSettings, ContextFallbackRule, EngineId } from '@shared/types';
+import { log } from '../log/logger';
 
 const ENGINE_IDS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity', 'claude'];
 
@@ -135,7 +136,7 @@ export class SettingsStore {
         const raw = readFileSync(this.file, 'utf8').replace(/^\uFEFF/, '');
         settings = migrate(JSON.parse(raw) as Record<string, unknown>);
       } catch (err) {
-        console.error('[settings] failed to read settings.json, using defaults:', err);
+        log.error('settings', 'failed to read settings.json, using defaults', { file: this.file }, err);
       }
     }
     this.cached = settings;

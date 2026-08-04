@@ -13,6 +13,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { IPC } from '@shared/ipc';
+import { log } from '../log/logger';
 import type { CompatAuditEntry, CompatAuditKind, CompatAuditSnapshot, EngineId } from '@shared/types';
 
 /** 同一指纹落盘的原始报文样本上限（此后仅内存计数）。 */
@@ -43,7 +44,7 @@ class CompatAudit {
       let entry = byKey.get(key);
       if (!entry) {
         byKey.set(key, (entry = { kind, detail, count: 0, firstTs: now, lastTs: now }));
-        console.warn(`[compat-audit] ${engine} ${kind}: ${detail}`);
+        log.warn('compat', 'new degradation fingerprint', { engine, kind, detail });
       }
       entry.count += 1;
       entry.lastTs = now;
@@ -79,7 +80,7 @@ class CompatAudit {
       }
       appendFileSync(this.logFile, JSON.stringify({ ts, engine, kind, detail, sample }) + '\n', 'utf8');
     } catch (err) {
-      console.error('[compat-audit] append log failed:', err);
+      log.error('compat', 'append audit log failed', undefined, err);
     }
   }
 

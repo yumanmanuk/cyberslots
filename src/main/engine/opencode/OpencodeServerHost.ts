@@ -19,6 +19,7 @@ import { app } from 'electron';
 import type { OpencodeCatalog, OpencodeModelEntry } from '@shared/types';
 import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
+import { log } from '../../log/logger';
 import { resolveOpencodeCli } from './resolveOpencode';
 
 const READY_TIMEOUT_MS = 30_000;
@@ -88,6 +89,7 @@ export class OpencodeServerHost {
     });
     this.child = child;
     this.stderrTail.length = 0;
+    log.info('host.opencode', 'serve spawned', { command: spec.command, port, pid: child.pid });
 
     child.stderr!.setEncoding('utf8');
     child.stderr!.on('data', (d: string) => {
@@ -98,7 +100,7 @@ export class OpencodeServerHost {
       }
     });
     child.once('exit', (code) => {
-      console.error(`[opencode-host] serve exited (code=${code})`);
+      log.warn('host.opencode', 'serve exited', { code, stderrTail: this.stderrTail.slice(-6).join(' | ') });
       if (this.child === child) {
         this.child = undefined;
         this.baseUrl = '';
@@ -143,7 +145,7 @@ export class OpencodeServerHost {
     // /global/health 双确认（就绪行之后通常立即通过）。
     await this.waitHealthy(url);
     this.baseUrl = url;
-    console.log(`[opencode-host] serve ready at ${url}`);
+    log.info('host.opencode', 'serve ready', { url });
     return url;
   }
 

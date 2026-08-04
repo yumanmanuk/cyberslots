@@ -14,6 +14,7 @@ import * as pty from '@lydell/node-pty';
 import type { IPty } from '@lydell/node-pty';
 
 import { IPC } from '@shared/ipc';
+import { log } from '../log/logger';
 
 interface TermSession {
   proc: IPty;
@@ -42,21 +43,29 @@ export class TerminalService {
 
     const command = shellCommand();
     const args = process.platform === 'win32' ? ['-NoLogo', '-NoProfile'] : [];
-    const proc = pty.spawn(command, args, {
+    let proc: IPty;
+    try {
+      proc = pty.spawn(command, args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
       cwd: cwd && existsSync(cwd) ? cwd : process.env.USERPROFILE || process.cwd(),
-      env: process.env as Record<string, string>,
-    });
+        env: process.env as Record<string, string>,
+      });
+    } catch (err) {
+      log.error('terminal', 'pty spawn failed', { id, cwd, command }, err);
+      throw err;
+    }
 
     proc.onData((d) => this.emit(id, d));
     proc.onExit(({ exitCode }) => {
       this.emit(id, `\r\n\x1b[90m[shell exited: ${exitCode}]\x1b[0m\r\n`);
+      log.info('terminal', 'shell exited', { id, exitCode });
       if (this.sessions.get(id)?.proc === proc) this.sessions.delete(id);
     });
 
     this.sessions.set(id, { proc, cwd });
+    log.info('terminal', 'shell created', { id, cwd, command });
   }
 
   /** renderer 键入 → PTY。 */

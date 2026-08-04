@@ -2,7 +2,12 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import App from './App';
+import { installGlobalErrorHandlers, rlog } from './log/logger';
 import './styles/index.css';
+
+// 全局未捕获异常/未处理 rejection → 结构化日志（转发主进程落盘）。
+installGlobalErrorHandlers();
+rlog.info('app', 'renderer booted', { url: window.location.href });
 
 // Electron/Chromium 默认：拖文件到窗口任意处会导航到 file://，且未在
 // document 级 preventDefault dragover 时，子元素的 drop 事件可能不稳定触发。

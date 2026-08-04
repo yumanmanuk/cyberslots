@@ -17,6 +17,7 @@ import { parse as tomlParse } from 'smol-toml';
 import type { ProviderQuotaInfo, QuotaProviderId, QuotaTierInfo } from '@shared/types';
 import { codexHomeDir, kimiHomeDir } from '../config/engineConfigs';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 
 type Json = Record<string, unknown>;
 
@@ -52,14 +53,15 @@ async function queryAll(): Promise<ProviderQuotaInfo[]> {
   const jobs: Array<Promise<ProviderQuotaInfo>> = [];
   for (const [provider, det] of keys) {
     jobs.push(
-      queryOne(provider, det).catch(
-        (err): ProviderQuotaInfo => ({
+      queryOne(provider, det).catch((err): ProviderQuotaInfo => {
+        log.warn('quota', 'provider quota query failed', { provider }, err);
+        return {
           provider,
           ok: false,
           error: err instanceof Error ? err.message : String(err),
           queriedAt: Date.now(),
-        }),
-      ),
+        };
+      }),
     );
   }
   return Promise.all(jobs);

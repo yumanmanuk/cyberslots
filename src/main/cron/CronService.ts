@@ -15,6 +15,7 @@ import type { SessionManager } from '../engine/SessionManager';
 import type { SettingsStore } from '../config/settings';
 import { cronMatches, validateCron } from './cronMatch';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 
 const TICK_MS = 20_000;
 
@@ -91,6 +92,8 @@ export class CronService {
   private async run(task: CronTask): Promise<void> {
     if (this.running.has(task.id)) return;
     this.running.add(task.id);
+    log.info('cron', 'task fired', { taskId: task.id, name: task.name, engine: task.engine, cwd: task.cwd });
+    const startTs = Date.now();
     try {
       const meta = await this.sessions.create({
         engine: task.engine,
@@ -102,11 +105,13 @@ export class CronService {
       this.sessions.announceUser(meta.id, task.prompt);
       await this.sessions.prompt(meta.id, task.prompt);
       task.lastResult = 'ok';
+      log.info('cron', 'task completed', { taskId: task.id, name: task.name, sessionId: meta.id, ms: Date.now() - startTs });
       if (this.settings.get().notifications.taskComplete) {
         this.notify(L(`定时任务完成：${task.name}`, `Scheduled task done: ${task.name}`), L('结果已写入会话，可在侧栏查看。', 'Result written to a session — see the sidebar.'));
       }
     } catch (err) {
       task.lastResult = 'error';
+      log.error('cron', 'task failed', { taskId: task.id, name: task.name, ms: Date.now() - startTs }, err);
       if (this.settings.get().notifications.error) {
         this.notify(L(`定时任务失败：${task.name}`, `Scheduled task failed: ${task.name}`), err instanceof Error ? err.message : String(err));
       }
@@ -130,7 +135,7 @@ export class CronService {
     try {
       writeFileSync(this.file, JSON.stringify(this.tasks, null, 2), 'utf8');
     } catch (err) {
-      console.error('[cron] persist failed:', err);
+      log.error('cron', 'persist failed', { file: this.file }, err);
     }
   }
 
@@ -139,7 +144,7 @@ export class CronService {
       if (!existsSync(this.file)) return;
       this.tasks = JSON.parse(readFileSync(this.file, 'utf8')) as CronTask[];
     } catch (err) {
-      console.error('[cron] load failed:', err);
+      log.error('cron', 'load failed', { file: this.file }, err);
     }
   }
 }
