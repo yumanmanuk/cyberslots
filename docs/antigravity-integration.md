@@ -305,6 +305,17 @@ agy 自身就有 active/old 多账号概念。切号时同步更新此文件的 
 
 交互态有 `/agents`（子代理面板：id/role/state/step）、`/tasks`（非 agentic 后台进程）、自定义 agent（`.agents/agents/<name>.md` 或 `~/.gemini/config/agents/`，YAML frontmatter 含 `subagent:true` 可被 `invoke_subagent`）。stream-json 的 `subagent_info` 对应这些——CyberSlots 渲染子代理步时可用。
 
+### 7.5 goal 模式（`/goal`，v1.1.10 二进制逆向 + 已实现）
+
+agy 的 goal 模式是 **TUI 斜杠命令 `/goal <objective>`**（二进制 slash command 说明字符串直接拿 `/goal` 举例）。机制：
+
+- 标记后注入系统提示：「任务被 `/%s` 标记为长时间运行（如过夜），系统会强制继续执行、审计工作直到完成；完成后输出完成令牌；用户要求停止则输出 `goal_stop` 令牌取消」；
+- 内置 **goal_stop_hook**（`stophooks/goal_stop_hook.go`）在 agent 想停时强制续跑；
+- 状态存 `GoalState` proto（GoalText / StartedAt / StartStepIndex / ContinuationCount / State），随会话持久化，**stream-json 不外发 goal 事件**（step_type 仍是已知四值，续跑只表现为同一流里更多 step、`result.num_turns > 1`）；
+- **headless 可用前提**：print 模式的斜杠命令/技能展开是 **1.1.9** 加的（changelog 坐实），更早版本 `-p "/goal …"` 会把命令当纯文本。
+
+**CyberSlots 实现**（`AntigravityAdapter.setGoal/controlGoal`，2026-08-04）：goal 回合 = 一次超长 headless 运行（`--print-timeout 12h`），由 agy 进程内自驱，CyberSlots 不做续跑循环；`pause/clear` = 杀进程树（headless 无进程内暂停面）；`resume` = `--conversation <cid>` 重发 `/goal`。goal 快照（tokensUsed/timeUsedSeconds）由 adapter 从 `result.usage` 累计、本地计时，`complete` 对齐 codex 语义透传后本地清空。版本门 `agySupportsGoalCommand()`（<1.1.9 摘掉方法，capabilities.goal 自动为 false）。**待实测**：`/goal` 在 print 模式的展开行为、`num_turns` 增长、完成令牌形态 —— 探针 `scripts/probe-agy-goal.mjs`（需可用网络）。
+
 ---
 
 ## 8. 建议实现清单（CyberSlots 侧）
@@ -321,6 +332,7 @@ agy 自身就有 active/old 多账号概念。切号时同步更新此文件的 
 ## 9. 验证脚本 / 证据留档
 
 - `scripts/probe-agy-quota.mjs`：双 client 刷新 + loadCodeAssist + fetchAvailableModels + retrieveUserQuotaSummary（只读，实测 §5/§6）。
+- `scripts/probe-agy-goal.mjs`：`/goal` headless 语义探针（对照组 vs /goal 组 vs resume 组，判定 num_turns/step_type/完成令牌，对应 §7.5）。
 - `.dev/workdir/test-cred-source.ps1`：keyring vs 文件判定（实测 §3.1）。
 - `.dev/workdir/read-keyring.ps1` / `dump-keyring-hex.ps1` / `dump-keyring-struct.ps1` / `inspect-keyring.ps1`：keyring blob 结构提取（实测 §3.2；`inspect-keyring.ps1` 为 UTF8 正确解码版）。
 - `.dev/workdir/keyring-backup.ps1` / `build-switch-blob.mjs` / `keyring-write.ps1`（含 precheck 校验）/ `keyring-restore.ps1`：端到端切号实测链路（实测 §3.6）。

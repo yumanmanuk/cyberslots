@@ -98,6 +98,8 @@ writeFileSync(
 export function resolveAgyCli(extraArgs) {
   return { command: process.execPath, args: [globalThis.__fakeAgyScript, ...extraArgs], label: 'fake-agy' };
 }
+// 版本门打桩：返回 false（旧版语义，constructor 摘掉 goal 方法）——闸门测试与 goal 无关。
+export function agySupportsGoalCommand() { return false; }
 `,
 );
 

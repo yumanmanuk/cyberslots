@@ -21,14 +21,14 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import type { EngineEvent, PermissionMode, ToolCallContent, UsageInfo } from '@shared/types';
+import type { EngineEvent, GoalControlAction, GoalInfo, PermissionMode, ToolCallContent, UsageInfo } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
 import { compatAudit } from '../compatAudit';
 import { killEngineTree } from '../killTree';
 import { log } from '../../log/logger';
 import { queryActiveAgyQuota } from './agyAccounts';
-import { resolveAgyCli } from './resolveAntigravity';
+import { agySupportsGoalCommand, resolveAgyCli } from './resolveAntigravity';
 
 /** 一张开着的 agy 子代理卡 — headless 不回传子代理内部活动流（subagent_info
  *  只有 log_uri 指针），卡面只能表达「已派发 / 运行中」，回合结束统一收卡。 */
@@ -54,6 +54,10 @@ export const AGY_MODEL_SLUGS = [
 ];
 /** 长任务上限（headless 默认 5m，编码任务放宽）。 */
 const PRINT_TIMEOUT = '30m';
+/** goal 回合上限：goal 语义是「长跑任务（如过夜）」，进程内由 agy 的
+ *  goal_stop_hook 强制续跑直到模型自报完成，超时放宽到 12h
+ *  （用户可随时 pause/clear 杀进程）。 */
+const GOAL_PRINT_TIMEOUT = '12h';
 
 export interface AntigravityAdapterOptions {
   cwd: string;
@@ -86,6 +90,13 @@ export class AntigravityAdapter implements EngineAdapter {
   private readonly stderrTail: string[] = [];
   /** 开着的子代理卡（key = 子代理 conversation_id，或步序兜底）。 */
   private readonly subagentCards = new Map<string, AgySubagentCard>();
+  /** 当前 goal 快照（cyberslots 侧真源 —— headless stream-json 没有 goal
+   *  事件，agy 的 GoalState 存在会话里不外发）。null = 无 goal。 */
+  private goal: GoalInfo | null = null;
+  /** goal 计时：暂停不清零 —— goalAccumMs 存已累计的 active 时长，
+   *  goalResumedAt 是本轮 active 起点（status≠active 时为 0）。 */
+  private goalAccumMs = 0;
+  private goalResumedAt = 0;
 
   constructor(
     private readonly opts: AntigravityAdapterOptions,
@@ -94,6 +105,14 @@ export class AntigravityAdapter implements EngineAdapter {
     this.conversationId = opts.resumeSessionId ?? '';
     this.modelId = opts.modelId || DEFAULT_MODEL;
     this.mode = opts.permissionMode ?? 'default';
+    // goal 依赖 print 模式的斜杠命令展开（agy ≥1.1.9，见 resolveAntigravity
+    // 的版本门注释）。旧版摘掉 goal 方法（实例属性遮蔽原型方法），
+    // SessionManager 的能力快照（!!adapter.setGoal）自动为 false，
+    // UI 走「不支持」提示路径，不误报能力。
+    if (!agySupportsGoalCommand(opts.cliPath)) {
+      this.setGoal = undefined as unknown as AntigravityAdapter['setGoal'];
+      this.controlGoal = undefined as unknown as AntigravityAdapter['controlGoal'];
+    }
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -119,6 +138,9 @@ export class AntigravityAdapter implements EngineAdapter {
     this.emit({ type: 'models.update', current: this.modelId, available: AGY_MODEL_SLUGS });
     // 同步当前权限模式（否则 UI 回落显示 default，与实际默认 auto 不符）。
     this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
+    // goal 快照是 adapter 内存态（agy 侧 GoalState 随进程消亡，无回放面）——
+    // 重启/重建 adapter 时显式清空，冲掉渲染层可能残留的旧 GoalBar。
+    this.emitGoalUpdate();
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.conversationId };
   }
@@ -140,7 +162,7 @@ export class AntigravityAdapter implements EngineAdapter {
 
   // ------------------------------------------------------------- actions
 
-  async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
+  async prompt(text: string, attachments?: string[], effort?: string, printTimeout = PRINT_TIMEOUT): Promise<void> {
     if (this.disposed) throw new Error('antigravity session disposed');
     // 并发重入总闸：上一回合未收尾期间（子进程在跑；或 result 已收但额度
     // probe 未完 —— 收尾放行点在 handleResult 的 .then()，probe 窗口内
@@ -171,11 +193,14 @@ export class AntigravityAdapter implements EngineAdapter {
     // 不告知就会回“未设置工作区”）；续接会话已有历史不重复注。
     let promptText = text;
     if (this.opts.workDir && !this.workDirInjected && !this.conversationId) {
-      promptText = `【当前工作目录（项目根）：${this.opts.workDir}】\n你可用工具直接读写该目录下的文件；分析项目时先列该目录。\n\n${promptText}`;
+      const ctx = `【当前工作目录（项目根）：${this.opts.workDir}】\n你可用工具直接读写该目录下的文件；分析项目时先列该目录。`;
+      // 斜杠命令（如 /goal）必须占据 prompt 开头才会被 CLI 展开（1.1.9 起
+      // print 模式支持）——命令文本把目录上下文尾挂，成为命令参数的一部分。
+      promptText = promptText.startsWith('/') ? `${promptText}\n\n${ctx}` : `${ctx}\n\n${promptText}`;
       this.workDirInjected = true;
     }
     if (attachments?.length) promptText += `\n\n附件路径：\n${attachments.join('\n')}`;
-    const args = this.buildArgs(promptText, effort);
+    const args = this.buildArgs(promptText, effort, printTimeout);
     const spec = resolveAgyCli(args, this.opts.cliPath);
 
     await new Promise<void>((resolve) => {
@@ -222,6 +247,13 @@ export class AntigravityAdapter implements EngineAdapter {
       child.on('error', (err) => {
         log.error('engine.antigravity', 'agy spawn failed', { command: spec.command, turnId }, err);
         this.emit({ type: 'error', turnId, source: 'client', message: `${L('无法启动 agy CLI', 'Failed to launch the agy CLI')}: ${err.message}` });
+        // goal 回合 spawn 失败（prompt 的 Promise 恒 resolve，launchGoalTurn 的
+        // catch 到不了这里）→ 同样落 blocked。
+        if (this.goal?.status === 'active') {
+          this.stopGoalClock();
+          this.goal = { ...this.goal, status: 'blocked', timeUsedSeconds: this.goalTimeSeconds() };
+          this.emitGoalUpdate();
+        }
         this.emit({ type: 'turn.ended', turnId, stopReason: 'error' });
         finish();
       });
@@ -246,6 +278,12 @@ export class AntigravityAdapter implements EngineAdapter {
             message: `${L('agy 退出', 'agy exited with')} code=${code}\n${tail}`.trim(),
           });
           this.settleSubagents(turnId, false);
+          // goal 回合崩退（无 result）→ GoalBar 落 blocked，不能永远「进行中」。
+          if (this.goal?.status === 'active') {
+            this.stopGoalClock();
+            this.goal = { ...this.goal, status: 'blocked', timeUsedSeconds: this.goalTimeSeconds() };
+            this.emitGoalUpdate();
+          }
           this.emit({ type: 'turn.ended', turnId, stopReason: 'error', durationMs: Date.now() - started });
         }
         finish();
@@ -257,8 +295,8 @@ export class AntigravityAdapter implements EngineAdapter {
 
   private turnStartedAt = 0;
 
-  private buildArgs(promptText: string, effort?: string): string[] {
-    const args = ['-p', promptText, '--output-format', 'stream-json', '--print-timeout', PRINT_TIMEOUT];
+  private buildArgs(promptText: string, effort?: string, printTimeout = PRINT_TIMEOUT): string[] {
+    const args = ['-p', promptText, '--output-format', 'stream-json', '--print-timeout', printTimeout];
     if (this.modelId) args.push('--model', this.modelId);
     // effort 仅对档位独立的 claude 系有效；gemini flash slug 已含档位（坑①）、
     // claude …-thinking slug 同理档位烧死（实测 --effort 直报 not supported），
@@ -289,6 +327,87 @@ export class AntigravityAdapter implements EngineAdapter {
 
   answerPermission(): void {
     // headless 无交互式权限请求（由策略/flag 决定），无需处理。
+  }
+
+  // ------------------------------------------------------------------ goal
+
+  /** goal 模式：借 agy 的 /goal 斜杠命令（1.1.9 起 print 模式展开）。发出后
+   *  由 agy 进程内的 goal_stop_hook 强制续跑、审计直到模型自报完成 ——
+   *  cyberslots 不需要自驱循环，goal 回合就是「一次超长 headless 运行」，
+   *  过程事件（text/tool/子代理卡）复用现有解析管线。 */
+  async setGoal(objective: string): Promise<void> {
+    const text = objective.trim();
+    if (!text) throw new Error(L('goal 目标不能为空', 'Goal objective must not be empty'));
+    this.launchGoalTurn(text, true);
+  }
+
+  /** pause/clear = 杀 goal 回合进程（headless 无进程内暂停面，同用户停止）；
+   *  resume = 续接会话重发 /goal（agy 的 GoalState 存于会话，续跑自然接上）。 */
+  async controlGoal(action: GoalControlAction): Promise<void> {
+    if (!this.goal) return;
+    if (action === 'clear') {
+      await this.cancel();
+      this.goal = null;
+      this.goalAccumMs = 0;
+      this.goalResumedAt = 0;
+      this.emitGoalUpdate();
+      return;
+    }
+    if (action === 'pause') {
+      this.stopGoalClock();
+      this.goal = { ...this.goal, status: 'paused', timeUsedSeconds: this.goalTimeSeconds() };
+      await this.cancel();
+      this.emitGoalUpdate();
+      return;
+    }
+    // resume
+    this.launchGoalTurn(this.goal.objective, false);
+  }
+
+  /** 发 goal 回合（set=新目标 / 续跑）。不 await 整回合 —— goal 运行可达
+   *  数小时，prompt 的 Promise 要到进程 close 才 resolve，IPC 不能挂着；
+   *  运行期失败走 error/turn.ended 事件流。 */
+  private launchGoalTurn(objective: string, fresh: boolean): void {
+    if (this.disposed) throw new Error('antigravity session disposed');
+    // 预检并发闸门（与 prompt 的 superseded 守卫同语义）：goal 回合运行期
+    // 间任何新 prompt（含 resume 重入）都必须显式报错，不能静默排队。
+    if (this.promptActive) {
+      throw new Error(L('agy 上一回合尚未收尾，拒绝并发 prompt [superseded]', 'agy previous turn still active — concurrent prompt rejected [superseded]'));
+    }
+    if (fresh || !this.goal) {
+      // 替换语义（对齐 codex 的 clear+set）：新目标直接覆盖旧 goal 重新计账。
+      this.goal = { objective, status: 'active', tokensUsed: 0, timeUsedSeconds: 0 };
+      this.goalAccumMs = 0;
+    } else {
+      this.goal = { ...this.goal, status: 'active' };
+    }
+    this.goalResumedAt = Date.now();
+    this.emitGoalUpdate();
+    void this.prompt(`/goal ${objective}`, undefined, undefined, GOAL_PRINT_TIMEOUT).catch((err) => {
+      // 只能捕获 spawn 前的同步失败（prompt 的 Promise 恒 resolve）；运行期
+      // 失败由 handleResult/close 的事件路径上报，这里把 GoalBar 落到 blocked。
+      log.warn('engine.antigravity', 'goal turn failed to launch', err);
+      if (this.goal?.status === 'active' && this.goal.objective === objective) {
+        this.stopGoalClock();
+        this.goal = { ...this.goal, status: 'blocked', timeUsedSeconds: this.goalTimeSeconds() };
+        this.emitGoalUpdate();
+      }
+    });
+  }
+
+  private stopGoalClock(): void {
+    this.goalAccumMs += this.goalResumedAt ? Date.now() - this.goalResumedAt : 0;
+    this.goalResumedAt = 0;
+  }
+
+  private goalTimeSeconds(): number {
+    const ms = this.goalAccumMs + (this.goalResumedAt ? Date.now() - this.goalResumedAt : 0);
+    return Math.round(ms / 1000);
+  }
+
+  private emitGoalUpdate(): void {
+    if (this.disposed) return;
+    this.emit({ type: 'goal.update', goal: this.goal ? { ...this.goal } : null });
   }
 
   // ------------------------------------------------------- stream parsing
@@ -491,6 +610,28 @@ export class AntigravityAdapter implements EngineAdapter {
       };
       const durationMs = num(result.duration_seconds) != null ? Math.round(num(result.duration_seconds)! * 1000) : Date.now() - this.turnStartedAt;
       const stopReason = status === 'SUCCESS' ? 'end_turn' : status.toLowerCase() || 'end_turn';
+      // goal 回合落幕 → 结算 goal 终态。agy 单进程跑到自报完成才停（SUCCESS），
+      // 失败按因由映射（额度→usageLimited，其余→blocked）；pause/clear 已落
+      // 的终态不被迟到的 result 翻案。token/时长累计进快照供 GoalBar 直读。
+      if (this.goal) {
+        this.stopGoalClock();
+        const goalStatus = this.goal.status !== 'active'
+          ? this.goal.status
+          : quotaExhausted
+            ? 'usageLimited'
+            : status === 'SUCCESS'
+              ? 'complete'
+              : 'blocked';
+        this.goal = {
+          ...this.goal,
+          status: goalStatus,
+          tokensUsed: this.goal.tokensUsed + (usage.totalTokens ?? 0),
+          timeUsedSeconds: this.goalTimeSeconds(),
+        };
+        this.emitGoalUpdate();
+        // 对齐 codex：complete 事件透传后本地不保留（渲染层发完成公告并收条）。
+        if (goalStatus === 'complete') this.goal = null;
+      }
       this.emit({ type: 'turn.ended', turnId, stopReason, usage, durationMs, quotaExhausted });
       // 回合终了统一收子代理卡（headless 无子代理终态信号，不收会永远 Delegating…）。
       this.settleSubagents(turnId, status === 'SUCCESS');

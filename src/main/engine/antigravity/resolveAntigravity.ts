@@ -62,6 +62,18 @@ function probeVersion(explicitPath?: string): string | undefined {
   return cachedVersion ?? undefined;
 }
 
+/** goal 模式(/goal 斜杠命令)可用性的版本门:print 模式的斜杠命令/技能
+ *  展开是 1.1.9 加的(changelog:「slash-command and skill expansion to
+ *  print mode」),更早版本 `-p "/goal …"` 会把命令当纯文本发送。
+ *  探测失败返回 true(不剥夺能力)——旧版最坏只是 /goal 当文本发、无强制
+ *  续跑,无害降级;probe 本身有 8s 超时与 30s 失败 TTL,不会反复阻塞。 */
+export function agySupportsGoalCommand(explicitPath?: string): boolean {
+  const v = probeVersion(explicitPath);
+  if (!v) return true;
+  const [maj = 0, min = 0, patch = 0] = v.split('.').map((p) => Number(p) || 0);
+  return maj > 1 || (maj === 1 && min > 1) || (maj === 1 && min === 1 && patch >= 9);
+}
+
 /** 静态只读快照（设置页展示用）：CLI 安装状态/版本 + keyring/账号池存在性。永不写入。 */
 export function readAntigravitySnapshot(explicitPath?: string): AntigravityConfigSnapshot {
   const snap: AntigravityConfigSnapshot = { installed: false };

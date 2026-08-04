@@ -175,6 +175,15 @@ export function continuePrompt(): string {
   );
 }
 
+/** 执行/修复角色的断点续接：产物是文件改动，口径与 continuePrompt 相反 ——
+ *  不能要求「不要写入任何文件」，而是提醒把未完成的文件改动做完再汇报。 */
+export function continueBuildPrompt(): string {
+  return L(
+    '刚才的回合中断了，请从中断点继续完成任务（未做完的文件改动继续做完，全部完成后简要汇报改动内容）。',
+    'The previous turn was interrupted. Resume from where you stopped and finish the task (complete any remaining file changes, then briefly report what changed).',
+  );
+}
+
 /**
  * Parse the auditor's reply into a verdict. Looks for the machine-readable
  * `VERDICT: PASS/FAIL` line; falls back to keyword heuristics.

@@ -34,6 +34,7 @@ import {
   auditPrompt,
   builderPrompt,
   continuePrompt,
+  continueBuildPrompt,
   judgeFusePrompt,
   judgeRevisePrompt,
   parseAuditVerdict,
@@ -188,6 +189,7 @@ export class RaceOrchestrator {
         this.needsGuard('judge', cfg),
       ),
       cfg,
+      continuePrompt(),
     );
     // 首次出方案为 v1；手动重新出方案（rerunJudge，如换裁判后）时 v+1
     // 覆盖展示（旧方案文本在弃用的旧裁判会话历史中仍可回看）。
@@ -237,6 +239,7 @@ export class RaceOrchestrator {
       judgeId,
       withGuard(judgeRevisePrompt(g.finalPlan ?? '', annotation), this.needsGuard('judge', cfg)),
       cfg,
+      continuePrompt(),
     );
     g.finalPlan = plan;
     g.finalPlanVersion += 1;
@@ -725,8 +728,9 @@ export class RaceOrchestrator {
     this.setStage(g, 'building');
     const builderId = await this.ensureRole(g, 'builder');
     const cfg = g.roles.builder;
-    // Builder writes — no read-only guard.
-    await this.runTurnWithRetry(g, builderId, builderPrompt(g.finalPlan ?? ''), cfg);
+    // Builder writes — no read-only guard. 瞬时错误续跑用 continueBuildPrompt
+    // （产物是文件改动，不能套「不要写入任何文件」的文本交卷口径）。
+    await this.runTurnWithRetry(g, builderId, builderPrompt(g.finalPlan ?? ''), cfg, continueBuildPrompt());
     await this.runAuditing(g);
   }
 
@@ -741,6 +745,7 @@ export class RaceOrchestrator {
       auditorId,
       withGuard(auditPrompt(g.finalPlan ?? '', digest), this.needsGuard('auditor', cfg)),
       cfg,
+      continuePrompt(),
     );
     const verdict = parseAuditVerdict(out);
     g.audit = verdict;
@@ -761,7 +766,7 @@ export class RaceOrchestrator {
     this.setStage(g, 'repairing');
     const builderId = g.sessions.builder!;
     const cfg = g.roles.builder;
-    await this.runTurnWithRetry(g, builderId, repairPrompt(issues), cfg);
+    await this.runTurnWithRetry(g, builderId, repairPrompt(issues), cfg, continueBuildPrompt());
     await this.runAuditing(g);
   }
 
@@ -797,24 +802,28 @@ export class RaceOrchestrator {
     return id;
   }
 
-  /** 瞬时错误自动重试一次（用户主动中止/打断/剔除不重试 —— 对
-   *  被剔者重发 prompt 是灾难）；仍失败才上浮 race.error 交给用户。
-   *  retryText 非空时重试改发它而不是原指令 —— 断点续跑（如 agy 高频的
-   *  “Agent execution terminated” 模型侧瞬时错）：会话上下文还在引擎侧，
-   *  发「继续」让模型接着断点干，比重发整段指令从头再跑省 token 且不丢
-   *  已完成的半段产物。 */
+  /** 瞬时错误自动重试（用户主动中止/打断/剔除不重试 —— 对被剔者重发
+   *  prompt 是灾难）；连续失败才上浮 race.error 交给用户。
+   *  retryText 非空时重试改发它而不是原指令 —— 断点续跑（agy 高频的
+   *  “Agent execution terminated” 模型侧瞬时错是主要受众）：会话上下文
+   *  还在引擎侧，发「继续」让模型接着断点干，比重发整段指令从头再跑省
+   *  token 且不丢已完成的半段产物。续跑便宜且幂等 → 给 2 次续跑机会
+   *  （共 3 次尝试，递增退避）；无 retryText 保持旧行为（重发原文 1 次）。 */
   private async runTurnWithRetry(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig, retryText?: string): Promise<string> {
-    try {
-      return await this.runTurn(g, sessionId, text, cfg);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // 用户主动中止/打断/被主动唤醒（剔除或重跑规划）不自动重试。
-      if (msg.includes('cancelled') || msg.includes('interrupted') || msg.includes('superseded')) throw err;
-      // 额度耗尽不盲目重试：重发必撞同一没额度账号（2026-08 实测 1.5s 内
-      // 重发即再失败）。把复活交给渲染层切号后的 retryRacer 精确补跑。
-      if (this.quotaErr(err)) throw err;
-      await new Promise((r) => setTimeout(r, 1500));
-      return this.runTurn(g, sessionId, retryText ?? text, cfg);
+    const maxAttempts = retryText ? 3 : 2;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.runTurn(g, sessionId, attempt === 1 ? text : (retryText ?? text), cfg);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // 用户主动中止/打断/被主动唤醒（剔除或重跑规划）不自动重试。
+        if (msg.includes('cancelled') || msg.includes('interrupted') || msg.includes('superseded')) throw err;
+        // 额度耗尽不盲目重试：重发必撞同一没额度账号（2026-08 实测 1.5s 内
+        // 重发即再失败）。把复活交给渲染层切号后的 retryRacer 精确补跑。
+        if (this.quotaErr(err)) throw err;
+        if (attempt >= maxAttempts) throw err;
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
     }
   }
 
