@@ -51,7 +51,7 @@ ACP `session/new` 返回的 configOptions 只有两项：
 | `auto` | `--approval-mode write`（自动批准写） | 无运行时途径 → set_mode `default` |
 | `yolo` | `--auto-approve` | 无运行时途径 → set_mode `default` |
 
-- 中途切换：`plan <-> default` 走 `session/set_mode`（ACP 支持）；切 auto/yolo 需重启进程（第一版降级为 set_mode default + 记录，自动批准靠 spawn flag 在创建时定）。
+- 中途切换：`plan <-> default` 走 `session/set_mode`（ACP 支持）；切 auto/yolo（审批档 ask/write/yolo 变化）由适配器带新 spawn flag 重启进程、`session/load` 按原 sessionId 续接上下文（已实现，见 OmpAdapter.respawnForApproval）。引擎 mode 回声（current_mode_update / config_option_update）经 uiMode 与审批档解耦，防 UI 回弹。
 - **thinking/effort**：ACP 面只有 off/auto。cyberslots effort 参数映射：非空且非 off → `auto`，off → `off`（通过 set_config_option）。精细档（low/medium/high/xhigh/max）经 spawn `--thinking` flag 定，赛马 per-role effort 若需精细档由 spawn flag 承载；第一版赛马 omp effort 档给 `off`/`auto` 两档即可（auto 本身自动分档，语义合理）。
 
 ## 4. 模型目录
