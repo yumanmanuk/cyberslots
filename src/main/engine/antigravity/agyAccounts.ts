@@ -162,6 +162,7 @@ export function listAgyAccounts(): AgyAccountsSnapshot {
       importedAt: a.importedAt,
     }));
     snap.active = readActiveEmail();
+    snap.blocked = blockedSnapshot();
   } catch (err) {
     log.warn('engine.antigravity', 'read import pool failed', undefined, err);
     snap.error = `${L('读取导入池失败', 'Failed to read the import pool')}: ${err instanceof Error ? err.message : String(err)}`;
@@ -289,6 +290,59 @@ export function importAgyAccountsFromFile(filePath: string): AgyAccountsSnapshot
 function invalidateQuotaCaches(): void {
   quotaCache = undefined;
   activeCache = undefined;
+}
+
+// ------------------------------------------------------- exhaustion cooldown
+
+/** 额度耗尽冷却表（纯内存，不落盘、无 schema 迁移，重启即回旧行为）：
+ *  email → blockedUntil（ms）。
+ *  写入硬约束：仅 queryOneAccount 的真实查询结果实际含 ≥99.95 耗尽分组
+ *  才落 blocked，且只标记被查询的那一个 email（探测坐实耗尽与池扫描
+ *  坐实耗尽共用同一条写入路径，扫描本身已持有数据、零额外探测）。
+ *  双解封：到期惰性失效 + 任意真实查询显示恢复即清（见 queryOneAccount）。
+ *  手动切号永远不读本表（逃生口）。 */
+const agyBlockedUntil = new Map<string, number>();
+const AGY_BLOCK_FALLBACK_MS = 30 * 60 * 1000; // 坐实耗尽但解析不到 resetTime 时降级 30min
+
+/** email 的未到期 blockedUntil；过期条目惰性清除并返回 undefined。 */
+function coolingUntil(email: string): number | undefined {
+  const until = agyBlockedUntil.get(email);
+  if (until === undefined) return undefined;
+  if (until <= Date.now()) {
+    agyBlockedUntil.delete(email);
+    return undefined;
+  }
+  return until;
+}
+
+/** 快照用冷却表副本（只含未到期条目）。 */
+function blockedSnapshot(): Record<string, number> | undefined {
+  const out: Record<string, number> = {};
+  for (const email of [...agyBlockedUntil.keys()]) {
+    const until = coolingUntil(email);
+    if (until !== undefined) out[email] = until;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** 坐实耗尽后落 blocked（唯一写入点）：resetTime 取耗尽分组的最大重置
+ *  秒数，解析不到降级 30min。 */
+function markCooling(email: string, exhausted: AgyQuotaGroup[]): void {
+  const maxReset = Math.max(...exhausted.map((g) => g.resetsInSeconds ?? 0));
+  const until = Date.now() + (maxReset > 0 ? maxReset * 1000 : AGY_BLOCK_FALLBACK_MS);
+  agyBlockedUntil.set(email, until);
+  log.info('engine.antigravity', 'account marked cooling (quota exhaustion confirmed)', { email, blockedUntil: until, resetsInSeconds: maxReset > 0 ? maxReset : undefined });
+}
+
+/** 冷却账号的最后已知额度（占位用）：全池缓存优先，活动账号缓存兜底。 */
+function lastKnownQuota(email: string): AgyQuotaInfo | undefined {
+  const fromPool = quotaCache?.data.find((q) => q.email === email);
+  if (fromPool) return fromPool;
+  const active = activeCache?.data;
+  if (active?.email === email && active.ok) {
+    return { email, accountId: '', ok: active.ok, groups: active.groups, queriedAt: active.queriedAt, error: active.error };
+  }
+  return undefined;
 }
 
 // --------------------------------------------------------------- token refresh
@@ -494,7 +548,19 @@ export async function queryAgyQuota(force = false): Promise<AgyQuotaInfo[]> {
   return quotaInflight;
 }
 
-async function queryOneAccount(account: AgyAccount): Promise<AgyQuotaInfo> {
+async function queryOneAccount(account: AgyAccount, opts?: { ignoreCooling?: boolean }): Promise<AgyQuotaInfo> {
+  // 冷却感知：冷却期账号默认不探测（探测减频），用最后已知额度占位；
+  // 占位数据缺失时给空结果（UI 经快照 blocked 表显示「冷却中」）。
+  // ignoreCooling = 坐实探测等必须拿真实数据的路径（adapter 额度 probe）。
+  if (!opts?.ignoreCooling) {
+    const until = coolingUntil(account.email);
+    if (until !== undefined) {
+      const last = lastKnownQuota(account.email);
+      return last
+        ? { ...last, accountId: account.id, email: account.email }
+        : { email: account.email, accountId: account.id, ok: false, groups: [], queriedAt: Date.now(), error: L('冷却中', 'cooling') };
+    }
+  }
   const info: AgyQuotaInfo = { email: account.email, accountId: account.id, ok: false, groups: [], queriedAt: Date.now() };
   try {
     const rt = readImportedStore().accounts.find((a) => a.id === account.id)?.refreshToken;
@@ -503,6 +569,13 @@ async function queryOneAccount(account: AgyAccount): Promise<AgyQuotaInfo> {
     const { base, projectId } = await loadCodeAssist(refreshed.access_token);
     info.groups = await retrieveQuotaSummary(base, refreshed.access_token, projectId);
     info.ok = true;
+    // 冷却表的唯一写入口（硬约束：真实数据坐实 ≥99.95 耗尽才落 blocked，
+    // 且只标记本 email；恢复即清）。解析出 0 组 = 数据不可解读，不动冷却表。
+    if (info.groups.length > 0) {
+      const exhausted = info.groups.filter((g) => g.utilization >= 99.95);
+      if (exhausted.length > 0) markCooling(account.email, exhausted);
+      else agyBlockedUntil.delete(account.email);
+    }
   } catch (err) {
     log.warn('engine.antigravity', 'account quota query failed', { email: account.email }, err);
     info.error = err instanceof Error ? err.message : String(err);
@@ -514,8 +587,10 @@ let activeCache: { data: AgyActiveQuota; ts: number } | undefined;
 let activeInflight: Promise<AgyActiveQuota> | undefined;
 
 /** 只查【当前活动账号】的额度（用量小窗/大窗常显）。仅 1 次网络往返，
- *  与 queryAgyQuota（扫导入池）解耦。同样 60s TTL 缓存 + in-flight 去重。 */
-export async function queryActiveAgyQuota(force = false): Promise<AgyActiveQuota> {
+ *  与 queryAgyQuota（扫导入池）解耦。同样 60s TTL 缓存 + in-flight 去重。
+ *  ignoreCooling：坐实探测（adapter 额度 probe）必须拿活动账号的真实
+ *  数据，绕过冷却跳过；常显看板不传（冷却账号照常占位，不额外探测）。 */
+export async function queryActiveAgyQuota(force = false, opts?: { ignoreCooling?: boolean }): Promise<AgyActiveQuota> {
   if (!force && activeCache && Date.now() - activeCache.ts < QUOTA_TTL_MS) return activeCache.data;
   if (activeInflight) return activeInflight;
   activeInflight = (async () => {
@@ -527,7 +602,7 @@ export async function queryActiveAgyQuota(force = false): Promise<AgyActiveQuota
       const acct = snap.accounts.find((a) => snap.active && a.email === snap.active);
       if (!acct) throw new Error(L('当前活动账号未导入本程序', 'The currently active account is not imported into this app'));
       data.email = acct.email;
-      const one = await queryOneAccount(acct);
+      const one = await queryOneAccount(acct, opts);
       data.ok = one.ok;
       data.groups = one.groups;
       data.error = one.error;

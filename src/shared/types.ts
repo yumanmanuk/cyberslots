@@ -412,7 +412,11 @@ export type EngineEvent =
        *  quotaExhausted error 分支不受影响。 */
       quotaExhausted?: boolean;
     }
-  | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider'; quotaExhausted?: boolean };
+  | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider'; quotaExhausted?: boolean;
+      /** 坐实耗尽的账号邮箱与最长重置秒数（probe 坐实耗尽时随事件下发）——
+       *  渲染层无需再为拿 resetTime/邮箱补一次真实 Google 查询。仅
+       *  quotaExhausted=true 时可能出现；缺省即退回现状（无字段不解读）。 */
+      quotaEmail?: string; quotaResetsInSeconds?: number };
 
 export interface SlashCommandInfo {
   name: string;
@@ -699,6 +703,11 @@ export interface AgyAccountsSnapshot {
   active?: string;
   /** cockpit 侧记录的当前账号 id（活动邮箱匹配不上时的回退）。 */
   cockpitCurrentId?: string;
+  /** 额度耗尽冷却表：email → blockedUntil（ms 时间戳，纯内存不落盘）。
+   *  仅探测/查询坐实 ≥99.95 耗尽才落入；到期惰性失效（渲染层按时间戳
+   *  自行过滤），真实查询显示恢复即由主进程清除。选号第四道门槛与
+   *  看板「冷却中」占位共用本通道。 */
+  blocked?: Record<string, number>;
   error?: string;
 }
 

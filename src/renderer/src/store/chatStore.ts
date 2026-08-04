@@ -111,6 +111,8 @@ interface ChatState {
   drafts: Record<string, string>;
   /** 侧边栏折叠态（localStorage 持久）。 */
   sidebarCollapsed: boolean;
+  /** 会话 → 右侧 dock 的打开状态与当前 tab（纯内存；切会话保留，重启不保留）。 */
+  rightPanels: Record<string, RightPanelState | undefined>;
   /** 主会话 → 右侧 sidechat 分支会话 id 列表（支持多个分支 tab）。 */
   sidechats: Record<string, string[] | undefined>;
   /** 主会话 → 右侧内嵌终端 tab 列表（多实例，cwd 可选不同工作区根目录）。 */
@@ -168,6 +170,8 @@ interface ChatState {
   addTerminal(sessionId: string, cwd: string): string;
   removeTerminal(sessionId: string, termId: string): void;
   toggleSidebar(): void;
+  /** 更新某会话右侧 dock 状态（只写补丁，保留未提及字段）。 */
+  setRightPanel(sessionId: string, patch: Partial<RightPanelState>): void;
   setPlanPreview(sessionId: string, messageId: string | undefined): void;
   /** AI 正文文件 chip 点击 → 右侧 files tab 打开该文件预览（仅 work 会话；相对路径按 cwd 拼绝对）。 */
   requestFilePreview(sessionId: string, rawPath: string): void;
@@ -237,6 +241,12 @@ interface ChatState {
 export interface TerminalTab {
   id: string;
   cwd: string;
+}
+
+/** 右侧 dock 的会话级状态：开关 + 当前激活 tab（切会话恢复用，不落盘）。 */
+export interface RightPanelState {
+  open: boolean;
+  activeTab: string;
 }
 
 const emptyUi = (meta?: Pick<SessionMeta, 'permissionMode'>): SessionUiState => ({
@@ -359,6 +369,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   composerDrafts: {},
   drafts: {},
   sidebarCollapsed: localStorage.getItem('cs.sidebarCollapsed') === '1',
+  rightPanels: {},
   sidechats: {},
   terminals: {},
   planPreview: {},
@@ -633,6 +644,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const next = !get().sidebarCollapsed;
     localStorage.setItem('cs.sidebarCollapsed', next ? '1' : '0');
     set({ sidebarCollapsed: next });
+  },
+
+  setRightPanel(sessionId, patch) {
+    set((s) => ({
+      rightPanels: {
+        ...s.rightPanels,
+        [sessionId]: { open: false, activeTab: 'files', ...s.rightPanels[sessionId], ...patch },
+      },
+    }));
   },
 
   setPlanPreview(sessionId, messageId) {
@@ -1123,6 +1143,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessions: s.sessions.filter((m) => m.id !== id),
       activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
       terminals: { ...s.terminals, [id]: undefined },
+      rightPanels: { ...s.rightPanels, [id]: undefined },
       goals: { ...s.goals, [id]: undefined },
       efforts: Object.fromEntries(Object.entries(s.efforts).filter(([k]) => k !== id)),
       ui: Object.fromEntries(Object.entries(s.ui).filter(([k]) => k !== id)),
@@ -1216,43 +1237,17 @@ function clearAgyAutoSwitchHistory(): void {
   agyAutoSwitchHistory.length = 0;
 }
 
-// ---- 步骤2：耗尽账号冷却记忆 ----
+// ---- 耗尽账号冷却（状态在主进程，快照同步） ----
 
-/** 被判定额度耗尽的账号 → blockedUntil 时间戳（纯内存，重启即清）。
- *  pickAgySwitchTarget 跳过未到期的账号；到期或额度恢复即清除。 */
-const agyBlockedAccounts = new Map<string, number>();
-const AGY_BLOCK_FALLBACK_MS = 30 * 60 * 1000; // 解析不到 resetTime 时降级 30 分钟
-
-/** 标记账号为额度耗尽冷却中。 */
-function markAgyAccountBlocked(email: string, blockedUntil: number): void {
-  agyBlockedAccounts.set(email, blockedUntil);
-}
-
-/** 账号是否处于冷却期（惰性清除已过期的条目）。 */
-function isAgyAccountBlocked(email: string): boolean {
-  const until = agyBlockedAccounts.get(email);
-  if (until === undefined) return false;
-  if (until <= Date.now()) {
-    agyBlockedAccounts.delete(email);
-    return false;
-  }
-  return true;
-}
-
-/** 额度查询显示账号已恢复时清除冷却标记。 */
-function clearAgyAccountBlockedIfRecovered(quotas: AgyQuotaInfo[]): void {
-  for (const q of quotas) {
-    if (!q.ok || !q.email) continue;
-    const allHealthy = q.groups.length > 0 && q.groups.every((g) => g.utilization < 99.95);
-    if (allHealthy) agyBlockedAccounts.delete(q.email);
-  }
-}
-
-/** 从额度查询结果里提取已耗尽窗口的最大重置秒数。 */
-function maxExhaustedResetSeconds(q: { groups: AgyQuotaGroup[] }): number {
-  const exhausted = q.groups.filter((g) => g.utilization >= 99.95);
-  if (exhausted.length === 0) return 0;
-  return Math.max(...exhausted.map((g) => g.resetsInSeconds ?? 0));
+/** 快照 blocked 表 → 未到期冷却邮箱集（渲染层按时间戳惰性过滤）。
+ *  冷却表唯一真源在 main 的 agyAccounts（坐实探测/池扫描落 blocked、
+ *  恢复即清、到期惰性失效）；渲染层不自行重查维护 —— 坐实耗尽事件自带
+ *  quotaEmail/quotaResetsInSeconds，省一次真实 Google 调用。 */
+function blockedEmailsOf(snap: { blocked?: Record<string, number> }): Set<string> {
+  const now = Date.now();
+  const out = new Set<string>();
+  for (const [email, until] of Object.entries(snap.blocked ?? {})) if (until > now) out.add(email);
+  return out;
 }
 
 // ---- 步骤4：普通会话非额度错误自动重试 ----
@@ -1342,12 +1337,9 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
   agyAutoSwitchInflight = true;
   try {
     const [snap, quotas] = await Promise.all([window.cyberslots.agyAccountsList(), window.cyberslots.agyQuota(true)]);
-    // 步骤2：额度查询显示某账号已恢复 → 清除其冷却标记。
-    clearAgyAccountBlockedIfRecovered(quotas);
-    const blockedEmails = new Set<string>();
-    for (const q of quotas) {
-      if (q.email && isAgyAccountBlocked(q.email)) blockedEmails.add(q.email);
-    }
+    // 冷却状态取自快照 blocked 表（main 侧池扫描强刷时已只刷非冷却账号，
+    // 坐实耗尽/恢复清除同样在 main 落表）——渲染层零额外探测。
+    const blockedEmails = blockedEmailsOf(snap);
     const target = pickAgySwitchTarget(quotas, snap.active, t5h, t7d, blockedEmails);
     if (!target) {
       // 无合格目标：耗尽兜底 → 打开手动弹窗（switchAgyAccount 已赛马感知）；主动 → 静默放弃。
@@ -1418,28 +1410,13 @@ async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<v
   }
 }
 
-/** 步骤2：坐实额度耗尽后 → 查当前活动账号重置时间 → 标记 blocked → 走自动切号。 */
-async function markAgyActiveBlockedAndSwitch(get: GetFn, sessionId: string): Promise<void> {
-  try {
-    const q = await window.cyberslots.agyActiveQuota(true);
-    if (q.ok && q.email) {
-      const resetSec = maxExhaustedResetSeconds(q);
-      const blockedUntil = resetSec > 0 ? Date.now() + resetSec * 1000 : Date.now() + AGY_BLOCK_FALLBACK_MS;
-      markAgyAccountBlocked(q.email, blockedUntil);
-    }
-  } catch {
-    // 查询失败不阻塞切号流程
-  }
-  await autoSwitchAgy(get, sessionId, 'exhausted');
-}
-
-/** 步骤3：首条消息前预检查——当前账号 blocked 时先切后发（纯内存判断，
- *  不触发网络请求；blocked 才走全池扫描切号）。低额度未 blocked 的场景
- *  由现有 maybeProactiveSwitchAgy 在回合后处理，不在此处阻塞。 */
+/** 步骤3：首条消息前预检查——当前账号 blocked 时先切后发（快照 blocked
+ *  表判断，零额外网络请求；blocked 才走全池扫描切号）。低额度未 blocked
+ *  的场景由现有 maybeProactiveSwitchAgy 在回合后处理，不在此处阻塞。 */
 async function maybePreCheckAgyAccount(get: GetFn, sessionId: string): Promise<void> {
   try {
     const snap = await window.cyberslots.agyAccountsList();
-    if (!snap.active || !isAgyAccountBlocked(snap.active)) return;
+    if (!snap.active || !blockedEmailsOf(snap).has(snap.active)) return;
     // 当前账号 blocked → 复用 threshold 路径切到合格账号。
     await autoSwitchAgy(get, sessionId, 'threshold');
   } catch {
@@ -1749,11 +1726,12 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       mutateUi(set, sessionId, (ui) => ({ ...ui, messages: foldMessage(ui.messages, event) }));
       schedulePersist(get, sessionId);
       noteActivity(set, get, sessionId, event);
-      // 确认额度耗尽（reportQuotaExhaustion 的结构化标记）→ 开启自动切则自动切号接回，
+      // 确认额度耗尽（adapter probe 坐实，事件自带 quotaEmail/resetSec；
+      // 冷却标记已在 main 落表，渲染层零重查）→ 开启自动切则自动切号接回，
       // 否则兜底弹手动切号窗。仅此一条路径会弹切号窗 —— 非额度类错误不触发。
       const isAntigravityErr = get().sessions.find((m) => m.id === sessionId)?.engine === 'antigravity';
       if (event.quotaExhausted && isAntigravityErr) {
-        if (get().settings?.antigravityAutoSwitch) void markAgyActiveBlockedAndSwitch(get, sessionId);
+        if (get().settings?.antigravityAutoSwitch) void autoSwitchAgy(get, sessionId, 'exhausted');
         else set(() => ({ agySwitchFor: sessionId }));
       } else if (isAntigravityErr && !event.quotaExhausted) {
         // 步骤4：非额度类错误（探测已确认未耗尽）→ 退避后重试同账号一次。

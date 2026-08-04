@@ -643,15 +643,19 @@ export class AntigravityAdapter implements EngineAdapter {
   }
 
   /** ERROR 文案泛化时的额度核实（仅探测，不 emit）：查当前活动账号
-   *  （force 绕缓存），任一时间窗额度归零视为坐实。尽力而为 —— 查询失败/
-   *  未导入/未耗尽都返回 false，按普通错误处理。 */
+   *  （force 绕缓存 + ignoreCooling 绕冷却跳过 — 坐实探测必须拿真实数据，
+   *  冷却占位会毁掉信号二分），任一时间窗额度归零视为坐实。坐实即把
+   *  resetTime/email 暂存随事件下发（渲染层省一次真实 Google 重查）。
+   *  尽力而为 —— 查询失败/未导入/未耗尽都返回 false，按普通错误处理。 */
   private async probeQuotaExhaustion(turnId: number): Promise<boolean> {
     try {
-      const q = await queryActiveAgyQuota(true);
+      const q = await queryActiveAgyQuota(true, { ignoreCooling: true });
       if (this.disposed || !q.ok) return false;
       const exhausted = q.groups.filter((g) => g.utilization >= 99.95);
       if (exhausted.length === 0) return false;
       this.pendingQuotaEmail = q.email;
+      const maxReset = Math.max(...exhausted.map((g) => g.resetsInSeconds ?? 0));
+      this.pendingQuotaResetSec = maxReset > 0 ? maxReset : undefined;
       this.pendingQuotaWindows = exhausted
         .map((g) => L(`${g.group}额度${g.resetsInSeconds != null ? `（${fmtReset(g.resetsInSeconds)}后重置）` : ''}`, `${g.group} quota${g.resetsInSeconds != null ? ` (resets in ${fmtReset(g.resetsInSeconds)})` : ''}`))
         .join(L('、', ', '));
@@ -665,14 +669,18 @@ export class AntigravityAdapter implements EngineAdapter {
 
   private pendingQuotaEmail: string | undefined;
   private pendingQuotaWindows = '';
+  private pendingQuotaResetSec: number | undefined;
 
   /** 坐实额度耗尽后补报 provider 级错误（带重置时间，供用户决策切号）；
-   *  结构化标记 quotaExhausted 驱动渲染层自动切号/兜底弹窗。 */
+   *  结构化标记 quotaExhausted 驱动渲染层自动切号/兜底弹窗；
+   *  quotaEmail/quotaResetsInSeconds 随事件下发（渲染层免重查）。 */
   private emitQuotaError(turnId: number): void {
     const email = this.pendingQuotaEmail;
     const windows = this.pendingQuotaWindows;
+    const resetSec = this.pendingQuotaResetSec;
     this.pendingQuotaEmail = undefined;
     this.pendingQuotaWindows = '';
+    this.pendingQuotaResetSec = undefined;
     this.emit({
       type: 'error',
       turnId,
@@ -682,6 +690,8 @@ export class AntigravityAdapter implements EngineAdapter {
         `The ${windows} of the current account${email ? ` ${email}` : ''} is exhausted — switch accounts and retry.`,
       ),
       quotaExhausted: true,
+      quotaEmail: email,
+      quotaResetsInSeconds: resetSec,
     });
   }
 
