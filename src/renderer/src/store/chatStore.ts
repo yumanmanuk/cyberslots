@@ -10,8 +10,6 @@ import { useRaceStore } from './raceStore';
 
 import type {
   AppSettings,
-  AgyQuotaGroup,
-  AgyQuotaInfo,
   CodeSelection,
   CodexCatalogModel,
   CompatAuditSnapshot,
@@ -34,6 +32,16 @@ import type {
 } from '@shared/types';
 import type { SessionCreateRequest, OpenerAvailability } from '@shared/ipc';
 import { isRaceActive, type RaceRole } from '@shared/race';
+import {
+  agyWindowThreshold,
+  blockedEmailsOf,
+  clearRateWindow,
+  createRateWindow,
+  pickAgySwitchTarget,
+  rateWindowLimited,
+  recordRateWindowHit,
+  type RateWindow,
+} from '@shared/agyPolicy';
 import { serializeSelections, selectionRangeLabel } from '../selections';
 import { resolveEffectiveEffort } from '../effort';
 import { rlog } from '../log/logger';
@@ -1156,6 +1164,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     pendingGoalDone.delete(id);
     stopRequested.delete(id);
     autoCompactGuard.delete(id);
+    agyAutoSwitchSessionWins.delete(id);
   },
 
   async loadCron() {
@@ -1204,53 +1213,45 @@ export function announceSystem(sessionId: string, text: string): void {
  *  主动+兜底并发）只允许一个切换在途，其余静默跳过。 */
 let agyAutoSwitchInflight = false;
 
-// ---- 步骤1：连续切号熔断 ----
+// ---- 步骤3：连续切号熔断（会话级 + 全局级双窗口） ----
 
-/** 自动切号成功时间戳（滚动窗口）；超过窗口的条目惰性裁剪。
- *  超过 AGY_AUTOSWITCH_RATE_LIMIT 次/窗口 → 停自动切号，回退手动弹窗。
- *  防止系统性故障时把整池挨个烧一遍（每次切号都伴随 enterprise 现刷 +
- *  CredWrite，是最像滥用的行为模式）。 */
-const AGY_AUTOSWITCH_RATE_WINDOW_MS = 10 * 60 * 1000; // 10 分钟
-const AGY_AUTOSWITCH_RATE_LIMIT = 3; // 窗口内最多 3 次自动切号
-const agyAutoSwitchHistory: number[] = [];
+/** 自动切号熔断滑动窗口（命中只记成功的自动切号；窗口算法见 shared/agyPolicy，
+ *  惰性裁剪）：全局一份 + 每会话一份，任一窗口 10min 内 ≥3 次 → 停自动切号，
+ *  回退手动弹窗。防止系统性故障时把整池挨个烧一遍（每次切号都伴随
+ *  enterprise 现刷 + CredWrite，是最像滥用的行为模式）。 */
+const agyAutoSwitchGlobalWin: RateWindow = createRateWindow();
+const agyAutoSwitchSessionWins = new Map<string, RateWindow>();
 
-/** 判断自动切号是否已被熔断（窗口内成功次数超限）。 */
-function agyAutoSwitchRateLimited(): boolean {
-  const now = Date.now();
-  while (agyAutoSwitchHistory.length > 0 && agyAutoSwitchHistory[0]! < now - AGY_AUTOSWITCH_RATE_WINDOW_MS) {
-    agyAutoSwitchHistory.shift();
+function agySessionWin(sessionId: string): RateWindow {
+  let w = agyAutoSwitchSessionWins.get(sessionId);
+  if (!w) {
+    w = createRateWindow();
+    agyAutoSwitchSessionWins.set(sessionId, w);
   }
-  return agyAutoSwitchHistory.length >= AGY_AUTOSWITCH_RATE_LIMIT;
+  return w;
 }
 
-/** 记录一次成功的自动切号（用于熔断计数）。 */
-function recordAgyAutoSwitch(): void {
-  agyAutoSwitchHistory.push(Date.now());
+/** 判断自动切号是否已被熔断（会话级或全局级任一超限即拒）。 */
+function agyAutoSwitchRateLimited(sessionId: string): boolean {
   const now = Date.now();
-  while (agyAutoSwitchHistory.length > 0 && agyAutoSwitchHistory[0]! < now - AGY_AUTOSWITCH_RATE_WINDOW_MS) {
-    agyAutoSwitchHistory.shift();
-  }
+  return rateWindowLimited(agyAutoSwitchGlobalWin, now) || rateWindowLimited(agySessionWin(sessionId), now);
 }
 
-/** 正常回合收尾时清零熔断计数（证明当前账号在正常工作）。 */
-function clearAgyAutoSwitchHistory(): void {
-  agyAutoSwitchHistory.length = 0;
-}
-
-// ---- 耗尽账号冷却（状态在主进程，快照同步） ----
-
-/** 快照 blocked 表 → 未到期冷却邮箱集（渲染层按时间戳惰性过滤）。
- *  冷却表唯一真源在 main 的 agyAccounts（坐实探测/池扫描落 blocked、
- *  恢复即清、到期惰性失效）；渲染层不自行重查维护 —— 坐实耗尽事件自带
- *  quotaEmail/quotaResetsInSeconds，省一次真实 Google 调用。 */
-function blockedEmailsOf(snap: { blocked?: Record<string, number> }): Set<string> {
+/** 记录一次成功的自动切号（全局 + 该会话双窗口各记一笔）。 */
+function recordAgyAutoSwitch(sessionId: string): void {
   const now = Date.now();
-  const out = new Set<string>();
-  for (const [email, until] of Object.entries(snap.blocked ?? {})) if (until > now) out.add(email);
-  return out;
+  recordRateWindowHit(agyAutoSwitchGlobalWin, now);
+  recordRateWindowHit(agySessionWin(sessionId), now);
 }
 
-// ---- 步骤4：普通会话非额度错误自动重试 ----
+/** agy 引擎正常回合收尾清零（该会话 + 全局双窗口；证明当前账号恢复正常
+ *  工作）。其它引擎的正常回合不清 agy 计数（见 turn.ended 调用侧判定）。 */
+function clearAgyAutoSwitchHistory(sessionId: string): void {
+  clearRateWindow(agyAutoSwitchGlobalWin);
+  clearRateWindow(agySessionWin(sessionId));
+}
+
+// ---- 步骤5：普通会话非额度错误自动重试 ----
 
 /** 每会话仅自动重试一次（防无限循环）；正常回合收尾时清除。 */
 const agyAutoRetriedSessions = new Map<string, boolean>();
@@ -1275,39 +1276,6 @@ function raceRoleOfSession(raceId: string, sessionId: string): RaceRole | undefi
   return entry?.[0];
 }
 
-/** 时间窗标签 → 对应阈值：5小时/7天各自独立配置（主进程已把分组名归一
- *  为时间窗标签）；未知窗标签（后端新增分组等）取两者中较低的阈值 ——
- *  宽松兜底，避免误触发切号/误杀候选账号。 */
-function agyWindowThreshold(group: string, t5h: number, t7d: number): number {
-  return group === '5小时' ? t5h : group === '7天' ? t7d : Math.min(t5h, t7d);
-}
-
-/** 从额度快照挑一个可切换的目标账号。三道硬门槛：查得到(ok) + 非当前账号
- *  + 每个时间窗剩余都 ≥ 各自阈值（5小时/7天独立门槛，任一窗低就快堵）。
- *  合格池按「短板窗」min(各窗剩余 - 各窗阈值) 最厚优先 —— 两窗尺度不同，
- *  可用寿命由更贴近自身阈值的窗决定，相对余量最厚 = 切过去最耐用、
- *  最不易立刻再触发。无合格返回 undefined。 */
-export function pickAgySwitchTarget(
-  quotas: AgyQuotaInfo[],
-  currentEmail: string | undefined,
-  t5h: number,
-  t7d: number,
-  blockedEmails?: Set<string>,
-): AgyQuotaInfo | undefined {
-  const margin = (g: AgyQuotaGroup): number => 100 - g.utilization - agyWindowThreshold(g.group, t5h, t7d);
-  const minMargin = (q: AgyQuotaInfo): number => Math.min(...q.groups.map(margin));
-  const eligible = quotas.filter(
-    (q) =>
-      q.ok &&
-      q.email !== currentEmail &&
-      !blockedEmails?.has(q.email) &&
-      q.groups.length > 0 &&
-      q.groups.every((g) => margin(g) >= 0),
-  );
-  if (eligible.length === 0) return undefined;
-  return [...eligible].sort((a, b) => minMargin(b) - minMargin(a))[0];
-}
-
 /** 自动切号编排：挑号 → 覆写 keyring → 按会话类型接回。
  *  - reason='exhausted'（兜底，回合已因额度失败）：切后接回任务 —— 赛马
  *    走 raceResume 重跑当前阶段，普通会话发「继续」；无合格目标则回退
@@ -1316,18 +1284,17 @@ export function pickAgySwitchTarget(
  *    下一回合自然用新号），无合格目标则静默放弃、不打扰。 */
 async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' | 'threshold'): Promise<void> {
   if (agyAutoSwitchInflight) return;
-  // 步骤1：熔断——窗口内自动切号次数超限 → 不再自动切，回退手动。
-  if (agyAutoSwitchRateLimited()) {
-    if (reason === 'exhausted') {
-      const lang = (useChatStore.getState().settings?.language ?? 'zh') as 'zh' | 'en';
-      announceSystem(
-        sessionId,
-        lang === 'zh'
-          ? '⚠ 自动切号频率过高，已暂停自动切号，请手动切换账号后重试。'
-          : '⚠ Auto-switching rate too high — paused. Please switch accounts manually and retry.',
-      );
-      useChatStore.setState({ agySwitchFor: sessionId });
-    }
+  // 步骤3：熔断——会话级或全局级窗口内自动切号次数超限 → 不再自动切；
+  // exhausted / threshold 两路均公告 + 回退手动弹窗（手动切号不受限，是逃生口）。
+  if (agyAutoSwitchRateLimited(sessionId)) {
+    const lang = (useChatStore.getState().settings?.language ?? 'zh') as 'zh' | 'en';
+    announceSystem(
+      sessionId,
+      lang === 'zh'
+        ? '⚠ 自动切号频率过高，已暂停自动切号，请手动切换账号后重试。'
+        : '⚠ Auto-switching rate too high — paused. Please switch accounts manually and retry.',
+    );
+    useChatStore.setState({ agySwitchFor: sessionId });
     return;
   }
   const meta = get().sessions.find((m) => m.id === sessionId);
@@ -1339,7 +1306,7 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
     const [snap, quotas] = await Promise.all([window.cyberslots.agyAccountsList(), window.cyberslots.agyQuota(true)]);
     // 冷却状态取自快照 blocked 表（main 侧池扫描强刷时已只刷非冷却账号，
     // 坐实耗尽/恢复清除同样在 main 落表）——渲染层零额外探测。
-    const blockedEmails = blockedEmailsOf(snap);
+    const blockedEmails = blockedEmailsOf(snap.blocked, Date.now());
     const target = pickAgySwitchTarget(quotas, snap.active, t5h, t7d, blockedEmails);
     if (!target) {
       // 无合格目标分两路：候选全在冷却期（全池冷却）→ 公告 + 回退手动弹窗
@@ -1362,8 +1329,8 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
     }
     const from = snap.active ?? '?';
     await window.cyberslots.agyAccountSwitch(target.accountId);
-    // 步骤1：记录成功的自动切号（用于熔断计数）。
-    recordAgyAutoSwitch();
+    // 步骤3：记录成功的自动切号（全局 + 会话双窗口熔断计数）。
+    recordAgyAutoSwitch(sessionId);
     if (reason === 'exhausted') {
       if (meta.raceId) {
         useChatStore.setState({ agySwitchFor: null });
@@ -1424,13 +1391,13 @@ async function maybeProactiveSwitchAgy(get: GetFn, sessionId: string): Promise<v
   }
 }
 
-/** 步骤3：首条消息前预检查——当前账号 blocked 时先切后发（快照 blocked
+/** 步骤4：首条消息前预检查——当前账号 blocked 时先切后发（快照 blocked
  *  表判断，零额外网络请求；blocked 才走全池扫描切号）。低额度未 blocked
  *  的场景由现有 maybeProactiveSwitchAgy 在回合后处理，不在此处阻塞。 */
 async function maybePreCheckAgyAccount(get: GetFn, sessionId: string): Promise<void> {
   try {
     const snap = await window.cyberslots.agyAccountsList();
-    if (!snap.active || !blockedEmailsOf(snap).has(snap.active)) return;
+    if (!snap.active || !blockedEmailsOf(snap.blocked, Date.now()).has(snap.active)) return;
     // 当前账号 blocked → 复用 threshold 路径切到合格账号。
     await autoSwitchAgy(get, sessionId, 'threshold');
   } catch {
@@ -1640,9 +1607,10 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       }
       // 回合结束立即落盘（完成的产出必须持久化，不受防抖/崩溃影响）。
       flushPersist(get, sessionId);
-      // 步骤1+4：正常收尾 → 清零自动切号熔断计数 + 清除一次性重试标记。
+      // 步骤3+5：正常收尾 → 清零自动切号熔断计数（仅 agy 引擎收尾才清；
+      // kimi/codex 等其它引擎的正常回合不清 agy 计数）+ 清除一次性重试标记。
       if (event.stopReason !== 'error') {
-        clearAgyAutoSwitchHistory();
+        if (get().sessions.find((m) => m.id === sessionId)?.engine === 'antigravity') clearAgyAutoSwitchHistory(sessionId);
         agyAutoRetriedSessions.delete(sessionId);
       }
       // Antigravity 主动阈值切号：回合【正常收尾】且开启自动切时，检测当前账号
@@ -1748,7 +1716,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         if (get().settings?.antigravityAutoSwitch) void autoSwitchAgy(get, sessionId, 'exhausted');
         else set(() => ({ agySwitchFor: sessionId }));
       } else if (isAntigravityErr && !event.quotaExhausted) {
-        // 步骤4：非额度类错误（探测已确认未耗尽）→ 退避后重试同账号一次。
+        // 步骤5：非额度类错误（探测已确认未耗尽）→ 退避后重试同账号一次。
         // 与 RaceOrchestrator 的 1.5s 退避重试对齐；每会话仅自动重试一次，
         // 防止无限循环；重试发「继续」接回任务（与切号后接回同模式）。
         //

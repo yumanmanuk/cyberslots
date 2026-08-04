@@ -26,6 +26,13 @@ import { join } from 'node:path';
 import { app, net } from 'electron';
 
 import type { AgyAccount, AgyAccountsSnapshot, AgyActiveQuota, AgyImportCandidate, AgyQuotaGroup, AgyQuotaInfo } from '@shared/types';
+import {
+  blockedRecordOf,
+  blockedUntil,
+  clearBlockedIfRecovered,
+  markBlockedIfExhausted,
+  type BlockedMap,
+} from '@shared/agyPolicy';
 import { L } from '../../i18n';
 import { compatAudit } from '../compatAudit';
 import { log } from '../../log/logger';
@@ -162,7 +169,7 @@ export function listAgyAccounts(): AgyAccountsSnapshot {
       importedAt: a.importedAt,
     }));
     snap.active = readActiveEmail();
-    snap.blocked = blockedSnapshot();
+    snap.blocked = blockedRecordOf(agyBlockedUntil, Date.now());
   } catch (err) {
     log.warn('engine.antigravity', 'read import pool failed', undefined, err);
     snap.error = `${L('读取导入池失败', 'Failed to read the import pool')}: ${err instanceof Error ? err.message : String(err)}`;
@@ -295,44 +302,14 @@ function invalidateQuotaCaches(): void {
 // ------------------------------------------------------- exhaustion cooldown
 
 /** 额度耗尽冷却表（纯内存，不落盘、无 schema 迁移，重启即回旧行为）：
- *  email → blockedUntil（ms）。
+ *  email → blockedUntil（ms）。表操作纯函数在 shared/agyPolicy（main /
+ *  renderer / vitest 三方共用同一份算法）。
  *  写入硬约束：仅 queryOneAccount 的真实查询结果实际含 ≥99.95 耗尽分组
  *  才落 blocked，且只标记被查询的那一个 email（探测坐实耗尽与池扫描
  *  坐实耗尽共用同一条写入路径，扫描本身已持有数据、零额外探测）。
  *  双解封：到期惰性失效 + 任意真实查询显示恢复即清（见 queryOneAccount）。
  *  手动切号永远不读本表（逃生口）。 */
-const agyBlockedUntil = new Map<string, number>();
-const AGY_BLOCK_FALLBACK_MS = 30 * 60 * 1000; // 坐实耗尽但解析不到 resetTime 时降级 30min
-
-/** email 的未到期 blockedUntil；过期条目惰性清除并返回 undefined。 */
-function coolingUntil(email: string): number | undefined {
-  const until = agyBlockedUntil.get(email);
-  if (until === undefined) return undefined;
-  if (until <= Date.now()) {
-    agyBlockedUntil.delete(email);
-    return undefined;
-  }
-  return until;
-}
-
-/** 快照用冷却表副本（只含未到期条目）。 */
-function blockedSnapshot(): Record<string, number> | undefined {
-  const out: Record<string, number> = {};
-  for (const email of [...agyBlockedUntil.keys()]) {
-    const until = coolingUntil(email);
-    if (until !== undefined) out[email] = until;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-/** 坐实耗尽后落 blocked（唯一写入点）：resetTime 取耗尽分组的最大重置
- *  秒数，解析不到降级 30min。 */
-function markCooling(email: string, exhausted: AgyQuotaGroup[]): void {
-  const maxReset = Math.max(...exhausted.map((g) => g.resetsInSeconds ?? 0));
-  const until = Date.now() + (maxReset > 0 ? maxReset * 1000 : AGY_BLOCK_FALLBACK_MS);
-  agyBlockedUntil.set(email, until);
-  log.info('engine.antigravity', 'account marked cooling (quota exhaustion confirmed)', { email, blockedUntil: until, resetsInSeconds: maxReset > 0 ? maxReset : undefined });
-}
+const agyBlockedUntil: BlockedMap = new Map<string, number>();
 
 /** 冷却账号的最后已知额度（占位用）：全池缓存优先，活动账号缓存兜底。 */
 function lastKnownQuota(email: string): AgyQuotaInfo | undefined {
@@ -553,7 +530,7 @@ async function queryOneAccount(account: AgyAccount, opts?: { ignoreCooling?: boo
   // 占位数据缺失时给空结果（UI 经快照 blocked 表显示「冷却中」）。
   // ignoreCooling = 坐实探测等必须拿真实数据的路径（adapter 额度 probe）。
   if (!opts?.ignoreCooling) {
-    const until = coolingUntil(account.email);
+    const until = blockedUntil(agyBlockedUntil, account.email, Date.now());
     if (until !== undefined) {
       const last = lastKnownQuota(account.email);
       return last
@@ -572,9 +549,12 @@ async function queryOneAccount(account: AgyAccount, opts?: { ignoreCooling?: boo
     // 冷却表的唯一写入口（硬约束：真实数据坐实 ≥99.95 耗尽才落 blocked，
     // 且只标记本 email；恢复即清）。解析出 0 组 = 数据不可解读，不动冷却表。
     if (info.groups.length > 0) {
-      const exhausted = info.groups.filter((g) => g.utilization >= 99.95);
-      if (exhausted.length > 0) markCooling(account.email, exhausted);
-      else agyBlockedUntil.delete(account.email);
+      const until = markBlockedIfExhausted(agyBlockedUntil, account.email, info.groups, Date.now());
+      if (until !== undefined) {
+        log.info('engine.antigravity', 'account marked cooling (quota exhaustion confirmed)', { email: account.email, blockedUntil: until });
+      } else {
+        clearBlockedIfRecovered(agyBlockedUntil, account.email, info.groups);
+      }
     }
   } catch (err) {
     log.warn('engine.antigravity', 'account quota query failed', { email: account.email }, err);
