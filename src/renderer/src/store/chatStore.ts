@@ -1176,6 +1176,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     stopRequested.delete(id);
     autoCompactGuard.delete(id);
     agyAutoSwitchSessionWins.delete(id);
+    const pendingAgyRetry = agyAutoRetryTimers.get(id);
+    if (pendingAgyRetry) clearTimeout(pendingAgyRetry);
+    agyAutoRetryTimers.delete(id);
+    agyLastErrorTurn.delete(id);
+    agyRetryRecoveryMark.delete(id);
   },
 
   async loadCron() {
@@ -1264,8 +1269,23 @@ function clearAgyAutoSwitchHistory(sessionId: string): void {
 
 // ---- 步骤5：普通会话非额度错误自动重试 ----
 
-/** 每会话仅自动重试一次（防无限循环）；正常回合收尾时清除。 */
+/** 每会话仅自动重试一次（防无限循环）；正常回合收尾时清除。一次性标记只在
+ *  回合真正以 error 终止（turn.ended error）时登记消耗 —— 中途 error_message
+ *  步、superseded 不烧标记。 */
 const agyAutoRetriedSessions = new Map<string, boolean>();
+
+/** 未触发的重试定时器（sessionId → timer）：任何 turn.ended 到达即取消
+ *  （取消 + 触发时校验双保险之「取消」）。 */
+const agyAutoRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** 触发时校验用：最近一个以 error 终止的回合号（turn.ended 处登记，非
+ *  error 收尾即删）。定时器触发时须仍等于调度时回合号 —— 期间用户手动
+ *  续跑/新回合已收尾则校验失败跳过（双保险之「校验」）。 */
+const agyLastErrorTurn = new Map<string, number>();
+
+/** 重试已发出、待成功收尾后在原错误消息上追加「已自动恢复」标记：
+ *  sessionId → 原错误消息 id（接受首次错误可见，不假装无感）。 */
+const agyRetryRecoveryMark = new Map<string, string>();
 
 /** 「继续」类自动补发的统一 catch：adapter 并发总闸的 superseded 拒绝静默
  *  （原回合收尾后由切号/补跑等正当路径接回），其余失败记 warn。防 void
@@ -1582,6 +1602,12 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       return;
     }
     case 'turn.ended': {
+      // 步骤5：任何 turn.ended 到达即取消该会话未触发的重试定时器（双保险之取消）。
+      const pendingAgyRetry = agyAutoRetryTimers.get(sessionId);
+      if (pendingAgyRetry) {
+        clearTimeout(pendingAgyRetry);
+        agyAutoRetryTimers.delete(sessionId);
+      }
       // Unread bookkeeping: main marks every finished session unread; the
       // renderer immediately clears it for the session being viewed.
       const active = get().activeSessionId === sessionId;
@@ -1631,11 +1657,51 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       }
       // 回合结束立即落盘（完成的产出必须持久化，不受防抖/崩溃影响）。
       flushPersist(get, sessionId);
-      // 步骤3+5：正常收尾 → 清零自动切号熔断计数（仅 agy 引擎收尾才清；
-      // kimi/codex 等其它引擎的正常回合不清 agy 计数）+ 清除一次性重试标记。
       if (event.stopReason !== 'error') {
+        // 步骤3+5：正常收尾 → 清零自动切号熔断计数（仅 agy 引擎收尾才清；
+        // kimi/codex 等其它引擎的正常回合不清 agy 计数）+ 清除一次性重试
+        // 标记与 error 校验标记；重试后正常收尾 → 原错误消息追加「已自动
+        // 恢复」标记（接受首次错误可见，不假装无感）。
+        agyLastErrorTurn.delete(sessionId);
         if (get().sessions.find((m) => m.id === sessionId)?.engine === 'antigravity') clearAgyAutoSwitchHistory(sessionId);
         agyAutoRetriedSessions.delete(sessionId);
+        const recoveryMsgId = agyRetryRecoveryMark.get(sessionId);
+        if (recoveryMsgId) {
+          agyRetryRecoveryMark.delete(sessionId);
+          const recovered = (get().settings?.language ?? 'zh') === 'zh' ? '（已自动恢复）' : ' (auto-recovered)';
+          mutateUi(set, sessionId, (ui) => ({
+            ...ui,
+            messages: ui.messages.map((m) => (m.id === recoveryMsgId && m.kind === 'error' ? { ...m, message: `${m.message}${recovered}` } : m)),
+          }));
+          schedulePersist(get, sessionId);
+        }
+      } else {
+        agyLastErrorTurn.set(sessionId, event.turnId);
+        // 步骤5：普通会话非额度错误 → 退避 1.5s（+0~1s jitter 防赛马并发惊群）
+        // 重试同账号一次。一次性标记只在回合真正以 error 终止时消耗（中途
+        // error_message 步、superseded 不烧标记）；赛马角色会话排除（由
+        // RaceOrchestrator.runTurnWithRetry 负责）；quotaExhausted 走切号
+        // 路径（error 事件分支），不重试。
+        const errMeta = get().sessions.find((m) => m.id === sessionId);
+        if (errMeta?.engine === 'antigravity' && !errMeta.raceId && !event.quotaExhausted && !agyAutoRetriedSessions.has(sessionId)) {
+          agyAutoRetriedSessions.set(sessionId, true);
+          const errTurnId = event.turnId;
+          const errMsg = [...(get().ui[sessionId]?.messages ?? [])].reverse().find((m) => m.kind === 'error' && m.turnId === errTurnId);
+          const timer = setTimeout(() => {
+            agyAutoRetryTimers.delete(sessionId);
+            // 触发前再校验该回合确以 error 终止且仍是最新收尾（双保险之
+            // 「校验」）：期间用户手动续跑/新回合收尾已顶掉标记 → 跳过；
+            // 会话已删或已有新回合在跑同样跳过。
+            if (agyLastErrorTurn.get(sessionId) !== errTurnId) return;
+            const cur = get().sessions.find((x) => x.id === sessionId);
+            if (!cur || cur.status === 'running' || cur.status === 'starting') return;
+            if (errMsg) agyRetryRecoveryMark.set(sessionId, errMsg.id);
+            // adapter 并发总闸可能拒掉这次「继续」（superseded）；静默吞掉 ——
+            // 原回合的正当路径（切号/补跑）会接回，不丢任务。
+            void get().sendPromptTo(sessionId, '继续').catch(catchAutoResume(sessionId, 'non-quota-retry'));
+          }, 1500 + Math.floor(Math.random() * 1000));
+          agyAutoRetryTimers.set(sessionId, timer);
+        }
       }
       // Antigravity 主动阈值切号：回合【正常收尾】且开启自动切时，检测当前账号
       // 余量，任一时间窗低于阈值则预切到有 buffer 的账号（赛马有同场角色在跑
@@ -1739,33 +1805,12 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       if (event.quotaExhausted && isAntigravityErr) {
         if (get().settings?.antigravityAutoSwitch) void autoSwitchAgy(get, sessionId, 'exhausted');
         else set(() => ({ agySwitchFor: sessionId }));
-      } else if (isAntigravityErr && !event.quotaExhausted) {
-        // 步骤5：非额度类错误（探测已确认未耗尽）→ 退避后重试同账号一次。
-        // 与 RaceOrchestrator 的 1.5s 退避重试对齐；每会话仅自动重试一次，
-        // 防止无限循环；重试发「继续」接回任务（与切号后接回同模式）。
-        //
-        // 赛马角色会话一律跳过：agy 中途的 error_message 步会 emit `error`
-        // 但不发 turn.ended（回合仍在跑），此处误判为回合失败提前发「继续」
-        // 会酿成 —— 编排器仍挂着的 onTurnEnded 回调误收新回合的 turn.ended，
-        // 把「继续」那段 transcript 当成交卷产物落盘 → 假冲线；且 rogue 回合
-        // 同样撞额度耗尽，与原回合 probe 完成后的 quota 错误并发触发切号，
-        // 被 agyAutoSwitchInflight 互斥/熔断挡掉 → 看起来没自动切号。
-        // 赛马回合重试由 RaceOrchestrator.runTurnWithRetry 在真正 turn.ended
-        // 失败时负责（含 1.5s 退避），chatStore 不插手。
-        const isRaceRole = !!get().sessions.find((m) => m.id === sessionId)?.raceId;
-        if (!isRaceRole && !agyAutoRetriedSessions.has(sessionId)) {
-          agyAutoRetriedSessions.set(sessionId, true);
-          setTimeout(() => {
-            // 期间用户可能已手动操作或切走会话；只在会话仍存在时重发。
-            // adapter 的 promptActive 总闸可能在原回合 probe 窗口期拒掉
-            // 这次「继续」（superseded）；静默吞掉 —— 原回合 probe 收尾后
-            // 会由 quota 错误路径走自动切号 + 「继续」正当接回，不丢任务。
-            if (get().sessions.some((m) => m.id === sessionId)) {
-              void get().sendPromptTo(sessionId, '继续').catch(catchAutoResume(sessionId, 'non-quota-retry'));
-            }
-          }, 1500);
-        }
       }
+      // 步骤5：非额度类错误的退避重试不挂在 error 事件 —— agy 中途的
+      // error_message 步同样 emit error 但回合仍在跑（赛马场景曾因此假冲线：
+      // 提前发「继续」，编排器误收新回合的 turn.ended 当交卷）。重试统一挂
+      // turn.ended(error)（见上方分支）：一次性标记只在回合真正以 error
+      // 终止时消耗，中途 error_message 步、superseded 不烧标记。
       return;
     }
     default:
