@@ -94,6 +94,7 @@ export const IPC = {
   fsGitStatus: 'fs:git-status',
   fsImport: 'fs:import',
   fsIsDir: 'fs:is-dir',
+  fsResolve: 'fs:resolve',
   openIn: 'sys:open-in',
   openersDetect: 'sys:openers-detect',
   attachmentSaveTemp: 'attachment:save-temp',
@@ -115,6 +116,7 @@ export const IPC = {
   raceResume: 'race:resume',
   raceUpdateRole: 'race:update-role',
   raceRetryRacer: 'race:retry-racer',
+  raceRetryRacerIfMissing: 'race:retry-racer-if-missing',
   raceEliminate: 'race:eliminate',
   raceRestartPlanning: 'race:restart-planning',
   raceCancel: 'race:cancel',
@@ -123,6 +125,10 @@ export const IPC = {
   terminalData: 'terminal:data',
   raceEvent: 'race:event',
   compatAudit: 'compat:audit',
+  // 日志：renderer → main 批量落盘（send，无应答）；打开日志目录。
+  logWrite: 'log:write',
+  logsDir: 'log:dir',
+  logsOpenDir: 'log:open-dir',
 } as const;
 
 export interface SessionCreateRequest {
@@ -146,6 +152,16 @@ export interface SessionPromptRequest {
   effort?: string;
   /** 对应的用户消息 id — 发送前拍逐提问快照（回退还原点）。 */
   userMessageId?: string;
+}
+
+/** 渲染进程经 IPC 转发给主进程落盘的单条日志（与主进程 JSONL 行同构）。 */
+export interface RendererLogPayload {
+  ts: number;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  scope: string;
+  msg: string;
+  data?: Record<string, unknown>;
+  err?: { name?: string; message: string; stack?: string };
 }
 
 export interface AnswerPermissionRequest {
@@ -195,6 +211,9 @@ export interface SlashItem {
   engine: EngineId | 'generic';
   /** 来源文件绝对路径（tooltip / 排查用）。 */
   path: string;
+  /** SKILL.md 无 frontmatter name、以目录/文件名兜底命名 —— opencode 引擎
+   *  不注册此类技能（isSkillFrontmatter 要求 name），该会话隐藏此项。 */
+  unnamed?: boolean;
 }
 
 export interface SlashListRequest {
@@ -212,7 +231,8 @@ export interface SessionChangeEntry {
   name: string;
   adds: number;
   dels: number;
-  status: 'modified' | 'added' | 'deleted';
+  /** accepted = 已接受（保留改动）/不再参与回退 */
+  status: 'modified' | 'added' | 'deleted' | 'accepted';
   /** 当前有多少个会话在跟踪该文件（>1 = 多会话共编，回退会影响彼此）。 */
   sessions: number;
 }
@@ -323,6 +343,8 @@ export interface CyberSlotsApi {
   fsImport(root: string, srcPaths: string[]): Promise<number>;
   /** 路径是否目录（拖放到输入框时区分文件夹/文件引用）。 */
   fsIsDir(path: string): Promise<boolean>;
+  /** AI 提及的路径 → 工作区内真实存在的文件绝对路径（cwd 直拼失败时全树模糊定位）；找不到返回 null。 */
+  fsResolve(root: string, rawPath: string): Promise<string | null>;
   openIn(target: OpenTarget, path: string): Promise<void>;
   /** 探测「外部打开」目标程序的本机可用性（VS Code / Cursor / Antigravity / Git Bash）；进程级缓存。 */
   openersDetect(force?: boolean): Promise<OpenerAvailability>;
@@ -366,6 +388,8 @@ export interface CyberSlotsApi {
   raceUpdateRole(raceId: string, role: RaceRole, cfg: RaceRoleConfig): Promise<void>;
   /** 单选手重试：只补跑该选手当前阶段回合（另一侧不受影响）。 */
   raceRetryRacer(raceId: string, role: RaceRole): Promise<void>;
+  /** 额度耗尽切号后的精确补跑：仅当该选手当前阶段产物缺失时才重跑。 */
+  raceRetryRacerIfMissing(raceId: string, role: RaceRole): Promise<void>;
   /** ✂ 剔除选手（三人以上在场且裁判选策略前；剩余 ≥2；不可逆）。 */
   raceEliminate(raceId: string, role: RaceRole): Promise<void>;
   /** 裁判选策略前回退：清空产物重跑双规划。 */
@@ -373,6 +397,12 @@ export interface CyberSlotsApi {
   raceCancel(raceId: string): Promise<void>;
   /** 订阅赛马阶段/角色/融合方案/审计等编排事件（main → renderer）。 */
   onRaceEvent(listener: (e: RaceEventEnvelope) => void): () => void;
+  /** 渲染进程日志批量上报（fire-and-forget；主进程落 renderer-*.jsonl）。 */
+  logWrite(entries: RendererLogPayload[]): void;
+  /** 日志目录绝对路径（设置页展示）。 */
+  logsDir(): Promise<string>;
+  /** 在系统文件管理器中打开日志目录。 */
+  logsOpenDir(): Promise<void>;
   /** Absolute path of a dropped File (drag-and-drop attachments). */
   getPathForFile(file: File): string;
 }

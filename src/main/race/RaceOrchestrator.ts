@@ -29,9 +29,11 @@ import type {
   RacerRole,
 } from '@shared/race';
 import { RACER_ROLES, resolveRoleMode } from '@shared/race';
+import { log } from '../log/logger';
 import {
   auditPrompt,
   builderPrompt,
+  continuePrompt,
   judgeFusePrompt,
   judgeRevisePrompt,
   parseAuditVerdict,
@@ -70,8 +72,10 @@ export interface RaceSessionHost {
   /** A textual digest of the builder's file changes (for the auditor). */
   changesDigest(sessionId: string): Promise<string>;
   /** Subscribe to one turn completion on a session; returns unsubscribe.
-   *  usage 为本次交卷所含全部内部回合的 token 用量累计（可缺省）。 */
-  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo) => void): () => void;
+   *  usage 为本次交卷所含全部内部回合的 token 用量累计（可缺省）；
+   *  quotaExhausted 标记本次失败是否坐实为额度耗尽（引擎在 turn.ended
+   *  前完成核实）。 */
+  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo, quotaExhausted?: boolean) => void): () => void;
   /** Push a race-level event to the renderer. */
   emit(raceId: string, event: RaceEvent): void;
   /** Persist the current set of race groups. */
@@ -82,6 +86,10 @@ export interface RaceSessionHost {
  *  RaceGroup.artifacts（持久化 + race.artifacts 事件推送裁判预览）。 */
 
 const DEFAULT_MAX_REPAIR = 3;
+
+/** runTurn 拒绝错误里的额度耗尽哨兵：嵌在 message 里传给 runTurnWithRetry
+ *  （Error 无自定义字段，避免靠英文文案匹配）。 */
+const QUOTA_FLAG = ' [quotaExhausted]';
 
 export class RaceOrchestrator {
   private readonly groups = new Map<string, RaceGroup>();
@@ -133,6 +141,14 @@ export class RaceOrchestrator {
     };
     this.groups.set(g.id, g);
     this.touch(g);
+    log.info('race', 'race created', {
+      raceId: g.id,
+      cwd: g.cwd,
+      promptChars: g.prompt.length,
+      roles: Object.fromEntries(Object.entries(g.roles).map(([r, c]) => [r, `${c.engine}${c.modelId ? ':' + c.modelId : ''}`])),
+      maxRepairRounds: g.maxRepairRounds,
+      parentSessionId: g.parentSessionId,
+    });
     this.setStage(g, 'planning');
     void this.safe(g.id, () => this.runPlanning(g));
     return g;
@@ -321,7 +337,9 @@ export class RaceOrchestrator {
   }
 
   /** 单选手重试：只补跑该选手当前阶段回合（另一侧产物/进行中回合不受
-   *  影响）；若补齐后双产物齐且阶段链已死，由此处代为推进下一阶段。 */
+   *  影响）；若补齐后双产物齐且阶段链已死，由此处代为推进下一阶段。
+   *  重试 = 清历史重做：先弃用旧会话（只断引用不删数据，侧栏可回看），
+   *  ensureRole 以原配置重建全新会话白纸重跑，避免旧失败尝试锚定新回合。 */
   retryRacer(raceId: string, role: RaceRole): void {
     const g = this.groups.get(raceId);
     if (!g || (g.stage !== 'planning' && g.stage !== 'rebuttal')) return;
@@ -333,19 +351,77 @@ export class RaceOrchestrator {
     const tag = `${raceId}:${racer}`;
     if (this.retrying.has(tag)) return; // 防重复点击双发
     this.retrying.add(tag);
-    // 泳道级重试同样意味着恢复运行 —— 摘掉重启打断标记，免得链被此路
-    // 径拉活后「继续赛马」横幅卡死（resume 的防双发守卫会早退不再清它）。
+    // 弃用旧会话清历史：stage prompt 自包含任务+对手产物，不依赖旧对话记忆。
+    const old = g.sessions[racer];
+    if (old) {
+      this.host.cancelTurn(old);
+      this.pendingTurns.get(old)?.();
+      this.pendingTurns.delete(old);
+      delete g.sessions[racer];
+    }
+    this.clearInterrupted(g);
+    void this.safe(raceId, async () => {
+      const sessionId = await this.ensureRole(g, racer);
+      await this.runRacerTurn(g, racer, sessionId, key, this.racerStagePrompt(g, racer));
+      this.advanceIfChainDead(g);
+    }).finally(() => this.retrying.delete(tag));
+  }
+
+  /** 额度耗尽切号后的断点续跑：【保留会话 + conversation_id】发「继续」
+   *  让该选手从断点接续（agy 额度小，切号是常规续命操作，不是重做 —— 已烧
+   *  的额度与产出不该作废）。续跑失败（如 conversation db 已被清、断点已脏）
+   *  兜底回退白纸重跑当前阶段。只补跑缺产物的那名选手，不动其余。 */
+  retryRacerIfMissing(raceId: string, role: RaceRole): void {
+    const g = this.groups.get(raceId);
+    if (!g || (g.stage !== 'planning' && g.stage !== 'rebuttal')) return;
+    if (!(RACER_ROLES as readonly string[]).includes(role)) return;
+    const racer = role as RacerRole;
+    const key = g.stage === 'planning' ? this.planKeyOf(racer) : this.rebutKeyOf(racer);
+    if (g.artifacts?.[key]) return; // 已有产物（切号期间对手/自己补齐）→ 不重跑
+    const tag = `${raceId}:${racer}`;
+    if (this.retrying.has(tag)) return;
+    this.retrying.add(tag);
+    const sid = g.sessions[racer];
+    this.clearInterrupted(g);
+    void this.safe(raceId, async () => {
+      if (sid) {
+        // 续接模式：不重建会话，agy 下一次 prompt 带 --conversation 续上。
+        try {
+          await this.runRacerTurn(g, racer, sid, key, continuePrompt());
+          this.advanceIfChainDead(g);
+          return;
+        } catch (err) {
+          // 被剔除/被打断是预期内静默退场，不兜底重跑（新链会接管）。
+          const msg = err instanceof Error ? err.message : String(err);
+          if (g.eliminated?.includes(racer) || msg.includes('superseded')) return;
+          log.warn('race', 'quota-resume continue failed, falling back to a fresh re-run', { raceId, racer }, err);
+          delete g.sessions[racer]; // 断点已不可续 → 弃旧会话，走白纸重跑
+        }
+      }
+      // 兜底白纸重跑（无会话可续 / 续接失败）。
+      const sessionId = await this.ensureRole(g, racer);
+      await this.runRacerTurn(g, racer, sessionId, key, this.racerStagePrompt(g, racer));
+      this.advanceIfChainDead(g);
+    }).finally(() => this.retrying.delete(tag));
+  }
+
+  /** 摘掉打断标记（重试/续跑 = 恢复运行），免得链被此路径拉活后
+   *  「继续赛马」横幅卡死（resume 的防双发守卫会早退不再清它）。 */
+  private clearInterrupted(g: RaceGroup): void {
     if (g.interrupted) {
       g.interrupted = false;
       this.touch(g);
     }
-    void this.safe(raceId, async () => {
-      const sessionId = await this.ensureRole(g, racer);
-      await this.runRacerTurn(g, racer, sessionId, key, this.racerStagePrompt(g, racer));
-      if (this.chainActive.has(g.id)) return; // 阶段链还活着 —— 由它推进
-      if (g.stage === 'planning' && this.stageComplete(g, 'plan')) return this.runRebuttal(g);
-      if (g.stage === 'rebuttal' && this.stageComplete(g, 'rebuttal')) return this.runJudging(g);
-    }).finally(() => this.retrying.delete(tag));
+  }
+
+  /** 阶段链已死且当前阶段产物已齐 → 代为推进下一阶段（链活着则由它推进）。 */
+  private advanceIfChainDead(g: RaceGroup): void {
+    if (this.chainActive.has(g.id)) return;
+    if (g.stage === 'planning' && this.stageComplete(g, 'plan')) {
+      void this.runRebuttal(g);
+    } else if (g.stage === 'rebuttal' && this.stageComplete(g, 'rebuttal')) {
+      void this.runJudging(g);
+    }
   }
 
   /** 对双方方案不满意 → 清空产物回炉重赛（仅裁判选策略前允许；
@@ -567,7 +643,9 @@ export class RaceOrchestrator {
     if (!cfg) return;
     let out: string;
     try {
-      out = await this.runTurnWithRetry(g, sessionId, text, cfg);
+      // 自动重试发「继续」断点续跑而非重发整段指令：选手阶段提示词还在
+      // 引擎会话里，模型侧瞬时错（agy 的 agent error 高发）接着断点干即可。
+      out = await this.runTurnWithRetry(g, sessionId, text, cfg, continuePrompt());
     } catch (err) {
       // 回合进行中被剔除，或被主动打断（剔除唤醒/重跑规划叫停）
       // → 都是预期内，静默退场不上浮（新代链/推进者会接管）。
@@ -576,11 +654,20 @@ export class RaceOrchestrator {
       throw err;
     }
     if (!out.trim()) {
-      if (g.eliminated?.includes(role)) return;
-      throw new Error(L(
-        `${this.racerLabel(role)} 未产出内容（回合异常），可重试当前阶段（可先调整其引擎/模型）`,
-        `${this.racerLabel(role)} produced no output (abnormal turn) — retry the current stage (optionally adjust its engine/model first)`,
-      ));
+      // 慢热引擎的收尾 flush 可能晚于交卷判定（turn.ended + 静默窗）——
+      // 空产物先宽限复读再判异常，避免「只是慢」被误报成「未产出内容」。
+      for (let recheck = 0; recheck < 2 && !out.trim(); recheck++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (g.eliminated?.includes(role)) return; // 宽限期间被剔除 → 静默退场
+        out = this.host.transcript(sessionId);
+      }
+      if (!out.trim()) {
+        if (g.eliminated?.includes(role)) return;
+        throw new Error(L(
+          `${this.racerLabel(role)} 未产出内容（回合异常），可重试当前阶段（可先调整其引擎/模型）`,
+          `${this.racerLabel(role)} produced no output (abnormal turn) — retry the current stage (optionally adjust its engine/model first)`,
+        ));
+      }
     }
     // 即使刚被剔除也照常落盘（数据只增不减）：racersOf 已不含它，
     // 产物不会进裁判输入，仅作历史可查。
@@ -711,17 +798,29 @@ export class RaceOrchestrator {
   }
 
   /** 瞬时错误自动重试一次（用户主动中止/打断/剔除不重试 —— 对
-   *  被剔者重发 prompt 是灾难）；仍失败才上浮 race.error 交给用户。 */
-  private async runTurnWithRetry(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig): Promise<string> {
+   *  被剔者重发 prompt 是灾难）；仍失败才上浮 race.error 交给用户。
+   *  retryText 非空时重试改发它而不是原指令 —— 断点续跑（如 agy 高频的
+   *  “Agent execution terminated” 模型侧瞬时错）：会话上下文还在引擎侧，
+   *  发「继续」让模型接着断点干，比重发整段指令从头再跑省 token 且不丢
+   *  已完成的半段产物。 */
+  private async runTurnWithRetry(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig, retryText?: string): Promise<string> {
     try {
       return await this.runTurn(g, sessionId, text, cfg);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // 用户主动中止/打断/被主动唤醒（剔除或重跑规划）不自动重试。
       if (msg.includes('cancelled') || msg.includes('interrupted') || msg.includes('superseded')) throw err;
+      // 额度耗尽不盲目重试：重发必撞同一没额度账号（2026-08 实测 1.5s 内
+      // 重发即再失败）。把复活交给渲染层切号后的 retryRacer 精确补跑。
+      if (this.quotaErr(err)) throw err;
       await new Promise((r) => setTimeout(r, 1500));
-      return this.runTurn(g, sessionId, text, cfg);
+      return this.runTurn(g, sessionId, retryText ?? text, cfg);
     }
+  }
+
+  /** 从 runTurn 的拒绝错误里识别额度终态（message 内嵌 quotaExhausted 哨兵）。 */
+  private quotaErr(err: unknown): boolean {
+    return err instanceof Error && err.message.includes(QUOTA_FLAG);
   }
 
   /** Prompt a session and resolve with its transcript once the turn ends.
@@ -729,17 +828,19 @@ export class RaceOrchestrator {
    *  否则阶段链会永远挂在一个不再产生任何事件的会话上。 */
   private runTurn(g: RaceGroup, sessionId: string, text: string, cfg: RaceRoleConfig): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const off = this.host.onTurnEnded(sessionId, (stopReason, usage) => {
+      const off = this.host.onTurnEnded(sessionId, (stopReason, usage, quotaExhausted) => {
         this.pendingTurns.delete(sessionId);
         off();
         // 成败失败都记账 —— 异常收束的回合 token 也真实烧掉了。
         this.recordUsage(g, cfg.engine, usage);
         // 出错/被中止的回合不算产出 —— 阻断阶段推进，交给用户重试。
         if (stopReason === 'error' || stopReason === 'cancelled' || stopReason === 'interrupted') {
-          reject(new Error(L(
-            `角色回合异常结束（${stopReason}），可重试当前阶段（可先调整选手配置）`,
-            `Role turn ended abnormally (${stopReason}) — retry the current stage (optionally adjust the racer config first)`,
-          )));
+          reject(new Error(
+            L(
+              `角色回合异常结束（${stopReason}），可重试当前阶段（可先调整选手配置）`,
+              `Role turn ended abnormally (${stopReason}) — retry the current stage (optionally adjust the racer config first)`,
+            ) + (quotaExhausted ? QUOTA_FLAG : ''),
+          ));
           return;
         }
         resolve(this.host.transcript(sessionId));
@@ -766,6 +867,7 @@ export class RaceOrchestrator {
 
   private setStage(g: RaceGroup, stage: RaceStage): void {
     this.settleStageTimer(g); // 先结转上一阶段的墙钟增量
+    log.info('race', 'stage transition', { raceId: g.id, from: g.stage, to: stage, repairRound: g.repairRound });
     g.stage = stage;
     // 阶段被编排器驱动 = 本进程已在实际运行 —— 打断标记随之失效（剔除
     // 选手/调参自动重跑等旁路拉活链条时也能自愈，不留假横幅）。
@@ -834,6 +936,7 @@ export class RaceOrchestrator {
       const message = err instanceof Error ? err.message : String(err);
       // 被主动打断（撤回决策/重跑规划/剔除唤醒）不是错误，不弹横幅。
       if (message.includes('superseded')) return;
+      log.error('race', 'stage chain failed', { raceId }, err);
       this.host.emit(raceId, { type: 'race.error', message });
     }
   }

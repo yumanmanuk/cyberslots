@@ -16,7 +16,7 @@ import { ChevronDown, FileDiff, FolderTree, MessagesSquare, NotebookText, Plus, 
 import type { SessionMeta } from '@shared/types';
 import { useChatStore, type TerminalTab } from '../store/chatStore';
 import { useT } from '../i18n';
-import WorkspacePanel, { useChangedFiles, type PanelTab } from './workspace/WorkspacePanel';
+import WorkspacePanel, { useChangedFiles, type ChangedFilesResult, type PanelTab } from './workspace/WorkspacePanel';
 import SideChatPanel from './SideChatPanel';
 import TerminalPanel from './TerminalPanel';
 import PlanDocPanel from './PlanDocPanel';
@@ -110,7 +110,9 @@ export default function RightDock({
 
   // 变更数据提升到此处：tab 徽标与内容面板共用一份（避免双拉取）。
   const [changesNonce, setChangesNonce] = useState(0);
-  const changes = useChangedFiles(sessionId, changesNonce);
+  const { entries: changes, loading: changesLoading } = useChangedFiles(sessionId, changesNonce);
+  // tab 徽标只统计待接受文件；已接受文件保留在面板内展示，不再增加待办角标。
+  const pendingChanges = changes.filter((c) => c.status !== 'accepted').length;
 
   const isPanelTab = activeTab === 'files' || activeTab === 'changes';
 
@@ -135,7 +137,7 @@ export default function RightDock({
   if (isWork) {
     tabs.push(
       { id: 'files', icon: <FolderTree size={13} />, label: t('tabFiles') },
-      { id: 'changes', icon: <FileDiff size={13} />, label: changes.length > 0 ? `${t('tabChanges')} ${changes.length}` : t('tabChanges') },
+      { id: 'changes', icon: <FileDiff size={13} />, label: pendingChanges > 0 ? `${t('tabChanges')} ${pendingChanges}` : t('tabChanges') },
     );
   }
   for (const tm of terms) {
@@ -341,6 +343,7 @@ export default function RightDock({
             tab={activeTab as PanelTab}
             treeWidth={widths.ws}
             changes={changes}
+            changesLoading={changesLoading}
             changesNonce={changesNonce}
             onRefreshChanges={() => setChangesNonce((n) => n + 1)}
           />

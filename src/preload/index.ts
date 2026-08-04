@@ -72,6 +72,7 @@ const api: CyberSlotsApi = {
   fsGitStatus: (root) => ipcRenderer.invoke(IPC.fsGitStatus, root),
   fsImport: (root, srcPaths) => ipcRenderer.invoke(IPC.fsImport, root, srcPaths),
   fsIsDir: (path) => ipcRenderer.invoke(IPC.fsIsDir, path),
+  fsResolve: (root, rawPath) => ipcRenderer.invoke(IPC.fsResolve, root, rawPath),
   openIn: (target, path) => ipcRenderer.invoke(IPC.openIn, target, path),
   openersDetect: (force) => ipcRenderer.invoke(IPC.openersDetect, force),
   attachmentSaveTemp: (bytes, ext) => ipcRenderer.invoke(IPC.attachmentSaveTemp, bytes, ext),
@@ -108,6 +109,7 @@ const api: CyberSlotsApi = {
   raceResume: (raceId) => ipcRenderer.invoke(IPC.raceResume, raceId),
   raceUpdateRole: (raceId, role, cfg) => ipcRenderer.invoke(IPC.raceUpdateRole, raceId, role, cfg),
   raceRetryRacer: (raceId, role) => ipcRenderer.invoke(IPC.raceRetryRacer, raceId, role),
+  raceRetryRacerIfMissing: (raceId, role) => ipcRenderer.invoke(IPC.raceRetryRacerIfMissing, raceId, role),
   raceEliminate: (raceId, role) => ipcRenderer.invoke(IPC.raceEliminate, raceId, role),
   raceRestartPlanning: (raceId) => ipcRenderer.invoke(IPC.raceRestartPlanning, raceId),
   raceCancel: (raceId) => ipcRenderer.invoke(IPC.raceCancel, raceId),
@@ -116,6 +118,16 @@ const api: CyberSlotsApi = {
     ipcRenderer.on(IPC.raceEvent, wrapped);
     return () => ipcRenderer.removeListener(IPC.raceEvent, wrapped);
   },
+  // 日志：批量转发主进程落盘（send 不等待应答；失败静默，不能反过来影响业务）。
+  logWrite: (entries) => {
+    try {
+      ipcRenderer.send(IPC.logWrite, entries);
+    } catch {
+      /* 日志通道故障静默 */
+    }
+  },
+  logsDir: () => ipcRenderer.invoke(IPC.logsDir),
+  logsOpenDir: () => ipcRenderer.invoke(IPC.logsOpenDir),
   /** Absolute path of a dropped File (drag-and-drop attachments). */
   getPathForFile: (file) => webUtils.getPathForFile(file),
 };

@@ -238,6 +238,13 @@ export type UnifiedMessage =
       durationMs?: number;
       /** 纯 API/模型耗时（墙钟 − 工具执行 − 审批等待），t/s 的分母；缺省退回 durationMs。 */
       apiDurationMs?: number;
+      /** 回合结束时刻的引擎/模型快照 —— 回答信息 tooltip 用；旧消息文件
+       *  无此字段，UI 回退显示会话当前值。 */
+      engine?: EngineId;
+      modelId?: string;
+      /** 思考深度（回合发送时的生效档）快照 —— 回答信息 tooltip 用；旧消息
+       *  无此字段，UI 回退重算会话当前生效档。 */
+      effort?: string;
       createdAt: number;
     };
 
@@ -393,6 +400,17 @@ export type EngineEvent =
        *  （如 goal 续跑）标为 true：渲染层依旧不派发队列/不触压缩（保护不变），
        *  但依然生成 turn_end 统计行（复制回答 + token）。compaction 等不置。 */
       showStats?: boolean;
+      /** background 回合细分。渲染层据此在回合结束时补发排队消息：
+       *  'compact' = 压缩回合；'goal-idle' = goal 已不活跃（完成/清除/暂停）
+       *  的续跑回合 —— 这两种引擎都不会再自起下一轮，不补发队列会滞留；
+       *  'task' = 引擎一次性自发工作（异步任务结果注入），同样没有下一轮；
+       *  未置 = 引擎会自起下一轮（goal 活跃续跑），保持不派发。 */
+      backgroundKind?: 'compact' | 'goal-idle' | 'task';
+      /** 本回合的失败已坐实为额度耗尽（引擎在发 turn.ended 前完成核实，
+       *  不再靠事后异步补报）——赛马编排器据此不盲目自动重试（重试必
+       *  再撞同一账号），把复活交给切号后的补跑；普通会话的
+       *  quotaExhausted error 分支不受影响。 */
+      quotaExhausted?: boolean;
     }
   | { type: 'error'; turnId?: number; message: string; source: 'client' | 'engine' | 'provider'; quotaExhausted?: boolean };
 

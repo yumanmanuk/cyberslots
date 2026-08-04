@@ -17,13 +17,29 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import type { EngineEvent, PermissionMode, ToolCallContent, UsageInfo } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
+import { compatAudit } from '../compatAudit';
 import { killEngineTree } from '../killTree';
+import { log } from '../../log/logger';
 import { queryActiveAgyQuota } from './agyAccounts';
 import { resolveAgyCli } from './resolveAntigravity';
+
+/** 一张开着的 agy 子代理卡 — headless 不回传子代理内部活动流（subagent_info
+ *  只有 log_uri 指针），卡面只能表达「已派发 / 运行中」，回合结束统一收卡。 */
+interface AgySubagentCard {
+  toolCallId: string;
+  title: string;
+  /** 开卡进度行 — 终态 upsert 必须原样保留，否则渲染层 isTaskTool 失配、卡片退化成普通工具行。 */
+  line: string;
+  /** 派发时的任务描述（tool_info.parameters 提取，展开卡可见；过长已截断）。 */
+  task?: string;
+}
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 /** 可选模型 slug（取自 `agy models` 实测，见 headless-mode.md）——启动时发给渲染层
@@ -45,6 +61,7 @@ export interface AntigravityAdapterOptions {
   permissionMode?: PermissionMode;
   /** 续接：上一次的 conversation_id（= engineSessionId）。 */
   resumeSessionId?: string;
+  quietResumeFallback?: boolean;
   cliPath?: string;
   /** 工作态会话的项目根；非空则首个 prompt 注入工作目录上下文（headless agent 不自述工作区）。 */
   workDir?: string;
@@ -58,9 +75,17 @@ export class AntigravityAdapter implements EngineAdapter {
   private turnId = 0;
   private disposed = false;
   private promptActive = false;
+  /** 本回合是否已收到 result 事件 —— close 处理器据此判断是否需要补发
+   *  兜底 turn.ended。用 promptActive 判断会被异步额度 probe 窗口期误判
+   *  （result 已收但 probe 未完，promptActive 仍 true → 重复发 turn.ended，
+   *  且该重复不带 quotaExhausted，抢在 probe 之前触发编排器 → 盲目重试
+   *  耗尽账号）。 */
+  private gotResult = false;
   private stdoutBuf = '';
   private workDirInjected = false;
   private readonly stderrTail: string[] = [];
+  /** 开着的子代理卡（key = 子代理 conversation_id，或步序兜底）。 */
+  private readonly subagentCards = new Map<string, AgySubagentCard>();
 
   constructor(
     private readonly opts: AntigravityAdapterOptions,
@@ -75,6 +100,19 @@ export class AntigravityAdapter implements EngineAdapter {
 
   async start(): Promise<{ engineSessionId: string }> {
     this.emit({ type: 'session.status', status: 'starting' });
+    // agy history lives in a local per-CLI sqlite (~/.gemini/antigravity-cli/
+    // conversations/<cid>.db -- docs/antigravity-integration.md section 3.8).
+    // When the db file is gone (cache cleared), --conversation <cid> cannot
+    // restore anything: drop the stale id up front so the session starts
+    // fresh instead of failing on the first prompt.
+    if (this.conversationId && !conversationDbExists(this.conversationId)) {
+      const stale = this.conversationId;
+      log.warn('engine.antigravity', 'conversation db missing, falling back to a fresh session', { staleSessionId: stale });
+      this.conversationId = '';
+      if (!this.opts.quietResumeFallback) {
+        this.emit({ type: 'error', source: 'engine', message: `${L('会话恢复失败，已新建会话继续（历史上下文不在引擎侧）', 'Session resume failed — started a new session (history context is not engine-side)')}: ${stale}` });
+      }
+    }
     // headless 无常驻会话可开：仅确认 CLI 可解析，随即 idle。cid 在首个
     // prompt 后回填。engineSessionId 先返回已知 cid（续接）或空串。
     // 发出可选模型列表（headless 无运行时 model 事件，静态下发）— 否则 composer 模型选择器不显示。
@@ -91,12 +129,39 @@ export class AntigravityAdapter implements EngineAdapter {
     this.child = undefined;
   }
 
+  /** 回合收尾唯一放行点：关并发闸门（promptActive=false）+ 回 idle。
+   *  两个到达路径：close 的 finish（仅 result 未到时）与 handleResult 的
+   *  .then()（发完唯一的 turn.ended 后）。防重入。 */
+  private settleTurn(): void {
+    if (!this.promptActive) return;
+    this.promptActive = false;
+    if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
+  }
+
   // ------------------------------------------------------------- actions
 
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     if (this.disposed) throw new Error('antigravity session disposed');
+    // 并发重入总闸：上一回合未收尾期间（子进程在跑；或 result 已收但额度
+    // probe 未完 —— 收尾放行点在 handleResult 的 .then()，probe 窗口内
+    // promptActive 保持 true）再发新 prompt 会覆盖 this.child、自增
+    // turnId 起 rogue 回合 —— 编排器仍挂着的 onTurnEnded 回调会误收新
+    // 回合的 turn.ended，把「继续」那段 transcript 当成交卷产物落盘 →
+    // 假冲线；且 rogue 回合同样撞额度，与原回合 probe 完成后的 quota
+    // 错误并发触发切号被互斥/熔断挡掉 → 没自动切号。
+    // 用 superseded 语义：编排器消费方（runRacerTurn/runTurnWithRetry/
+    // safe）一律静默吞掉，不弹横幅；渲染层自动补发（切号/重试「继续」）
+    // 经 catchAutoResume 吞掉，原回合 probe 收尾后由正当路径接回。
+    if (this.promptActive) {
+      log.warn('engine.antigravity', 'prompt rejected: previous turn still active (superseded)', {
+        turnId: this.turnId,
+        childAlive: !!this.child,
+      });
+      throw new Error(L('agy 上一回合尚未收尾，拒绝并发 prompt [superseded]', 'agy previous turn still active — concurrent prompt rejected [superseded]'));
+    }
     const turnId = ++this.turnId;
     this.promptActive = true;
+    this.gotResult = false;
     this.stdoutBuf = '';
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
@@ -122,15 +187,25 @@ export class AntigravityAdapter implements EngineAdapter {
         windowsHide: true,
       });
       this.child = child;
+      log.debug('engine.antigravity', 'headless turn spawned', {
+        command: spec.command,
+        pid: child.pid,
+        turnId,
+        resumed: !!this.conversationId,
+      });
       const cstdout = child.stdout!;
       const cstderr = child.stderr!;
       let settled = false;
       const finish = (): void => {
         if (settled) return;
         settled = true;
-        this.promptActive = false;
         this.child = undefined;
-        if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
+        // result 未到（崩退/认证失败/spawn 失败）→ 立即收尾放行。result 已收
+        // （额度 probe 可能在途）→ 放行交给 handleResult 的 .then()：它发完
+        // 唯一的 turn.ended 才 settleTurn。否则 close 远早于 probe 完成，
+        // probe 窗口期并发闸门形同虚设，旧 probe 的 .then() 还会踩掉新回合
+        // 的闸门、用旧 turnId 误发事件。
+        if (!this.gotResult) this.settleTurn();
         resolve();
       };
 
@@ -145,6 +220,7 @@ export class AntigravityAdapter implements EngineAdapter {
         }
       });
       child.on('error', (err) => {
+        log.error('engine.antigravity', 'agy spawn failed', { command: spec.command, turnId }, err);
         this.emit({ type: 'error', turnId, source: 'client', message: `${L('无法启动 agy CLI', 'Failed to launch the agy CLI')}: ${err.message}` });
         this.emit({ type: 'turn.ended', turnId, stopReason: 'error' });
         finish();
@@ -152,15 +228,24 @@ export class AntigravityAdapter implements EngineAdapter {
       child.on('close', (code) => {
         // 收尾残留行。
         this.flushStdout(turnId);
-        if (code !== 0 && this.promptActive) {
-          // 非 0 退出但没收到 result（如认证失败/额度耗尽）→ 补一条错误 + turn.ended。
+        // 仅当【没收到 result】才补发兜底 turn.ended。用 promptActive 判断会被
+        // 异步额度 probe 窗口期误判（result 已收但 probe 未完，promptActive 仍
+        // true → 重复发 turn.ended，且该重复不带 quotaExhausted，抢在 probe
+        // 之前触发编排器 → 盲目重试耗尽账号）。gotResult 精确反映 result 是否
+        // 已到：result 到了（无论 probe 是否完）都由 handleResult 的 .then()
+        // 负责发唯一的 turn.ended（带 quotaExhausted），close 不再补发。
+        // 已 settled（'error' 事件先到并 finish 过）则不重复发 turn.ended。
+        if (!settled && code !== 0 && !this.gotResult) {
+          // 非 0 退出且 result 未到（子进程崩退/认证失败 stderr 直退）→ 补一条错误 + turn.ended。
           const tail = this.stderrTail.slice(-8).join('\n');
+          log.warn('engine.antigravity', 'agy turn exited non-zero', { code, turnId, stderrTail: tail.replace(/\n/g, ' | ') });
           this.emit({
             type: 'error',
             turnId,
             source: classifyError(tail),
             message: `${L('agy 退出', 'agy exited with')} code=${code}\n${tail}`.trim(),
           });
+          this.settleSubagents(turnId, false);
           this.emit({ type: 'turn.ended', turnId, stopReason: 'error', durationMs: Date.now() - started });
         }
         finish();
@@ -242,6 +327,9 @@ export class AntigravityAdapter implements EngineAdapter {
         this.handleResult(ev.result as Record<string, unknown> | undefined, turnId);
         return;
       default:
+        // 信封级未知事件 → 兼容审计（kimi/omp 同款留痕；agy 此前没接，
+        // 协议漂移不可见 —— 2026-08-03 子代理步静默丢失正是栽在这）。
+        compatAudit.record('antigravity', 'unknown-event', `agy:event.${String(ev.event ?? '(missing)')}`, ev);
         return;
     }
   }
@@ -250,6 +338,15 @@ export class AntigravityAdapter implements EngineAdapter {
     if (!step) return;
     this.captureCid(step.conversation_id);
     const type = String(step.step_type ?? '');
+    // 子代理步优先于 step_type 分派：invoke 步带 subagent_info 而非 tool_info，
+    // step_type 甚至不是 'tool'（2026-08-03 实测落到 default 被静默丢弃，
+    // 界面上完全看不到子代理派发）。define_subagent 例外：它是普通工具步
+    // （tool_info.output 有信息量），保持工具明细行。
+    const isDefine = type === 'tool' && step.tool_name === 'define_subagent';
+    if (!isDefine && (step.subagent_info || (type === 'tool' && step.tool_name === 'invoke_subagent'))) {
+      this.handleSubagentStep(step, turnId);
+      return;
+    }
     switch (type) {
       case 'agent_response': {
         const delta = str(step.text_delta);
@@ -283,65 +380,168 @@ export class AntigravityAdapter implements EngineAdapter {
         return;
       }
       default:
-        return; // user_input / checkpoint / 未知 → 无 UI 影响
+        // user_input / checkpoint 是留档的已知类型（无 UI 影响），其余未知
+        // 类型进兼容审计 —— 此前一律静默，子代理步丢了都无迹可查。
+        if (type !== 'user_input' && type !== 'checkpoint') {
+          compatAudit.record('antigravity', 'unknown-event', `agy:step_type.${type || '(missing)'}`, step);
+        }
+        return;
     }
+  }
+
+  /** 子代理派发步 → kimi 同款任务卡（TaskCard）。agy 是异步委派模型：
+   *  define_subagent 定义 → invoke_subagent 派发（立即返回，步 DONE 只是
+   *  「派发已受理」而非子代理完成）→ schedule/wait 收结果。headless 不回传
+   *  子代理内部活动流，卡片在回合内保持 in_progress，结果由主代理文本转述。 */
+  private handleSubagentStep(step: Record<string, unknown>, turnId: number): void {
+    const toolErr = (step.tool_info as Record<string, unknown> | undefined)?.error;
+    const failed = String(step.step_type ?? '') === 'error_message' || !!toolErr;
+    for (const sub of normalizeSubagentInfos(step)) {
+      const existing = this.subagentCards.get(sub.key);
+      if (!existing) {
+        const card: AgySubagentCard = {
+          toolCallId: `subagent:${sub.key}`,
+          title: sub.title,
+          line: L('已派发，子代理后台运行中（headless 不回传过程流）', 'Dispatched — running in background (no inner stream in headless mode)'),
+          task: sub.task,
+        };
+        this.subagentCards.set(sub.key, card);
+        const content: ToolCallContent = { progress: { line: card.line } };
+        if (card.task) content.text = card.task;
+        this.emit({
+          type: 'tool.upsert',
+          turnId,
+          toolCallId: card.toolCallId,
+          title: card.title,
+          toolName: 'subagent',
+          toolKind: 'task',
+          status: failed ? 'failed' : 'in_progress',
+          content,
+        });
+        continue;
+      }
+      if (failed) {
+        this.subagentCards.delete(sub.key);
+        const content: ToolCallContent = { progress: { line: L('子代理失败', 'Subagent failed') } };
+        if (existing.task) content.text = existing.task;
+        this.emit({ type: 'tool.upsert', turnId, toolCallId: existing.toolCallId, status: 'failed', content });
+      }
+      // 同 key 的非失败后续 sighting（如 invoke 步自身的 DONE 重发）忽略——
+      // 那只是派发受理回执，不代表子代理跑完。
+    }
+  }
+
+  /** 回合终了统一收卡：headless 没有子代理终态信号，开着会永远「Delegating…」。 */
+  private settleSubagents(turnId: number, ok: boolean): void {
+    if (this.subagentCards.size === 0) return;
+    const line = ok
+      ? L('回合结束，子代理结果由主代理转述', 'Turn ended — subagent results are relayed by the main agent')
+      : L('回合异常终止', 'Turn terminated abnormally');
+    for (const card of this.subagentCards.values()) {
+      const content: ToolCallContent = { progress: { line } };
+      if (card.task) content.text = card.task;
+      this.emit({
+        type: 'tool.upsert',
+        turnId,
+        toolCallId: card.toolCallId,
+        status: ok ? 'completed' : 'failed',
+        content,
+      });
+    }
+    this.subagentCards.clear();
   }
 
   private handleResult(result: Record<string, unknown> | undefined, turnId: number): void {
     if (!result) return;
+    this.gotResult = true;
     this.captureCid(result.conversation_id);
     const status = String(result.status ?? '');
-    if (status === 'ERROR' || status === 'INVALID') {
-      const msg = str(result.error) || L('运行失败', 'Run failed');
-      this.emit({ type: 'error', turnId, source: classifyError(msg), message: msg });
-      // agy 把模型侧一切失败（429 额度耗尽/401/过载…）统一包装成
-      // “Agent execution terminated due to error.”，真实原因只写 cli.log 不进
-      // stdout/stderr（2026-07 实测）→ 命中该泛化文案时异步查活动账号额度核实，
-      // 坐实归零才补报「额度耗尽」，避免把过载/网络错误误判成额度。
-      if (/agent execution terminated/i.test(msg)) void this.reportQuotaExhaustion(turnId);
-    }
-    const u = (result.usage ?? {}) as Record<string, unknown>;
-    const usage: UsageInfo = {
-      inputTokens: num(u.input_tokens),
-      outputTokens: num(u.output_tokens),
-      totalTokens: num(u.total_tokens),
-      cachedInputTokens: num(u.cache_read_tokens),
-    };
-    const durationMs = num(result.duration_seconds) != null ? Math.round(num(result.duration_seconds)! * 1000) : Date.now() - this.turnStartedAt;
-    const stopReason = status === 'SUCCESS' ? 'end_turn' : status.toLowerCase() || 'end_turn';
-    this.emit({ type: 'turn.ended', turnId, stopReason, usage, durationMs });
-    // result 是权威终态：close 的非 0 兜底只为「没收到 result 就退了」服务，
-    // 这里标记已收尾，否则 ERROR result + exit 1 会再补一条冗余的「agy 退出 code=1」
-    // 和重复的 turn.ended。
-    this.promptActive = false;
+    const failed = status === 'ERROR' || status === 'INVALID';
+    const msg = failed ? str(result.error) || L('运行失败', 'Run failed') : '';
+    // agy 把模型侧一切失败（429 额度耗尽/401/过载…）统一包装成
+    // “Agent execution terminated due to error.”，真实原因只写 cli.log 不进
+    // stdout/stderr（2026-07 实测）→ 命中该泛化文案时必须在【发 turn.ended
+    // 之前】坐实额度：否则赛马编排器先拿到终态、1.5s 后就盲目重发，额度核实
+    // 还在半路，重试必撞同一没额度账号。await 核实后把结论随 turn.ended
+    // 一起带下去（quotaExhausted），编排器据此不自动重试、改走切号补跑。
+    const needsCheck = failed && /agent execution terminated/i.test(msg);
+    // needsCheck 的泛化错误延迟到 probe 出结论后在下方 .then() 发（耗尽 →
+    // 只发带 quotaExhausted 的额度错误；未耗尽 → 补发本条无标记错误）。
+    // 现在就发会让渲染层拿它启动非额度 1.5s 重试，与 probe 后的切号路径
+    // 并发打架（rogue「继续」烧在尚未切换的死账号上，切号后的正当接回又
+    // 可能被并发闸门拒掉）。非 needsCheck 的失败结论已定，照常即发。
+    if (failed && !needsCheck) this.emit({ type: 'error', turnId, source: classifyError(msg), message: msg });
+    void (needsCheck ? this.probeQuotaExhaustion(turnId) : Promise.resolve(false)).then((quotaExhausted) => {
+      if (this.disposed) return;
+      if (turnId !== this.turnId) {
+        // 防御（正常路径到不了 —— 并发闸门覆盖整个 probe 窗口）：宁可挂起
+        // 旧回合的等待（剔除/重跑可唤醒），也不把旧 turnId 事件误投新回合、
+        // 踩掉新回合的闸门。
+        log.warn('engine.antigravity', 'stale turn result dropped', { turnId, currentTurnId: this.turnId });
+        return;
+      }
+      if (quotaExhausted) this.emitQuotaError(turnId);
+      else if (needsCheck) this.emit({ type: 'error', turnId, source: classifyError(msg), message: msg });
+      const u = (result.usage ?? {}) as Record<string, unknown>;
+      const usage: UsageInfo = {
+        inputTokens: num(u.input_tokens),
+        outputTokens: num(u.output_tokens),
+        totalTokens: num(u.total_tokens),
+        cachedInputTokens: num(u.cache_read_tokens),
+      };
+      const durationMs = num(result.duration_seconds) != null ? Math.round(num(result.duration_seconds)! * 1000) : Date.now() - this.turnStartedAt;
+      const stopReason = status === 'SUCCESS' ? 'end_turn' : status.toLowerCase() || 'end_turn';
+      this.emit({ type: 'turn.ended', turnId, stopReason, usage, durationMs, quotaExhausted });
+      // 回合终了统一收子代理卡（headless 无子代理终态信号，不收会永远 Delegating…）。
+      this.settleSubagents(turnId, status === 'SUCCESS');
+      // result 是权威终态，这里是该路径的回合收尾放行点（close 的 finish 见
+      // gotResult 已跳过）：发完唯一的 turn.ended 才关闸门回 idle。close 的
+      // 非 0 兜底只为「没收到 result 就退了」服务。
+      this.settleTurn();
+    });
   }
 
-  /** ERROR result 文案泛化时的额度核实：查当前活动账号（force 绕缓存），
-   *  任一时间窗额度归零则补报 provider 级错误（带重置时间，供用户决策切号）。
-   *  尽力而为 — 查询失败/未导入/未耗尽都保持沉默，原错误已展示。 */
-  private async reportQuotaExhaustion(turnId: number): Promise<void> {
+  /** ERROR 文案泛化时的额度核实（仅探测，不 emit）：查当前活动账号
+   *  （force 绕缓存），任一时间窗额度归零视为坐实。尽力而为 —— 查询失败/
+   *  未导入/未耗尽都返回 false，按普通错误处理。 */
+  private async probeQuotaExhaustion(turnId: number): Promise<boolean> {
     try {
       const q = await queryActiveAgyQuota(true);
-      if (this.disposed || !q.ok) return;
+      if (this.disposed || !q.ok) return false;
       const exhausted = q.groups.filter((g) => g.utilization >= 99.95);
-      if (exhausted.length === 0) return;
-      const windows = exhausted
+      if (exhausted.length === 0) return false;
+      this.pendingQuotaEmail = q.email;
+      this.pendingQuotaWindows = exhausted
         .map((g) => L(`${g.group}额度${g.resetsInSeconds != null ? `（${fmtReset(g.resetsInSeconds)}后重置）` : ''}`, `${g.group} quota${g.resetsInSeconds != null ? ` (resets in ${fmtReset(g.resetsInSeconds)})` : ''}`))
         .join(L('、', ', '));
-      this.emit({
-        type: 'error',
-        turnId,
-        source: 'provider',
-        message: L(
-          `当前账号${q.email ? ` ${q.email}` : ''}的 ${windows} 已耗尽，请切换账号后重试。`,
-          `The ${windows} of the current account${q.email ? ` ${q.email}` : ''} is exhausted — switch accounts and retry.`,
-        ),
-        // 结构化标记：渲染层据此触发自动切号/兜底弹窗（不靠文案字符串匹配）。
-        quotaExhausted: true,
-      });
-    } catch {
-      /* 额度核实失败不打扰用户 */
+      log.info('engine.antigravity', 'quota exhaustion confirmed before turn.ended', { turnId, email: q.email, windows: this.pendingQuotaWindows });
+      return true;
+    } catch (err) {
+      log.warn('engine.antigravity', 'quota probe failed', { turnId }, err);
+      return false;
     }
+  }
+
+  private pendingQuotaEmail: string | undefined;
+  private pendingQuotaWindows = '';
+
+  /** 坐实额度耗尽后补报 provider 级错误（带重置时间，供用户决策切号）；
+   *  结构化标记 quotaExhausted 驱动渲染层自动切号/兜底弹窗。 */
+  private emitQuotaError(turnId: number): void {
+    const email = this.pendingQuotaEmail;
+    const windows = this.pendingQuotaWindows;
+    this.pendingQuotaEmail = undefined;
+    this.pendingQuotaWindows = '';
+    this.emit({
+      type: 'error',
+      turnId,
+      source: 'provider',
+      message: L(
+        `当前账号${email ? ` ${email}` : ''}的 ${windows} 已耗尽，请切换账号后重试。`,
+        `The ${windows} of the current account${email ? ` ${email}` : ''} is exhausted — switch accounts and retry.`,
+      ),
+      quotaExhausted: true,
+    });
   }
 
   /** 首次拿到 conversation_id 时回填 engineSessionId（供续接与持久化）。 */
@@ -416,6 +616,30 @@ function mapToolContent(info: Record<string, unknown>): ToolCallContent | undefi
   return out.text ? out : undefined;
 }
 
+/** step → 子代理列表（开卡用）。两种留档口径防御式兼容：
+ *  ① integration 实测：subagent_info 直接是单子代理对象（type_name/role/conversation_id/log_uri）；
+ *  ② headless-mode.md：subagent_info.subagents[] 列出每个子代理。
+ *  都没有（协议漂移，invoke_subagent 退化成普通 tool 步）时从 tool_info.parameters 兜底。 */
+function normalizeSubagentInfos(step: Record<string, unknown>): Array<{ key: string; title: string; task?: string }> {
+  const info = step.subagent_info as Record<string, unknown> | undefined;
+  const rawList: unknown[] = Array.isArray(info?.subagents) ? (info.subagents as unknown[]) : info ? [info] : [];
+  const params = ((step.tool_info as Record<string, unknown> | undefined)?.parameters ?? {}) as Record<string, unknown>;
+  const rawTask = str(params.task) ?? str(params.prompt) ?? str(params.description) ?? str(params.instruction) ?? str(params.message);
+  const task = rawTask && rawTask.length > 2000 ? `${rawTask.slice(0, 2000)}…` : rawTask;
+  const stepIdx = String(step.step_index ?? 'x');
+  if (rawList.length === 0) {
+    // 无 subagent_info 的漂移形态：以步序为 key 开一张信息不全的卡，胜过静默丢弃。
+    const title = str(params.name) ?? str(params.subagent) ?? str(params.agent) ?? L('子代理', 'Subagent');
+    return task ? [{ key: `invoke:${stepIdx}`, title, task }] : [{ key: `invoke:${stepIdx}`, title }];
+  }
+  return rawList.map((raw, i) => {
+    const s = (raw ?? {}) as Record<string, unknown>;
+    const key = str(s.conversation_id) ?? `step:${stepIdx}:${i}`;
+    const title = str(s.role) ?? str(s.type_name) ?? str(s.name) ?? L('子代理', 'Subagent');
+    return task ? { key, title, task } : { key, title };
+  });
+}
+
 function classifyError(msg: string): 'client' | 'engine' | 'provider' {
   const m = msg.toLowerCase();
   if (m.includes('unauthenticated') || m.includes('permission_denied') || m.includes('401') || m.includes('403'))
@@ -461,4 +685,17 @@ function str(v: unknown): string | undefined {
 }
 function num(v: unknown): number | undefined {
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+// ----------------------------------------------------- conversation db probe
+
+/** agy stores conversation history in a local sqlite per conversation; when
+ *  the file is absent the id cannot be resumed. Probe failure returns true
+ *  (must never nuke a resumable id on a filesystem hiccup). */
+function conversationDbExists(cid: string): boolean {
+  try {
+    return existsSync(join(homedir(), '.gemini', 'antigravity-cli', 'conversations', `${cid}.db`));
+  } catch {
+    return true;
+  }
 }

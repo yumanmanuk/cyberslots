@@ -18,6 +18,7 @@ import type { EngineEvent, UsageInfo } from '@shared/types';
 import type { RaceAdoptStrategy, RaceCreateRequest, RaceEvent, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig } from '@shared/race';
 import type { SessionManager } from '../engine/SessionManager';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 import { RaceOrchestrator, type RaceSessionHost, type RaceSpawnSpec } from './RaceOrchestrator';
 
 export class RaceManager implements RaceSessionHost {
@@ -49,6 +50,7 @@ export class RaceManager implements RaceSessionHost {
 
   /** 用户选定采纳策略（+可选评语）→ 裁判产出最终方案。 */
   adopt(raceId: string, strategy: RaceAdoptStrategy, comment?: string): void {
+    log.info('race', 'adopt strategy', { raceId, strategy, hasComment: !!comment });
     this.orchestrator.adoptStrategy(raceId, strategy, comment);
   }
 
@@ -57,11 +59,13 @@ export class RaceManager implements RaceSessionHost {
   }
 
   finalize(raceId: string): void {
+    log.info('race', 'finalize plan → building', { raceId });
     this.orchestrator.finalize(raceId);
   }
 
   /** 重启后继续被打断的赛马（重跑当前阶段）。 */
   resume(raceId: string): void {
+    log.info('race', 'resume requested', { raceId });
     this.orchestrator.resume(raceId);
   }
 
@@ -75,8 +79,14 @@ export class RaceManager implements RaceSessionHost {
     this.orchestrator.retryRacer(raceId, role);
   }
 
+  /** 额度耗尽切号后的精确补跑：仅当该选手当前阶段产物缺失时才重跑。 */
+  retryRacerIfMissing(raceId: string, role: RaceRole): void {
+    this.orchestrator.retryRacerIfMissing(raceId, role);
+  }
+
   /** ④a 反悔：撤回采纳决策，回到选策略关口（约束在编排器）。 */
   revokeAdopt(raceId: string): void {
+    log.info('race', 'adopt revoked', { raceId });
     this.orchestrator.revokeAdopt(raceId);
   }
 
@@ -87,6 +97,7 @@ export class RaceManager implements RaceSessionHost {
 
   /** ✂ 剔除选手（标记式；约束与竞态处理在编排器）。 */
   eliminateRacer(raceId: string, role: RaceRole): void {
+    log.info('race', 'racer eliminated', { raceId, role });
     this.orchestrator.eliminateRacer(raceId, role);
   }
 
@@ -101,6 +112,7 @@ export class RaceManager implements RaceSessionHost {
   }
 
   cancel(raceId: string): void {
+    log.info('race', 'race cancelled', { raceId });
     this.orchestrator.cancel(raceId);
   }
 
@@ -149,7 +161,7 @@ export class RaceManager implements RaceSessionHost {
    *  cancelled/interrupted）不等静默，立即上报。
    *  附带记账：逐内部回合累计 usage，交卷时一并上报（供赛马阶段
    *  统计）；含 approx 估算则整体标 approx，由编排器拒记（kimi 不计）。 */
-  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo) => void): () => void {
+  onTurnEnded(sessionId: string, cb: (stopReason: string, usage?: UsageInfo, quotaExhausted?: boolean) => void): () => void {
     let settle: NodeJS.Timeout | undefined;
     const acc: UsageInfo = { inputTokens: 0, outputTokens: 0 };
     const fold = (usage?: UsageInfo): void => {
@@ -170,7 +182,7 @@ export class RaceManager implements RaceSessionHost {
       const reason = event.stopReason;
       if (reason === 'error' || reason === 'cancelled' || reason === 'interrupted') {
         if (settle) clearTimeout(settle);
-        cb(reason, acc);
+        cb(reason, acc, event.quotaExhausted);
         return;
       }
       // 正常/background 收束：静默 2s 后才算交卷（background 收束同样
@@ -195,7 +207,7 @@ export class RaceManager implements RaceSessionHost {
     try {
       writeFileSync(this.storeFile, JSON.stringify(groups, null, 2), 'utf8');
     } catch (err) {
-      console.error('[race] persist failed:', err);
+      log.error('race', 'persist races.json failed', { count: groups.length }, err);
     }
   }
 
@@ -222,7 +234,7 @@ export class RaceManager implements RaceSessionHost {
         return { ...g, interrupted: !waitingUser };
       });
     } catch (err) {
-      console.error('[race] load failed:', err);
+      log.error('race', 'load races.json failed', undefined, err);
       return [];
     }
   }

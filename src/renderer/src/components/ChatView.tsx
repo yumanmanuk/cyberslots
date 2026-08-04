@@ -41,6 +41,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const terms = useChatStore((s) => s.terminals[sessionId]) ?? [];
   const planPreviewId = useChatStore((s) => s.planPreview[sessionId]);
   const pendingFilePreview = useChatStore((s) => s.pendingFilePreview[sessionId]);
+  const pendingChangePreview = useChatStore((s) => s.pendingChangePreview[sessionId]);
   const openSidechat = useChatStore((s) => s.openSidechat);
   // Open in 的文件夹候选：cwd 置首（primary）+ workspace 其他根去重（同 RightDock termFolders）。
   const workspace = useChatStore((s) => s.settings?.workspaces.find((w) => w.id === meta?.workspaceId));
@@ -122,6 +123,14 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       setPanelOpen(true);
     }
   }, [pendingFilePreview]);
+
+  // 编辑工具卡点击 → 开 changes tab（信号同上，由 WorkspacePanel 消费清除）。
+  useEffect(() => {
+    if (pendingChangePreview) {
+      setActiveTab('changes');
+      setPanelOpen(true);
+    }
+  }, [pendingChangePreview]);
 
   // 切会话时退出重命名编辑态（组件实例跨会话复用）。
   useEffect(() => setRenaming(false), [sessionId]);
@@ -311,6 +320,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           {meta && (
             <DotMenu
               hoverReveal={false}
+              align="left"
               items={[
                 {
                   icon: <Pencil size={13} />,
@@ -324,7 +334,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             />
           )}
           {isWork && meta && (
-            <span className="truncate rounded-md bg-bg-panel px-2 py-[3px] font-mono text-[11px] leading-none text-ink-soft">{meta.cwd}</span>
+            <span className="truncate rounded-md bg-bg-panel px-2 py-[3px] font-mono text-[11px] leading-[1.2] text-ink-soft">{meta.cwd}</span>
           )}
           <div className="flex-1" />
           <Heartbeat sessionId={sessionId} busy={meta?.status === 'running' || meta?.status === 'awaiting'} awaiting={meta?.status === 'awaiting'} />

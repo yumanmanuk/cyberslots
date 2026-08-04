@@ -5,7 +5,7 @@
  * and a per-answer stats footer (上行/缓存/下行/tts/用时).
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -27,6 +27,7 @@ import {
   Settings2,
   Image as ImageFileIcon,
   Copy,
+  Info,
   Download,
   Lightbulb,
   ListTodo,
@@ -39,7 +40,8 @@ import {
   X,
 } from 'lucide-react';
 
-import type { PlanEntry, UnifiedMessage } from '@shared/types';
+import { ENGINE_LABELS } from '@shared/types';
+import type { PlanEntry, ToolCallContent, UnifiedMessage } from '@shared/types';
 import type { SessionChangeEntry } from '@shared/ipc';
 import { useChatStore } from '../store/chatStore';
 import SelectionChip from './SelectionChip';
@@ -48,6 +50,9 @@ import { downloadMarkdown, extractPlanTitle } from '../planDoc';
 import { useT } from '../i18n';
 import UndoConfirmDialog from './UndoConfirmDialog';
 import { BrandSpinner } from './brand';
+import MdLink, { looksLikeFilePath } from './MdLink';
+import { resolveEffectiveEffort } from '../effort';
+import { effortLabel, modelDisplayLabel } from './race/modelCatalogs';
 
 export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; sessionId: string }): JSX.Element | null {
   switch (msg.kind) {
@@ -60,7 +65,7 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
         <div className="md-body max-w-none">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={{ code: (props) => <MdCode {...props} sessionId={sessionId} /> }}
+            components={{ code: (props) => <MdCode {...props} sessionId={sessionId} />, a: (props) => <MdLink {...props} sessionId={sessionId} /> }}
           >
             {msg.text}
           </ReactMarkdown>
@@ -71,7 +76,7 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
       return <ThinkingBlock text={msg.text} streaming={msg.streaming} createdAt={msg.createdAt} durationMs={msg.durationMs} />;
 
     case 'tool_call':
-      return <ToolCallItem msg={msg} />;
+      return <ToolCallItem msg={msg} sessionId={sessionId} />;
 
     case 'plan':
       // 内联 To-dos 卡片（同一条消息随 plan.update 就地刷新状态）；
@@ -115,20 +120,6 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
 }
 
 // ------------------------------------------------------------- sub-blocks
-
-/** AI 正文行内代码的文件路径判定 — 必须命中已知扩展名白名单（对齐
- *  FILE_ICONS + 常见文本类），宁可漏判也不把 `reasoning: true` /
- *  `chain_valid` 这类配置键误判成文件 chip。 */
-const FILE_EXT_RE =
-  /\.(tsx?|jsx?|mjs|cjs|mts|cts|json|jsonc|md|markdown|css|scss|less|styl|vue|svelte|html?|xml|py|rs|go|java|kts?|c|h|cc|cpp|hpp|sh|bash|ps1|bat|cmd|ya?ml|toml|ini|env|conf|cfg|svg|png|jpe?g|gif|webp|ico|txt|lock|sql)$/i;
-
-function looksLikeFilePath(s: string): boolean {
-  const v = s.trim();
-  if (!v || v.length > 260 || /\s/.test(v)) return false;
-  if (/^https?:\/\//i.test(v)) return false;
-  const base = v.split(/[\\/]/).pop() ?? '';
-  return FILE_EXT_RE.test(base);
-}
 
 /** react-markdown v9 的 code 渲染分流：围栏块（带 language-…）保持默认；
  *  行内代码若像文件路径 → 可点击文件 chip（codex 同款）。
@@ -292,7 +283,18 @@ const USER_TEXT_CLAMP_PX = 255;
 function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'turn_end' }>; sessionId: string }): JSX.Element | null {
   const t = useT();
   const engine = useChatStore((s) => s.sessions.find((m) => m.id === sessionId)?.engine);
+  const sessionModelId = useChatStore((s) => s.sessions.find((m) => m.id === sessionId)?.modelId);
+  const sessionModels = useChatStore((s) => s.ui[sessionId]?.models);
+  const sessionEffort = useChatStore((s) => s.efforts[sessionId]);
+  const codexCatalog = useChatStore((s) => s.codexCatalog);
+  const codexDefaultEffort = useChatStore((s) => s.codexDefaultEffort);
+  const opencodeCatalog = useChatStore((s) => s.opencodeCatalog);
+  const ompCatalog = useChatStore((s) => s.ompCatalog);
+  const kimiModels = useChatStore((s) => s.kimiModels);
+  const claudeLabels = useChatStore((s) => s.claudeModelLabels);
+  const lang = useChatStore((s) => s.settings?.language ?? 'zh');
   const [copied, setCopied] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const u = msg.usage;
   const parts: string[] = [];
   // kimi 仅 ACP 降级会话隐藏 token 数（字符估算带 approx 标）；KAP 通道
@@ -321,6 +323,23 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   if (msg.stopReason === 'cancelled') parts.unshift(t('msgStopped'));
   if (parts.length === 0) return null;
 
+  // 回合快照优先（turn_end 创建时盖章），旧消息回退会话当前引擎/模型/思考深度。
+  const infoEngine = msg.engine ?? engine;
+  const infoModelId = msg.modelId ?? sessionModelId ?? '';
+  const infoModel = modelDisplayLabel(infoEngine, infoModelId, { codexCatalog, ompCatalog, claudeLabels, lang });
+  // 思考深度回退：按会话当前状态重算生效档（与 EffortPicker/sendPromptTo 同一解析）。
+  const currentEffort = resolveEffectiveEffort({
+    engine: infoEngine,
+    override: sessionEffort,
+    activeModel: sessionModels?.current || sessionModels?.available[0] || infoModelId || '',
+    kimiModels,
+    codexCatalog,
+    codexDefaultEffort,
+    opencodeCatalog,
+    ompCatalog,
+  })?.value;
+  const infoEffort = msg.effort ?? currentEffort;
+
   const copyAnswer = (): void => {
     const msgs = useChatStore.getState().ui[sessionId]?.messages ?? [];
     const text = msgs
@@ -344,6 +363,48 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
       >
         {copied ? <Check size={10} className="text-ok" /> : <Copy size={10} />}
       </button>
+      {/* 回答信息 — 复制图标右侧，鼠标悬浮弹出小卡：完成时间 / 引擎 / 模型 / 思考深度 */}
+      <span
+        className="relative flex items-center"
+        onMouseEnter={() => setInfoOpen(true)}
+        onMouseLeave={() => setInfoOpen(false)}
+      >
+        <button
+          type="button"
+          aria-label={t('answerInfo')}
+          onFocus={() => setInfoOpen(true)}
+          onBlur={() => setInfoOpen(false)}
+          className="flex items-center rounded p-0.5 transition hover:bg-bg-hover hover:text-ink"
+        >
+          <Info size={10} />
+        </button>
+        {infoOpen && (
+          <div className="pointer-events-none absolute bottom-5 left-0 z-20 whitespace-nowrap rounded-xl border border-line bg-bg-input px-3 py-2 font-sans text-[12px] leading-5 shadow-lg">
+            <div className="grid grid-cols-[auto_1fr] gap-x-3">
+              <span className="text-ink-faint">{t('completedAt')}</span>
+              <span className="tabular-nums text-ink-soft">{new Date(msg.createdAt).toLocaleString()}</span>
+              {infoEngine && (
+                <>
+                  <span className="text-ink-faint">{t('engine')}</span>
+                  <span className="text-ink-soft">{ENGINE_LABELS[infoEngine]}</span>
+                </>
+              )}
+              {infoModel && (
+                <>
+                  <span className="text-ink-faint">{t('model')}</span>
+                  <span className="text-ink-soft">{infoModel}</span>
+                </>
+              )}
+              {infoEffort && (
+                <>
+                  <span className="text-ink-faint">{t('effort')}</span>
+                  <span className="text-ink-soft">{effortLabel(infoEffort)}</span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </span>
       {parts.map((p, i) => (
         <span key={i} className="flex items-center gap-1.5">
           {i > 0 && <span className="text-ink-faint/40">·</span>}
@@ -462,7 +523,7 @@ function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 
         {/* md 内容预览 — 限高截断 + 底部渐隐 */}
         <div className="relative max-h-64 overflow-hidden px-4 pb-3 pt-1">
           <div className="md-body max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <MdLink {...props} sessionId={sessionId} /> }}>{msg.text}</ReactMarkdown>
           </div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-bg-panel to-transparent" />
         </div>
@@ -499,7 +560,7 @@ function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               <div className="md-body max-w-none pr-1 text-[13px]">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{msg.text}</ReactMarkdown>
               </div>
             </div>
           </div>
@@ -715,9 +776,9 @@ function TodoCard({ entries }: { entries: PlanEntry[] }): JSX.Element | null {
 
 /** 工具调用分派：编辑 → 矩形卡片；shell → 命令条；task 子代理 → 进度卡；
  *  其余（explore/todo/mcp）→ 无框明细行。explore 类在 MessageList 层已聚合成组。 */
-export function ToolCallItem({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }> }): JSX.Element {
+export function ToolCallItem({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>; sessionId: string }): JSX.Element {
   if (isTaskTool(msg)) return <TaskCard msg={msg} />;
-  if (msg.toolKind === 'edit') return <EditCard msg={msg} />;
+  if (msg.toolKind === 'edit') return <EditCard msg={msg} sessionId={sessionId} />;
   if (msg.toolKind === 'execute') return <ShellCard msg={msg} />;
   return <ToolLine msg={msg} />;
 }
@@ -942,9 +1003,12 @@ export function FileTypeIcon({ name, size = 13 }: { name: string; size?: number 
 }
 
 /** 文件编辑卡片 — 矩形框：编辑中卡面扫光 + 右侧 "Generating…"；
- *  完成后右侧 +N -N 行数变更 + A/M/D 徽章；失败显 Failed。点击展开 diff。
+ *  完成后右侧 +N -N 行数变更 + A/M/D 徽章；失败显 Failed。
+ *  行数优先用引擎给的 additions/deletions，缺省时从 patch/diff 片段推算。
+ *  work 会话点击在右侧变更面板打开该文件 diff；其余（非 work / proposed
+ *  落盘前预览 / 无面板路径）点击展开卡内 diff。
  *  proposed（omp ast_edit 两阶段预览）：琥珀色 "Preview" 标签，落盘前可先看 diff。 */
-function EditCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }> }): JSX.Element {
+function EditCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>; sessionId: string }): JSX.Element {
   const t = useT();
   const [open, setOpen] = useState(false);
   const active = msg.status === 'in_progress' || msg.status === 'pending';
@@ -953,44 +1017,56 @@ function EditCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
   const fullPath = msg.locations?.[0] ?? msg.title;
   const file = fullPath.split(/[\\/]/).pop() ?? fullPath;
   const hasDetail = !active && !!(c?.patch || c?.diff || c?.text);
+  const counts = useMemo(() => (active ? null : changeCounts(c)), [active, c]);
+  const isWork = useChatStore((s) => s.sessions.find((x) => x.id === sessionId)?.chatMode === 'work');
+  // 变更面板打开目标：只信 locations / diff.path（title 可能是动作短语）；
+  // 内部 scheme（agent:// 等）不是磁盘文件，同主进程台账口径排除。
+  const panelPath = msg.locations?.[0] ?? c?.diff?.path;
+  const canOpenPanel =
+    !active && !proposed && msg.status === 'completed' && isWork && !!panelPath && !/^[a-z][a-z0-9+.-]*:\/\//i.test(panelPath);
   const [letter, letterTone] =
     c?.changeKind === 'add' ? ['A', 'text-ok'] : c?.changeKind === 'delete' ? ['D', 'text-err'] : ['M', 'text-warn'];
+  const clickable = canOpenPanel || hasDetail;
   return (
     <div
       className={`overflow-hidden rounded-lg border transition ${active ? 'border-accent/35' : proposed ? 'border-warn/40' : 'border-line'
         }`}
     >
       <button
-        onClick={() => hasDetail && setOpen(!open)}
-        title={fullPath}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'
+        onClick={() => {
+          if (canOpenPanel) useChatStore.getState().requestChangePreview(sessionId, panelPath!);
+          else if (hasDetail) setOpen(!open);
+        }}
+        title={canOpenPanel ? `${panelPath} — ${t('openFileInPanel')}` : fullPath}
+        className={`flex w-full items-center gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${clickable ? 'hover:bg-bg-hover' : 'cursor-default'
           }`}
       >
         <FileTypeIcon name={file} />
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">{file}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-[1.2] text-ink">{file}</span>
         {active ? (
-          <span className="shimmer-text shrink-0 text-[11.5px] font-medium">Generating…</span>
+          <span className="shimmer-text shrink-0 text-[11.5px] font-medium leading-none">Generating…</span>
         ) : proposed ? (
-          <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">{t('previewPending')}</span>
+          <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium leading-none text-warn">{t('previewPending')}</span>
         ) : msg.status === 'failed' ? (
-          <span className="shrink-0 text-[11.5px] font-medium text-err">Failed</span>
+          <span className="shrink-0 text-[11.5px] font-medium leading-none text-err">Failed</span>
         ) : msg.status === 'canceled' ? (
-          <span className="shrink-0 text-[11.5px] text-ink-faint">Canceled</span>
+          <span className="shrink-0 text-[11.5px] leading-none text-ink-faint">Canceled</span>
         ) : (
-          <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] tabular-nums">
-            {c?.additions != null && c.additions > 0 && <span className="text-ok">+{c.additions}</span>}
-            {c?.deletions != null && c.deletions > 0 && <span className="text-err">-{c.deletions}</span>}
+          <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] leading-none tabular-nums">
+            {counts && counts.adds > 0 && <span className="text-ok">+{counts.adds}</span>}
+            {counts && counts.dels > 0 && <span className="text-err">-{counts.dels}</span>}
             <span className={`font-semibold ${letterTone}`}>{letter}</span>
           </span>
         )}
-        {hasDetail &&
+        {!canOpenPanel &&
+          hasDetail &&
           (open ? (
             <ChevronDown size={12} className="shrink-0 text-ink-faint" />
           ) : (
             <ChevronRight size={12} className="shrink-0 text-ink-faint" />
           ))}
       </button>
-      <Collapsible open={open && hasDetail}>
+      <Collapsible open={open && hasDetail && !canOpenPanel}>
         <div className="max-h-72 overflow-auto border-t border-line bg-bg-panel/60 px-3 py-2">
           {c?.patch ? (
             <PatchView patch={c.patch} />
@@ -1003,6 +1079,44 @@ function EditCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
       </Collapsible>
     </div>
   );
+}
+
+/** 编辑卡行数统计：引擎给了 additions/deletions 直接用；否则从 unified
+ *  patch 数 +/- 行，或从 diff 片段（oldText/newText）LCS 行级推算。 */
+function changeCounts(c: ToolCallContent | undefined): { adds: number; dels: number } | null {
+  if (!c) return null;
+  if (c.additions != null || c.deletions != null) return { adds: c.additions ?? 0, dels: c.deletions ?? 0 };
+  if (c.patch) {
+    let adds = 0;
+    let dels = 0;
+    for (const l of c.patch.split('\n')) {
+      if (l.startsWith('+++') || l.startsWith('---')) continue;
+      if (l.startsWith('+')) adds++;
+      else if (l.startsWith('-')) dels++;
+    }
+    return { adds, dels };
+  }
+  if (c.diff && (c.diff.oldText != null || c.diff.newText != null)) {
+    return countLineDiff(c.diff.oldText ?? '', c.diff.newText ?? '');
+  }
+  return null;
+}
+
+/** 片段行级增删数：滚动行 LCS（O(n·m) 时间、O(m) 空间）；超大片段返回 null 不乱报数。 */
+function countLineDiff(oldText: string, newText: string): { adds: number; dels: number } | null {
+  const a = oldText ? oldText.split('\n') : [];
+  const b = newText ? newText.split('\n') : [];
+  if (a.length > 2000 || b.length > 2000) return null;
+  let prev = new Array<number>(b.length + 1).fill(0);
+  let curr = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = a[i - 1] === b[j - 1] ? prev[j - 1]! + 1 : Math.max(prev[j]!, curr[j - 1]!);
+    }
+    [prev, curr] = [curr, prev.fill(0)];
+  }
+  const lcs = prev[b.length]!;
+  return { adds: b.length - lcs, dels: a.length - lcs };
 }
 
 /** shell 命令条 — 单行框：命令文本 + 右侧 Running…/Ran/Exit N/Failed，
@@ -1019,15 +1133,15 @@ export function ShellCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_
   }, [out, open, active]);
 
   const label = active ? (
-    <span className="shimmer-text shrink-0 text-[11.5px] font-medium">Running…</span>
+    <span className="shimmer-text shrink-0 text-[11.5px] font-medium leading-none">Running…</span>
   ) : msg.status === 'failed' ? (
-    <span className="shrink-0 text-[11.5px] font-medium text-err">Failed</span>
+    <span className="shrink-0 text-[11.5px] font-medium leading-none text-err">Failed</span>
   ) : msg.status === 'canceled' ? (
-    <span className="shrink-0 text-[11.5px] text-ink-faint">Canceled</span>
+    <span className="shrink-0 text-[11.5px] leading-none text-ink-faint">Canceled</span>
   ) : exit != null && exit !== 0 ? (
-    <span className="shrink-0 font-mono text-[11.5px] text-err">Exit {exit}</span>
+    <span className="shrink-0 font-mono text-[11.5px] leading-none text-err">Exit {exit}</span>
   ) : (
-    <span className="shrink-0 text-[11.5px] text-ink-faint">Ran</span>
+    <span className="shrink-0 text-[11.5px] leading-none text-ink-faint">Ran</span>
   );
 
   return (
@@ -1038,7 +1152,7 @@ export function ShellCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_
           }`}
       >
         <TerminalSquare size={13} className="shrink-0 text-ink-faint" />
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-soft">{msg.title}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-[1.2] text-ink-soft">{msg.title}</span>
         {label}
         {out &&
           (open ? (

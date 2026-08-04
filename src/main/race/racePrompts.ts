@@ -165,6 +165,16 @@ export function repairPrompt(issues: string[]): string {
   ].join('\n');
 }
 
+/** 中断后的断点续接（agy 会话保留 conversation_id，模型带着原上下文接着
+ *  跑）。提醒交卷口径，防模型在断点处跑偏成闲聊。仅用于竞速选手（规划/
+ *  反驳阶段）— 这些阶段的产物本就要求直接作为正文输出。 */
+export function continuePrompt(): string {
+  return L(
+    '刚才中断了，请从中断点继续并交卷（完整内容直接作为回复正文输出，不要写入任何文件）。',
+    'Interrupted earlier. Please resume from where you stopped, then finish and hand in (output the full content as your reply body — do not write to any file).',
+  );
+}
+
 /**
  * Parse the auditor's reply into a verdict. Looks for the machine-readable
  * `VERDICT: PASS/FAIL` line; falls back to keyword heuristics.
