@@ -520,6 +520,7 @@ const zh = {
   agyNoQuotaData: '无额度数据',
   agyQuotaFailed: '额度查询失败',
   agyQuotaLoading: '额度加载中…',
+  agyCooling: '冷却中',
   agySwitchFailed: '切换失败：{err}',
   // —— opencode 模型选择器 ——
   ocModelLoading: '模型加载中…',
@@ -1238,6 +1239,7 @@ const en: Record<MsgKey, string> = {
   agyNoQuotaData: 'No quota data',
   agyQuotaFailed: 'Quota query failed',
   agyQuotaLoading: 'Loading quota…',
+  agyCooling: 'Cooling down',
   agySwitchFailed: 'Switch failed: {err}',
   // —— opencode model picker ——
   ocModelLoading: 'Loading models…',

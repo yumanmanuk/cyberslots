@@ -1263,6 +1263,8 @@ function AntigravityAccountsCard(): JSX.Element {
                 const q = quota[a.id];
                 const isActive = snap.active && a.email === snap.active;
                 const switching = switchingId === a.id;
+                const coolingMs = snap.blocked?.[a.email];
+                const cooling = coolingMs !== undefined && coolingMs > Date.now();
                 return (
                   <div
                     key={a.id}
@@ -1272,6 +1274,11 @@ function AntigravityAccountsCard(): JSX.Element {
                       <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={a.email}>
                         {a.email}
                       </span>
+                      {cooling && (
+                        <span className="shrink-0 rounded bg-warn/15 px-1.5 text-[10px] text-warn">
+                          {t('agyCooling')} · {fmtAgyReset(Math.max(1, Math.ceil((coolingMs - Date.now()) / 1000)))}
+                        </span>
+                      )}
                       {isActive ? (
                         <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">{t('agyCurrent')}</span>
                       ) : (

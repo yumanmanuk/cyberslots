@@ -1342,8 +1342,22 @@ async function autoSwitchAgy(get: GetFn, sessionId: string, reason: 'exhausted' 
     const blockedEmails = blockedEmailsOf(snap);
     const target = pickAgySwitchTarget(quotas, snap.active, t5h, t7d, blockedEmails);
     if (!target) {
-      // 无合格目标：耗尽兜底 → 打开手动弹窗（switchAgyAccount 已赛马感知）；主动 → 静默放弃。
-      if (reason === 'exhausted') useChatStore.setState({ agySwitchFor: sessionId });
+      // 无合格目标分两路：候选全在冷却期（全池冷却）→ 公告 + 回退手动弹窗
+      // （手动切号不受 blocked 约束，是逃生口），exhausted/threshold 两路一致；
+      // 否则 exhausted 弹手动窗、主动 threshold 静默放弃（旧行为）。
+      const candidates = quotas.filter((q) => q.email !== snap.active && (q.ok || blockedEmails.has(q.email)));
+      const allCooling = blockedEmails.size > 0 && candidates.length > 0 && candidates.every((q) => blockedEmails.has(q.email));
+      if (allCooling) {
+        announceSystem(
+          sessionId,
+          (useChatStore.getState().settings?.language ?? 'zh') === 'zh'
+            ? '⚠ 导入池账号全部处于额度冷却期，已停止自动切号 —— 请等重置或手动选择账号。'
+            : '⚠ All imported accounts are in quota cooldown — auto-switch paused. Wait for resets or pick an account manually.',
+        );
+        useChatStore.setState({ agySwitchFor: sessionId });
+      } else if (reason === 'exhausted') {
+        useChatStore.setState({ agySwitchFor: sessionId });
+      }
       return;
     }
     const from = snap.active ?? '?';

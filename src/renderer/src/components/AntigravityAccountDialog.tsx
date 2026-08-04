@@ -50,6 +50,7 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
 
   const [accounts, setAccounts] = useState<AgyAccount[]>([]);
   const [active, setActive] = useState<string | undefined>();
+  const [blocked, setBlocked] = useState<Record<string, number>>({});
   const [quota, setQuota] = useState<Record<string, AgyQuotaInfo>>({});
   const [quotaFailed, setQuotaFailed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -71,6 +72,9 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
         if (snap.error) setError(snap.error);
         setAccounts(snap.accounts);
         setActive(snap.active);
+        // 冷却表随快照下发（main 唯一真源）：冷却账号显示「冷却中」占位；
+        // 手动切号是逃生口，不据此禁选。
+        setBlocked(snap.blocked ?? {});
         setLoading(false);
       })
       .catch((e) => {
@@ -154,6 +158,8 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
               const q = quota[a.id];
               const isActive = active && a.email === active;
               const busy = busyId === a.id;
+              const coolingMs = blocked[a.email];
+              const cooling = coolingMs !== undefined && coolingMs > Date.now();
               return (
                 <button
                   key={a.id}
@@ -166,6 +172,11 @@ export default function AntigravityAccountDialog(): JSX.Element | null {
                   <div className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{a.email}</span>
                     {isActive && <span className="shrink-0 rounded bg-accent/15 px-1.5 text-[10px] text-accent">{t('agyCurrent')}</span>}
+                    {cooling && (
+                      <span className="shrink-0 rounded bg-warn/15 px-1.5 text-[10px] text-warn">
+                        {t('agyCooling')} · {fmtReset(Math.max(1, Math.ceil((coolingMs - Date.now()) / 1000)), t)}
+                      </span>
+                    )}
                     {busy && <BrandSpinner size={13} />}
                   </div>
                   {q && q.ok && q.groups.length > 0 ? (
