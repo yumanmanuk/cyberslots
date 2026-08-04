@@ -184,7 +184,10 @@ input[type='number']::-webkit-inner-spin-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  vertical-align: baseline;
+  /* text-top 而非 baseline：baseline 依赖首个 flex 项的基线（文件夹胶囊的
+     ::before 是无基线空盒，三类胶囊会各不相同，实测 file/sel 低 4px、folder
+     低 1px）；text-top 纯按盒几何对齐父字体 em 盒顶，三类统一，残差 <1px。 */
+  vertical-align: text-top;
   margin: 0 1px;
   padding: 1px 7px 1px 6px;
   border: 1px solid var(--line);
@@ -203,6 +206,9 @@ input[type='number']::-webkit-inner-spin-button {
   content: '</>';
   font-family: Iosevka, 'Cascadia Code', Consolas, monospace;
   font-size: 10px;
+  /* lh1：10px 小字继承 1.5 行高时行盒虽居中、字形墨迹却相对 12.5px
+     文件名下沉 ~2px（实测）；lh1 让 em 盒居中，与文件名的字形中心重合。 */
+  line-height: 1;
   opacity: 0.7;
 }
 
@@ -223,6 +229,7 @@ input[type='number']::-webkit-inner-spin-button {
 .oc-sel-chip .oc-sel-range {
   font-family: Iosevka, 'Cascadia Code', Consolas, monospace;
   font-size: 10px;
+  line-height: 1; /* 同 ::before — 小字 lh1.5 会让字形相对文件名下沉 */
   color: var(--accent);
   opacity: 0.9;
 }
@@ -375,6 +382,9 @@ input[type='number']::-webkit-inner-spin-button {
    Thinking / Exploring / Generating 等进行态文字：从左到右的流光扫过
    （claude code 同款）。用渐变剪切文字实现，颜色跟随主题 ink 变量。 */
 .shimmer-text {
+  /* background-clip: text 的绘制区域被 line box 裁剪，leading-none 时 g/j/y
+     等下伸笔画会被切掉；留出少量底部内边距保住 descender */
+  padding-bottom: 0.08em;
   background: linear-gradient(90deg, var(--ink-faint) 0%, var(--ink) 50%, var(--ink-faint) 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -697,12 +707,14 @@ input[type='number']::-webkit-inner-spin-button {
   70%,
   100% {
     opacity: 0.25;
-    transform: scale(0.68);
+    transform: scale(0.68) rotate(0deg);
   }
 
+  /* 峰值转到 45°：四角星芒此刻偏离最大（90° 即重合回原形），
+     视觉上像星星眨了一下，比单纯缩放在小尺寸下更可辨 */
   35% {
     opacity: 1;
-    transform: scale(1);
+    transform: scale(1) rotate(45deg);
   }
 }
 

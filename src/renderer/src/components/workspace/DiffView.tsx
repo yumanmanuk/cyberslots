@@ -19,12 +19,15 @@ export default function DiffView({
   sessionId,
   path,
   nonce,
+  canRevert = true,
   onClose,
   onRevert,
 }: {
   sessionId: string;
   path: string;
   nonce: number;
+  /** 已接受文件只读查看 diff，隐藏回退按钮。 */
+  canRevert?: boolean;
   onClose: () => void;
   onRevert: () => void;
 }): JSX.Element {
@@ -53,13 +56,15 @@ export default function DiffView({
         </span>
         <span className="font-mono text-[11px] text-ok">+{adds}</span>
         <span className="font-mono text-[11px] text-err">-{dels}</span>
-        <button
-          title={t('wsRevertFileTitle')}
-          onClick={onRevert}
-          className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-err"
-        >
-          <RotateCcw size={13} />
-        </button>
+        {canRevert && (
+          <button
+            title={t('wsRevertFileTitle')}
+            onClick={onRevert}
+            className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-err"
+          >
+            <RotateCcw size={13} />
+          </button>
+        )}
         <button title={t('close')} onClick={onClose} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-active hover:text-ink">
           <X size={14} />
         </button>

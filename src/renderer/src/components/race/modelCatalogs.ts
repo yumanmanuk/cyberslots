@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from 'react';
 
-import type { EngineConfigsSnapshot, EngineId, OmpCatalog, OpencodeCatalog } from '@shared/types';
+import type { CodexCatalogModel, EngineConfigsSnapshot, EngineId, OmpCatalog, OpencodeCatalog } from '@shared/types';
 import { useChatStore } from '../../store/chatStore';
 
 export interface ModelOption {
@@ -57,6 +57,49 @@ export function claudeModelLabel(alias: string, custom: string | undefined, lang
   if (custom) return `${custom}（${CLAUDE_ALIAS_SHORT[alias] ?? alias}）`;
   if (alias === 'default') return lang === 'en' ? 'Default (follows login)' : 'Default（跟随登录）';
   return CLAUDE_MODELS.find((m) => m.value === alias)?.label ?? alias;
+}
+
+/** antigravity slug → 友好显示名（composer 模型选择器 + 设置页默认模型下拉 +
+ *  回答信息 tooltip 共用；与 AntigravityAdapter.AGY_MODEL_SLUGS 对齐）。 */
+export const ANTIGRAVITY_LABELS: Record<string, string> = {
+  'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
+  'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
+  'gemini-3.1-pro-high': 'Gemini 3.1 Pro (High)',
+  'gemini-3.6-flash-high': 'Gemini 3.6 Flash (High)',
+  'gemini-3.6-flash-medium': 'Gemini 3.6 Flash (Medium)',
+  'gemini-3.5-flash-medium': 'Gemini 3.5 Flash (Medium)',
+};
+
+/** Claude Code 模型别名 → 友好显示名（与 ClaudeAdapter.CLAUDE_MODEL_SLUGS 对齐）。 */
+export const CLAUDE_LABELS: Record<string, string> = {
+  default: 'Default（默认）',
+  sonnet: 'Claude Sonnet',
+  opus: 'Claude Opus',
+  haiku: 'Claude Haiku',
+};
+
+/** 模型 slug → 展示名的统一解析链（Composer 选择器与回答信息 tooltip 共用）：
+ *  claude 自定义映射（第三方网关 env）→ codex 目录 displayName → omp 目录
+ *  displayName → antigravity/claude 静态表 → 原始 slug。 */
+export function modelDisplayLabel(
+  engine: EngineId | undefined,
+  id: string,
+  ctx: {
+    codexCatalog?: CodexCatalogModel[];
+    ompCatalog?: OmpCatalog | null;
+    claudeLabels?: Record<string, string> | null;
+    lang: 'zh' | 'en';
+  },
+): string {
+  if (!id) return '';
+  if (engine === 'claude') return claudeModelLabel(id, ctx.claudeLabels?.[id], ctx.lang);
+  return (
+    ctx.codexCatalog?.find((c) => c.slug === id)?.displayName ??
+    (engine === 'omp' ? ctx.ompCatalog?.models.find((m) => m.slug === id)?.displayName : undefined) ??
+    ANTIGRAVITY_LABELS[id] ??
+    CLAUDE_LABELS[id] ??
+    id
+  );
 }
 
 /** omp 的 ACP 思考值域＝off/auto + 模型目录 thinking[] 精细档（动态扩展）。 */

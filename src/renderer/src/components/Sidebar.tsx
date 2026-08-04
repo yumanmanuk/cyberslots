@@ -410,11 +410,24 @@ function EnginePick({
 }): JSX.Element {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [dropUp, setDropUp] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const availability = useChatStore((s) => s.engineAvailability);
   const engineOrder = useEngineOrder();
   useEscClose(open, () => setOpen(false));
+  // 下拉锚点：fixed 定位脱离侧栏 overflow-y 滚动容器的裁剪（absolute 会在
+  // 容器下缘被切掉底部引擎项，同 DotMenu 的修法）；下方剩余空间不足且上方
+  // 更宽裕时向上弹出，避免菜单越出窗口下缘。
+  const dropStyle = (): React.CSSProperties => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return {};
+    const below = window.innerHeight - r.bottom;
+    const up = below < 180 && r.top > below;
+    return {
+      position: 'fixed',
+      ...(up ? { bottom: window.innerHeight - r.top + 2 } : { top: r.bottom + 2 }),
+      right: Math.max(8, window.innerWidth - r.right),
+    };
+  };
   return (
     <div className="relative">
       <button
@@ -422,11 +435,6 @@ function EnginePick({
         title={title}
         onClick={(e) => {
           e.stopPropagation();
-          if (!open) {
-            // 靠近视口底部时向上弹出，避免菜单被窗口下缘遮挡（chats 分组靠底时）。
-            const rect = btnRef.current?.getBoundingClientRect();
-            setDropUp(!!rect && window.innerHeight - rect.bottom < 170);
-          }
           setOpen(!open);
         }}
         className={btnClass}
@@ -437,7 +445,8 @@ function EnginePick({
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div
-            className={`absolute right-0 z-20 ${multiRootBadge ? 'w-44' : 'w-36'} rounded-xl border border-line bg-bg-input py-1 shadow-lg ${dropUp ? 'bottom-6' : 'top-6'}`}
+            style={dropStyle()}
+            className={`z-20 max-h-[70vh] overflow-y-auto ${multiRootBadge ? 'w-44' : 'w-36'} rounded-xl border border-line bg-bg-input py-1 shadow-lg`}
           >
             <MenuSection label={t('pickEngine')} />
             {engineOrder.map((id) => {
@@ -576,6 +585,16 @@ function ProjectGroup({
   const convertProjectToWorkspace = useChatStore((s) => s.convertProjectToWorkspace);
   const createSession = useChatStore((s) => s.createSession);
   const archiveSession = useChatStore((s) => s.archiveSession);
+  const deleteSession = useChatStore((s) => s.deleteSession);
+  // 组内是否还有未归档会话（取全量列表，不受侧栏筛选器影响）。谓词与
+  // groupSessions 的项目分组规则一致：无 workspaceId 或其 workspaceId
+  // 不在现有工作区集内（孤儿）才算本项目成员——与下方 archiveAll 同源。
+  const hasLiveSessions = useChatStore((s) => {
+    const wsIds = new Set((s.settings?.workspaces ?? []).map((w) => w.id));
+    return s.sessions.some(
+      (x) => !x.archived && x.cwd === cwd && x.chatMode === 'work' && (!x.workspaceId || !wsIds.has(x.workspaceId)),
+    );
+  });
   const [expanded, setExpanded] = useState(true);
 
   /** 归档本项目全部未归档会话 — 谓词与 groupSessions 的分组规则一致，
@@ -592,6 +611,18 @@ function ProjectGroup({
         !archiveBlocked(x),
     );
     for (const s of list) await archiveSession(s.id, true);
+  };
+
+  /** 从侧栏移除空项目：删除该 cwd 下全部已归档会话（项目按 cwd 派生，
+   *  归档会话清空后项目自然消失）。组内还有未归档对话时禁用——先归档。
+   *  谓词与 archiveAll 同源，只取 archived 分支。 */
+  const removeFromSidebar = async (): Promise<void> => {
+    const { sessions, settings } = useChatStore.getState();
+    const wsIds = new Set((settings?.workspaces ?? []).map((w) => w.id));
+    const list = sessions.filter(
+      (x) => x.archived && x.cwd === cwd && x.chatMode === 'work' && (!x.workspaceId || !wsIds.has(x.workspaceId)),
+    );
+    for (const s of list) await deleteSession(s.id);
   };
 
   /** Project → Workspace：选一个新目录，和现有 cwd 合并成多目录工作区，
@@ -617,7 +648,22 @@ function ProjectGroup({
         <DotMenu
           items={[
             { icon: <FolderPlus size={13} />, label: t('convertToWorkspace'), onClick: () => void convert() },
-            { icon: <Archive size={13} />, label: t('archiveAllChats'), confirmLabel: t('confirmArchive'), onClick: () => void archiveAll() },
+            {
+              icon: <Archive size={13} />,
+              label: t('archiveAllChats'),
+              confirmLabel: t('confirmArchive'),
+              disabled: !hasLiveSessions,
+              onClick: () => void archiveAll(),
+            },
+            {
+              icon: <Trash2 size={13} />,
+              label: t('removeWorkspace'),
+              danger: true,
+              confirmLabel: t('confirmDelete'),
+              disabled: hasLiveSessions,
+              title: hasLiveSessions ? t('removeWorkspaceBlocked') : undefined,
+              onClick: () => void removeFromSidebar(),
+            },
           ]}
           footer={(close) => (
             <>
@@ -653,6 +699,18 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
   // 反应式拦截态：会话在跑 / 名下有进行中赛马（选择器返回布尔，不产生新引用）。
   const raceBusy = useRaceStore((s) => Object.values(s.races).some((g) => g.parentSessionId === meta.id && isRaceActive(g)));
   const blocked = meta.status === 'running' || meta.status === 'starting' || raceBusy;
+  // 名下赛马状态提示（会话自身空闲时兜底显示）：等用户处理
+  // （裁判阶段等决策/定稿、被打断待恢复）优先于在跑；config/done 不提示。
+  const raceHint = useRaceStore((s) => {
+    let running = false;
+    for (const g of Object.values(s.races)) {
+      if (g.parentSessionId !== meta.id) continue;
+      if (g.interrupted && g.stage !== 'done') return 'awaiting' as const;
+      if (g.stage === 'judging' && (!g.adopt || g.finalPlan)) return 'awaiting' as const;
+      if (isRaceActive(g)) running = true;
+    }
+    return running ? ('running' as const) : null;
+  });
   const [confirming, setConfirming] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -695,9 +753,10 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
           </button>
         )}
         {/* 右侧状态位（codex 风）：运行中灰色菜单 / 待回答黄色问号 /
-            报错红色叹号 / 未读（已完成未查看）金色实心点；否则显相对时间。 */}
+            报错红色叹号 / 名下赛马待处理或进行中（会话自身空闲时）/
+            未读（已完成未查看）金色实心点；否则显相对时间。 */}
         <span className="flex shrink-0 items-center group-hover:hidden">
-          <RowIndicator meta={meta} />
+          <RowIndicator meta={meta} raceHint={raceHint} />
         </span>
         <button
           title={blocked ? t('archiveBlockedBusy') : confirming ? t('confirmArchive') : t('archive')}
@@ -739,8 +798,10 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
 }
 
 /** 行尾状态指示（取代左侧小图标）：spinner=运行 / 黄问号=等回答 /
- *  红叹号=报错 / 金点=未读；空闲已读显示相对时间。 */
-function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
+ *  红叹号=报错 / 金点=未读；空闲已读显示相对时间。会话自身空闲且名下
+ *  有赛马时兜底提示赛马状态：黄问号=赛马等处理（待决策/定稿/恢复），
+ *  spinner=赛马进行中。 */
+function RowIndicator({ meta, raceHint }: { meta: SessionMeta; raceHint: 'awaiting' | 'running' | null }): JSX.Element {
   const t = useT();
   switch (meta.status) {
     case 'running':
@@ -752,6 +813,18 @@ function RowIndicator({ meta }: { meta: SessionMeta }): JSX.Element {
     case 'error':
       return <CircleAlert size={13} className="shrink-0 text-err" />;
     default:
+      if (raceHint === 'awaiting')
+        return (
+          <span title={t('raceAwaitingTitle')} className="flex shrink-0 items-center">
+            <CircleHelp size={14} className="animate-pulse text-warn" />
+          </span>
+        );
+      if (raceHint === 'running')
+        return (
+          <span title={t('raceRunningTitle')} className="flex shrink-0 items-center">
+            <BrandSpinner size={13} className="text-ink-soft" />
+          </span>
+        );
       if (meta.unread) return <span title={t('unreadDoneTitle')} className="h-2 w-2 shrink-0 rounded-full bg-accent" />;
       return <span className="text-[10px] tabular-nums text-ink-faint">{timeAgo(meta.updatedAt)}</span>;
   }

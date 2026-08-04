@@ -82,9 +82,7 @@ function buildStream(messages: UnifiedMessage[]): StreamItem[] {
 
 // --------------------------------------------- turn-level "Worked for" fold
 
-type RenderItem = StreamItem | { type: 'worked'; turnId: number; durationMs?: number; items: StreamItem[] };
-
-const itemTurnId = (it: StreamItem): number => (it.type === 'msg' ? it.msg.turnId : it.entries[0]!.turnId);
+type RenderItem = StreamItem | { type: 'worked'; key: string; durationMs?: number; items: StreamItem[] };
 
 /** 过程块判定（思考 / 独立工具 / 工具组）— trailing text 分界用。 */
 const isProcessItem = (it: StreamItem): boolean =>
@@ -99,46 +97,61 @@ const isProcessItem = (it: StreamItem): boolean =>
  * 边界发生一次，不破坏活动窗/流式贴底体验。
  */
 function foldFinishedTurns(items: StreamItem[], messages: UnifiedMessage[]): RenderItem[] {
-  // 完成回合 = 存在 turn_end；同时记下其时长（Worked for 的数据源）。
-  const turnEnds = new Map<number, { durationMs?: number; createdAt: number }>();
+  // 回合「代」划分：同一 turnId 一旦被 turn_end 封闭，之后再出现的同号
+  // 消息属于新一代 —— 引擎切换/重启后 turnId 从 1 重计的存量数据会撞号
+  // （新数据已由主进程重映射保证全局唯一，这里兜底存量）；折叠以「代」
+  // 为单位，进行中的代（其后无 turn_end）永不折叠。
+  const genOf = new Map<string, number>(); // message.id → 代
+  const turnEnds = new Map<string, { durationMs?: number; createdAt: number }>(); // 代键 → turn_end（Worked for 的数据源）
+  const nextGen = new Map<number, number>();
   for (const m of messages) {
-    if (m.kind === 'turn_end') turnEnds.set(m.turnId, { durationMs: m.durationMs, createdAt: m.createdAt });
+    const gen = nextGen.get(m.turnId) ?? 0;
+    genOf.set(m.id, gen);
+    if (m.kind === 'turn_end') {
+      turnEnds.set(m.turnId + '#' + gen, { durationMs: m.durationMs, createdAt: m.createdAt });
+      nextGen.set(m.turnId, gen + 1);
+    }
   }
   if (turnEnds.size === 0) return items;
 
+  const itemGenKey = (it: StreamItem): string => {
+    const head = it.type === 'msg' ? it.msg : it.entries[0]!;
+    return head.turnId + '#' + (genOf.get(head.id) ?? 0);
+  };
+
   // 各回合最后一个过程块的位置 — 之后的 text 是最终结论（pinned）。
-  const lastProcessIdx = new Map<number, number>();
+  const lastProcessIdx = new Map<string, number>();
   items.forEach((it, i) => {
-    if (isProcessItem(it)) lastProcessIdx.set(itemTurnId(it), i);
+    if (isProcessItem(it)) lastProcessIdx.set(itemGenKey(it), i);
   });
 
   const collapsed = (it: StreamItem, i: number): boolean => {
-    const tid = itemTurnId(it);
-    if (!turnEnds.has(tid)) return false; // 进行中回合一律走现状。
+    const key = itemGenKey(it);
+    if (!turnEnds.has(key)) return false; // 进行中回合一律走现状。
     if (it.type === 'tools') return true;
     const m = it.msg;
     if (m.kind === 'thinking' || m.kind === 'tool_call') return true;
     // 中间陈述 text（在末个过程块之前）收进折叠；trailing / planDoc 保持可见。
-    if (m.kind === 'text' && !m.planDoc) return i < (lastProcessIdx.get(tid) ?? -1);
+    if (m.kind === 'text' && !m.planDoc) return i < (lastProcessIdx.get(key) ?? -1);
     return false; // user / plan / turn_end / system / error / ask_user … 均 pinned。
   };
 
   const rendered: RenderItem[] = [];
-  const workedByTurn = new Map<number, Extract<RenderItem, { type: 'worked' }>>();
+  const workedByTurn = new Map<string, Extract<RenderItem, { type: 'worked' }>>();
   items.forEach((it, i) => {
     if (!collapsed(it, i)) {
       rendered.push(it);
       return;
     }
-    const tid = itemTurnId(it);
-    let w = workedByTurn.get(tid);
+    const key = itemGenKey(it);
+    let w = workedByTurn.get(key);
     if (!w) {
-      const end = turnEnds.get(tid)!;
+      const end = turnEnds.get(key)!;
       // 历史数据缺 durationMs → 退回「首个过程块 → turn_end」时间跨度。
       const start = it.type === 'msg' ? it.msg.createdAt : it.entries[0]!.createdAt;
       const fallback = end.createdAt > start ? end.createdAt - start : undefined;
-      w = { type: 'worked', turnId: tid, durationMs: end.durationMs ?? fallback, items: [] };
-      workedByTurn.set(tid, w);
+      w = { type: 'worked', key, durationMs: end.durationMs ?? fallback, items: [] };
+      workedByTurn.set(key, w);
       rendered.push(w);
     }
     w.items.push(it);
@@ -170,7 +183,7 @@ export default function MessageList({
             <ToolGroup gkind={it.gkind} entries={it.entries} />
           </div>
         ) : (
-          <div key={`worked-${it.turnId}`} data-msg-id={it.items[0]!.type === 'msg' ? (it.items[0] as Extract<StreamItem, { type: 'msg' }>).msg.id : (it.items[0] as Extract<StreamItem, { type: 'tools' }>).entries[0]!.id}>
+          <div key={`worked-${it.key}`} data-msg-id={it.items[0]!.type === 'msg' ? (it.items[0] as Extract<StreamItem, { type: 'msg' }>).msg.id : (it.items[0] as Extract<StreamItem, { type: 'tools' }>).entries[0]!.id}>
             <WorkedFor durationMs={it.durationMs} items={it.items} sessionId={sessionId} />
           </div>
         ),
@@ -222,18 +235,19 @@ function WorkedFor({
 
 // -------------------------------------------------------------- tool group
 
-/** 工具活动组（explore / shell）—— 方案 A「定高活动窗」：
- *  进行中固定高度（状态行 + 1px 扫描线 + 3 行历史视窗，新行从底部推入、
- *  旧行上移到顶部被渐隐遮罩吞掉），高度恒定不随步数增长；回合结束坍缩成
- *  单行摘要，点击展开完整历史（含各行的输出/diff 查看入口）。这样「进行
- *  →折叠」的高度突变只发生一次且在回合边界，消除页面上下跳动。 */
+/** 工具活动组（explore / shell）—— 活动窗方案：
+ *  进行中 = 状态行 + 1px 扫描线 + 历史视窗（按可见行数 20/40/60px 渐进，
+ *  3 行封顶；新行从底部推入、旧行上移到顶部被渐隐遮罩吞掉），回合结束
+ *  坍缩成单行摘要，点击展开完整历史（含各行的输出/diff 查看入口）。
+ *  3 行后高度恒定不随步数增长，「进行→折叠」的高度突变只发生一次且在
+ *  回合边界，页面跳动被压到最小。 */
 function ToolGroup({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[] }): JSX.Element {
   const tools = entries.filter((e): e is ToolMsg => e.kind === 'tool_call');
   const active = entries.some((e) =>
     e.kind === 'tool_call' ? e.status === 'in_progress' || e.status === 'pending' : e.streaming,
   );
 
-  // 进行中 → 定高活动窗（不可折叠、高度恒定）。
+  // 进行中 → 活动窗（不可折叠；1~3 行渐进增高，3 行后恒定）。
   if (active) return <ActivityWindow gkind={gkind} entries={entries} />;
 
   // 已完成 → 单行摘要，点击展开完整历史。
@@ -252,9 +266,12 @@ function ToolGroup({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[]
   return <ToolSummary Icon={gkind === 'shell' ? TerminalSquare : Telescope} summary={summary} failed={failed} entries={entries} gkind={gkind} />;
 }
 
-/** 进行中的定高活动窗：状态行（品牌 spinner + 动词流光 + 步数·用时）
- *  + 扫描线 + 60px（3 行）视窗；视窗内容底部对齐，新行推入、旧行溢出
- *  顶部被渐隐遮罩吞掉。只渲染尾部若干行（完整历史在折叠态可查）。 */
+/** 进行中的活动窗：状态行（品牌 spinner + 动词流光 + 步数·用时）
+ *  + 扫描线 + 历史视窗。视窗按可见行数 20/40/60px 渐进——1~2 行时收紧
+ *  不留空档（早先固定 60px，仅 1 行时该行被钉在视窗底部，扫描线与明细
+ *  行之间空出 40px 大缝）；3 行后定高不再增长。内容底部对齐，新行推入、
+ *  旧行溢出顶部被渐隐遮罩吞掉（遮罩仅在溢出时启用，否则会把仅有的行
+ *  也淡掉）。只渲染尾部若干行（完整历史在折叠态可查）。 */
 function ActivityWindow({ gkind, entries }: { gkind: GroupKind; entries: GroupEntry[] }): JSX.Element {
   const start = entries[0]?.createdAt ?? Date.now();
   const [now, setNow] = useState(() => Date.now());
@@ -262,11 +279,14 @@ function ActivityWindow({ gkind, entries }: { gkind: GroupKind; entries: GroupEn
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
-  // 定高遮罩视窗内无法行内展开（会被裁切），故被点开的思考正文
+  // 遮罩视窗内无法行内展开（会被裁切），故被点开的思考正文
   // 渲染到视窗下方（抽屉）——用户主动展开，允许的高度变化。
   const [openThink, setOpenThink] = useState<string | null>(null);
   const steps = entries.filter((e) => e.kind === 'tool_call').length;
   const tail = entries.slice(-8);
+  // 视窗行数封顶 3 行；超过即溢出（启用顶部渐隐遮罩吞旧行）。
+  const rows = Math.min(tail.length, 3);
+  const overflowing = tail.length > rows;
   const revealed = openThink
     ? (entries.find((e) => e.id === openThink && e.kind === 'thinking') as ThinkMsg | undefined)
     : undefined;
@@ -274,19 +294,21 @@ function ActivityWindow({ gkind, entries }: { gkind: GroupKind; entries: GroupEn
     <div className="text-ui">
       <div className="flex items-center gap-2" style={{ height: 22 }}>
         <BrandSpinner size={14} className="shrink-0 text-accent" />
-        <span className="shimmer-text text-[12.5px] font-medium">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
-        <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-ink-faint">
+        <span className="shimmer-text text-[12.5px] font-medium leading-[16px]">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
+        <span className="ml-auto shrink-0 font-mono text-[11px] leading-none tabular-nums text-ink-faint">
           {steps > 0 ? `${steps} ${steps === 1 ? 'step' : 'steps'} · ` : ''}
           {fmtElapsed(now - start)}
         </span>
       </div>
       <div className="tool-scan my-[3px]" />
       <div
-        className="overflow-hidden"
+        className="overflow-hidden transition-[height] duration-150 ease-out"
         style={{
-          height: 60,
-          WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, #000 22px)',
-          maskImage: 'linear-gradient(to bottom, transparent 0, #000 22px)',
+          // 行高 20px × min(行数, 3)：1~2 行时视窗随之收窄，消除状态行与
+          // 明细行之间的空档；3 行后定高，增高由外层 ResizeObserver 贴底跟随。
+          height: rows * 20,
+          WebkitMaskImage: overflowing ? 'linear-gradient(to bottom, transparent 0, #000 22px)' : undefined,
+          maskImage: overflowing ? 'linear-gradient(to bottom, transparent 0, #000 22px)' : undefined,
         }}
       >
         <div className="flex min-h-full flex-col justify-end">
@@ -348,14 +370,14 @@ function CompactRow({
   return (
     <div className="flex items-center gap-2" style={{ height: 20 }}>
       <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${running ? 'bg-accent tool-tick-run' : failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
-      <span className={`shrink-0 text-[12px] ${running ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>{verb}</span>
+      <span className={`shrink-0 text-[12px] leading-none ${running ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>{verb}</span>
       {object && object !== verb && (
-        <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-faint">{object}</span>
+        <span className="min-w-0 truncate font-mono text-[11.5px] leading-[1.2] text-ink-faint">{object}</span>
       )}
       {matches != null && !running && (
-        <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-ink-faint/80">{matches}</span>
+        <span className="ml-auto shrink-0 text-[10.5px] leading-none tabular-nums text-ink-faint/80">{matches}</span>
       )}
-      {failed && <span className="ml-auto shrink-0 text-[10.5px] text-err">failed</span>}
+      {failed && <span className="ml-auto shrink-0 text-[10.5px] leading-none text-err">failed</span>}
     </div>
   );
 }
@@ -439,11 +461,22 @@ function fmtElapsed(ms: number): string {
 // ------------------------------------------------------ activity indicator
 
 /** 流末尾是否已有可见的进行态元素（自带 Thinking/Exploring/Generating/
- *  Running/Waiting 标签）— 有则指示器静默，避免同词重复。 */
+ *  Running/Waiting 标签）— 有则指示器静默，避免同词重复。
+ *  与渲染管线的两条同规约定（违反即「指示器静默但画面全空」）：
+ *  ① todo 工具行不渲染（buildStream 同规）→ 不算可见活动；
+ *  ② 已被 turn_end 封闭的「代」折进 Worked 行不可见（foldFinishedTurns
+ *  同规；撞号存量数据里同号新一代位置更晚，不受 closedTurns 影响）。 */
 function hasVisibleActivity(messages: UnifiedMessage[]): boolean {
+  const closedTurns = new Set<number>(); // 倒扫途中已遇 turn_end 的 turnId
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
+    if (m.kind === 'turn_end') {
+      closedTurns.add(m.turnId);
+      continue;
+    }
+    if (closedTurns.has(m.turnId)) continue;
     if (m.kind === 'user') return false;
+    if (m.kind === 'tool_call' && (m.toolName ?? '').toLowerCase().includes('todo')) continue;
     if ((m.kind === 'thinking' || m.kind === 'text') && m.streaming) return true;
     if (m.kind === 'tool_call' && (m.status === 'in_progress' || m.status === 'pending')) return true;
     if ((m.kind === 'permission' || m.kind === 'ask_user') && m.answeredOptionId === undefined) return true;

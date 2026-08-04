@@ -10,14 +10,15 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Bell, Box, ChevronRight, Eye, EyeOff, FileLock2, GripVertical, Info, Plus, RefreshCw, Search, Settings2, Upload, X } from 'lucide-react';
 
 import type { AgyAccountsSnapshot, AgyImportCandidate, AgyQuotaInfo, AppSettings, ClaudeConfigSnapshot, CodexConfigSnapshot, CompatAuditKind, CompatAuditSnapshot, ContextFallbackRule, EngineConfigsSnapshot, EngineId, KimiConfigSnapshot, NotificationSettings, OmpCatalog, OmpConfigSnapshot, OpencodeCatalog, OpencodeConfigSnapshot, RaceRoleDefaultSetting, RouteSupport, TitleGenSettings } from '@shared/types';
-import { RACE_ROLES } from '@shared/race';
-import { useChatStore } from '../store/chatStore';
+import { isRaceActive, RACE_ROLES } from '@shared/race';
+import { announceSystem, useChatStore } from '../store/chatStore';
+import { useRaceStore } from '../store/raceStore';
 import { agyWindowLabel, engineHintKey, raceRoleKey, translate, useT, type MsgKey } from '../i18n';
 import { ENGINE_LABELS, EngineIcon, useEngineOrder } from './EngineIcon';
 import { RaceHorse } from './RaceHorse';
 import { BrandHero, BrandMark, BrandSpinner } from './brand';
 import { effortLabel, useRoleCatalogs } from './race/modelCatalogs';
-import { ANTIGRAVITY_LABELS } from './Composer';
+import { ANTIGRAVITY_LABELS } from './race/modelCatalogs';
 
 type MainCategory = 'general' | 'race' | 'notifications' | 'about';
 /** 导航分类：固定页 + 引擎总览页（'engines'）+ 每引擎一个子页
@@ -47,14 +48,38 @@ export default function SettingsView(): JSX.Element | null {
   const compatByEngine = useChatStore((s) => s.compatAudit?.engines);
   const engineOrder = useEngineOrder();
   const [category, setCategory] = useState<Category>('general');
+  // 导航选中项滑动高亮 — 与新建会话选引擎同款：测量选中按钮位置，
+  // 用绝对定位的胶囊平移过渡代替逐按钮背景瞬移。
+  const navRefs = useRef<Partial<Record<Category, HTMLButtonElement | null>>>({});
+  const [navPill, setNavPill] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  // 跟踪打开/关闭沿 — 只在「刚打开」那一拍复位到通用页（用户页内导航不改分类）。
+  const prevOpenRef = useRef(false);
 
   useEffect(() => {
     if (open) {
-      setCategory('general');
       // 打开设置即探测一次可用性 — 导航置灰不依赖用户先点进某个引擎页。
       void refreshEngineConfigs();
     }
   }, [open, refreshEngineConfigs]);
+
+  useLayoutEffect(() => {
+    // 打开设置回到通用页（仅刚打开那一拍）→ 先复位再测量：重开时高亮
+    // 胶囊直接落在「通用」上，不会先亮上次的分类再滑回。
+    const justOpened = open && !prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (justOpened && category !== 'general') {
+      setCategory('general');
+      return;
+    }
+    const el = navRefs.current[category];
+    if (!el) return;
+    setNavPill((prev) => {
+      const next = { left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight };
+      return prev && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height
+        ? prev
+        : next;
+    });
+  }, [open, category, engineOrder]);
 
   if (!open || !settings) return null;
 
@@ -65,18 +90,25 @@ export default function SettingsView(): JSX.Element | null {
 
   const isEngine = (c: Category): c is EngineId => (engineOrder as string[]).includes(c);
   const navBtnCls = (active: boolean): string =>
-    `mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${active ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+    `relative mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${active ? 'font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
     }`;
 
   return (
     <div className="absolute inset-0 z-30 flex bg-bg-canvas">
       {/* 分类导航 — 与画布同色融合 */}
-      <aside className="flex w-56 shrink-0 flex-col px-3 pb-4 pt-3">
+      <aside className="relative flex w-56 shrink-0 flex-col px-3 pb-4 pt-3">
+        {/* 选中项滑动高亮胶囊 — 同新建会话选引擎：跟随导航项平移 */}
+        {navPill && (
+          <div
+            className="pointer-events-none absolute rounded-lg bg-bg-active shadow-sm transition-all duration-300 ease-out"
+            style={{ left: navPill.left, top: navPill.top, width: navPill.width, height: navPill.height }}
+          />
+        )}
         <button onClick={close} className="mb-3 flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink">
           <ArrowLeft size={15} /> {t('back')}
         </button>
         {CATEGORIES.slice(0, 1).map((c) => (
-          <button key={c.id} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
+          <button key={c.id} ref={(el) => { navRefs.current[c.id] = el; }} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
             {c.icon} {t(c.key)}
           </button>
         ))}
@@ -85,7 +117,8 @@ export default function SettingsView(): JSX.Element | null {
             不禁点 — 页内自带安装指引，全禁用会把指引也锁死。 */}
         <button
           onClick={() => setCategory('engines')}
-          className={`mb-0.5 mt-3 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${category === 'engines' ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+          ref={(el) => { navRefs.current['engines'] = el; }}
+          className={`relative mb-0.5 mt-3 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-ui transition ${category === 'engines' ? 'font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
             }`}
         >
           <Box size={15} /> {t('settingsEngines')}
@@ -96,6 +129,7 @@ export default function SettingsView(): JSX.Element | null {
           return (
             <button
               key={id}
+              ref={(el) => { navRefs.current[id] = el; }}
               onClick={() => setCategory(id)}
               title={installed ? undefined : t('engineNotInstalledHint')}
               className={`${navBtnCls(category === id)} pl-5 ${installed ? '' : 'opacity-55'}`}
@@ -112,7 +146,7 @@ export default function SettingsView(): JSX.Element | null {
         })}
         <div className="mt-3" />
         {CATEGORIES.slice(1).map((c) => (
-          <button key={c.id} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
+          <button key={c.id} ref={(el) => { navRefs.current[c.id] = el; }} onClick={() => setCategory(c.id)} className={navBtnCls(category === c.id)}>
             {c.icon} {t(c.key)}
           </button>
         ))}
@@ -464,6 +498,7 @@ function EnginesOverviewPane({ commit, onOpenEngine }: PaneProps & { onOpenEngin
       </Section>
       {/* 跨引擎视角的兼容性诊断总卡（各引擎子页内另有单引擎过滤视图） */}
       <CompatAuditCard />
+      <LogsCard />
     </div>
   );
 }
@@ -943,6 +978,9 @@ function fmtAgyReset(sec?: number): string {
  *  OAuth 登录；移除仅删副本，不碰 cockpit / 当前 keyring。 */
 function AntigravityAccountsCard(): JSX.Element {
   const t = useT();
+  const sessions = useChatStore((s) => s.sessions);
+  const sending = useChatStore((s) => s.sending);
+  const races = useRaceStore((s) => s.races);
   const [snap, setSnap] = useState<AgyAccountsSnapshot | null>(null);
   const [quota, setQuota] = useState<Record<string, AgyQuotaInfo>>({});
   const [quotaBusy, setQuotaBusy] = useState(false);
@@ -1038,17 +1076,56 @@ function AntigravityAccountsCard(): JSX.Element {
       })
       .finally(() => setFileBusy(false));
   };
-  /** 手动切号（复用切号弹窗同一 IPC）：覆写 keyring，不携带会话续接。 */
+  /** 手动切号（复用切号弹窗同一 IPC）：覆写 keyring，不携带会话续接。
+   *  主动切号门禁：有进行中的 antigravity 任务时拒绝 —— keyring 是全局
+   *  单槽、即时生效，中途切换会把在飞回合与后续回合劈到两个账号
+   *  （在途 agy 进程启动时已绑定旧账号，见集成文档 §3.9）。 */
   const switchTo = (id: string): void => {
     if (switchingId) return;
+    if (busyAgy > 0) return;
     setSwitchingId(id);
     setSwitchError(null);
+    const from = snap?.active;
     window.cyberslots
       .agyAccountSwitch(id)
-      .then(() => window.cyberslots.agyAccountsList().then(setSnap))
+      .then((res) => {
+        void window.cyberslots.agyAccountsList().then(setSnap);
+        // 对话自动跟随：keyring 实时读取，各 antigravity 会话（含赛马角色）
+        // 下一回合自然用新账号。给普通会话（非赛马角色，角色会话带 raceId）
+        // 插一条跟随公告；赛马靠编排器下一回合自然换号，不插播（同自动切号惯例）。
+        for (const m of useChatStore.getState().sessions) {
+          if (m.engine === 'antigravity' && !m.raceId && m.status !== 'closed') {
+            announceSystem(m.id, t('agyFollowAnnounce', { from: from ?? '?', to: res.email }));
+          }
+        }
+      })
       .catch((e) => setSwitchError(e instanceof Error ? e.message : String(e)))
       .finally(() => setSwitchingId(null));
   };
+
+  /** 进行中的 Antigravity 任务数（主动切号门禁）：
+   *  ① antigravity 会话 running/starting/awaiting 或正在发送 —— 覆盖普通
+   *     会话与赛马角色会话（角色会话也进 sessions 表，运行态同源）；
+   *  ② 兜底扫赛马组：进行中赛马含 antigravity 角色且角色会话尚未收录进
+   *     会话表（race.role 事件竞态窗口）时保守视为忙。 */
+  const busyAgy = useMemo(() => {
+    let n = 0;
+    for (const m of sessions) {
+      if (m.engine !== 'antigravity') continue;
+      if (m.status === 'running' || m.status === 'starting' || m.status === 'awaiting' || sending[m.id]) n++;
+    }
+    for (const g of Object.values(races)) {
+      if (!isRaceActive(g)) continue;
+      if (!Object.values(g.roles).some((r) => r?.engine === 'antigravity')) continue;
+      for (const sid of Object.values(g.sessions)) {
+        if (sid && !sessions.some((m) => m.id === sid)) {
+          n++;
+          break;
+        }
+      }
+    }
+    return n;
+  }, [sessions, sending, races]);
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
@@ -1172,6 +1249,12 @@ function AntigravityAccountsCard(): JSX.Element {
               {t('agyNoneImported')}
             </div>
           )}
+          {/* 进行中任务门禁提示：存在在跑的 antigravity 任务（含赛马角色）时禁止主动切号 */}
+          {busyAgy > 0 && (
+            <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[11.5px] leading-5 text-warn">
+              {t('agyBusySwitch', { n: busyAgy })}
+            </div>
+          )}
           {/* 卡片网格：当前活动账号置顶，其余保持导入顺序（仅展示层排序）。 */}
           <div className="grid grid-cols-2 gap-2">
             {[...snap.accounts]
@@ -1183,7 +1266,7 @@ function AntigravityAccountsCard(): JSX.Element {
                 return (
                   <div
                     key={a.id}
-                    className={`flex flex-col rounded-xl border p-2.5 ${isActive ? 'border-accent/50 bg-accent/5' : 'border-line bg-bg-input'}`}
+                    className={`flex flex-col rounded-xl border p-2.5 transition-colors duration-300 ${isActive ? 'border-accent/50 bg-accent/5' : 'border-line bg-bg-input'}`}
                   >
                     <div className="mb-1.5 flex items-center gap-1.5">
                       <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={a.email}>
@@ -1195,7 +1278,7 @@ function AntigravityAccountsCard(): JSX.Element {
                         <button
                           title={t('agySwitchToTitle')}
                           onClick={() => switchTo(a.id)}
-                          disabled={!!switchingId}
+                          disabled={!!switchingId || busyAgy > 0}
                           className="flex shrink-0 items-center gap-1 rounded-md border border-line px-1.5 py-0.5 text-[10px] text-ink-soft transition hover:bg-bg-hover disabled:opacity-50"
                         >
                           {switching && <BrandSpinner size={10} />}
@@ -1404,6 +1487,38 @@ function CompatAuditCard({ engine }: { engine?: EngineId }): JSX.Element {
           {t('auditOpenLog')}
         </button>
       )}
+    </div>
+  );
+}
+
+/** 程序日志卡 — 本程序自身运行日志（main-/renderer-*.jsonl）的落盘位置与
+ *  入口。区别于上面的引擎兼容性审计（那是协议降级记账），这里是会话/
+ *  引擎进程/赛马/定时任务等程序行为的排障现场。 */
+function LogsCard(): JSX.Element {
+  const t = useT();
+  const [dir, setDir] = useState('');
+  useEffect(() => {
+    void window.cyberslots.logsDir().then(setDir).catch(() => undefined);
+  }, []);
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
+      <div className="mb-1 flex items-center gap-3">
+        <span className="text-[13px] font-semibold">{t('logsTitle')}</span>
+      </div>
+      <div className="mb-2 text-[11px] leading-5 text-ink-faint">{t('logsHint')}</div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => void window.cyberslots.logsOpenDir()}
+          className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover"
+        >
+          {t('logsOpenDir')}
+        </button>
+        {dir && (
+          <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint" title={dir}>
+            {dir}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1814,13 +1929,36 @@ function Segmented({
   onChange: (id: string) => void;
   small?: boolean;
 }): JSX.Element {
+  // 选中项滑动高亮胶囊 — 与新建会话选引擎同款：测量选中按钮位置，
+  // 用绝对定位的胶囊平移过渡代替逐按钮背景瞬移。
+  const btnRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [pill, setPill] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+
+  useLayoutEffect(() => {
+    const el = btnRefs.current[value];
+    if (!el) return;
+    setPill((prev) => {
+      const next = { left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight };
+      return prev && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height
+        ? prev
+        : next;
+    });
+  }, [value, options]);
+
   return (
-    <div className={`inline-flex items-center gap-0.5 rounded-lg border border-line bg-bg-panel ${small ? 'p-0.5' : 'p-1'}`}>
+    <div className={`relative inline-flex items-center gap-0.5 rounded-lg border border-line bg-bg-panel ${small ? 'p-0.5' : 'p-1'}`}>
+      {pill && (
+        <div
+          className="pointer-events-none absolute rounded-md bg-bg shadow-sm transition-all duration-300 ease-out"
+          style={{ left: pill.left, top: pill.top, width: pill.width, height: pill.height }}
+        />
+      )}
       {options.map((o) => (
         <button
           key={o.id}
+          ref={(el) => { btnRefs.current[o.id] = el; }}
           onClick={() => onChange(o.id)}
-          className={`rounded-md transition ${small ? 'px-2 py-0.5 text-[10.5px]' : 'px-3.5 py-1.5 text-ui'} ${value === o.id ? 'bg-bg font-medium text-ink shadow-sm' : 'text-ink-soft hover:text-ink'
+          className={`relative rounded-md transition ${small ? 'px-2 py-0.5 text-[10.5px]' : 'px-3.5 py-1.5 text-ui'} ${value === o.id ? 'font-medium text-ink' : 'text-ink-soft hover:text-ink'
             }`}
         >
           {o.label}

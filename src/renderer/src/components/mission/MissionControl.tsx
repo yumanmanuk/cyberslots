@@ -468,7 +468,7 @@ function CronRow({ task, now }: { task: CronTask; now: number }): JSX.Element {
 
   return (
     <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1 transition hover:bg-bg-hover">
-      <span className={`min-w-0 flex-1 truncate text-[12px] ${task.enabled ? 'text-ink' : 'text-ink-faint line-through'}`}>
+      <span className={`min-w-0 flex-1 truncate text-[12px] ${task.enabled ? 'text-ink' : 'text-ink-faint'}`}>
         {task.name}
       </span>
       <code className="shrink-0 rounded bg-bg-hover px-1.5 text-[10.5px] text-ink-faint">{task.cron}</code>

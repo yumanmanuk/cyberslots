@@ -66,7 +66,7 @@ export default function PlanWidget({ sessionId }: { sessionId: string }): JSX.El
                   <span className="block h-3 w-3 rounded-full border border-ink-faint/50" />
                 )}
               </span>
-              <span className={e.status === 'completed' ? 'text-ink-faint line-through' : e.status === 'in_progress' ? (running ? 'font-medium' : 'text-ink-soft') : ''}>
+              <span className={e.status === 'completed' ? 'text-ink-faint' : e.status === 'in_progress' ? (running ? 'font-medium' : 'text-ink-soft') : ''}>
                 {e.content}
               </span>
             </li>

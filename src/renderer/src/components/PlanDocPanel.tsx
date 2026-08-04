@@ -11,6 +11,7 @@ import { Check, Copy, Download, NotebookText, Play, X } from 'lucide-react';
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
 import { downloadMarkdown, extractPlanTitle } from '../planDoc';
+import MdLink from './MdLink';
 
 export default function PlanDocPanel({
   sessionId,
@@ -70,7 +71,7 @@ export default function PlanDocPanel({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="md-body px-4 py-3 text-[13px]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{text}</ReactMarkdown>
         </div>
       </div>
 

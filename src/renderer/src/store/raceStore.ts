@@ -12,6 +12,7 @@ import { create } from 'zustand';
 
 import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig, RaceRoleConfigs, RaceStage } from '@shared/race';
 import { raceRoleKey, translate } from '../i18n';
+import { rlog } from '../log/logger';
 import { announceSystem, useChatStore } from './chatStore';
 
 interface RaceState {
@@ -54,6 +55,9 @@ interface RaceState {
   resumeRace(): Promise<void>;
   openTune(): void;
   closeTune(): void;
+  /** 手动关闭错误横幅（仅清本地展示态，不影响主进程编排；阶段重试
+   *  入口仍在各泳道的「重试」按钮上）。 */
+  dismissError(): void;
   /** 重试前调整选手配置（仅 racerA/racerB）。 */
   updateRole(role: RaceRole, cfg: RaceRoleConfig): Promise<void>;
   /** 单选手重试：只补跑该选手当前阶段回合。 */
@@ -186,7 +190,11 @@ export const useRaceStore = create<RaceState>((set, get) => ({
   },
 
   async startRace(prompt, cwd, roles, parentSessionId, contextSeed) {
-    const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed });
+    rlog.info('race', 'race start requested', { cwd, promptChars: prompt.length, parentSessionId });
+    const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed }).catch((err) => {
+      rlog.error('race', 'raceCreate ipc failed', { cwd }, err);
+      throw err;
+    });
     // 发起痕迹回流宿主对话 —— 历史里能翻到“这里跑过一场赛马”。
     if (parentSessionId) {
       announceSystem(parentSessionId, translate('raceAnnounceStarted', { prompt: prompt.slice(0, 40) }));
@@ -216,7 +224,10 @@ export const useRaceStore = create<RaceState>((set, get) => ({
       const g = s.races[raceId];
       return g ? { races: { ...s.races, [raceId]: { ...g, adopt: { strategy, comment } } } } : {};
     });
-    await window.cyberslots.raceAdopt(raceId, strategy, comment);
+    await window.cyberslots.raceAdopt(raceId, strategy, comment).catch((err) => {
+      rlog.error('race', 'raceAdopt ipc failed', { raceId, strategy }, err);
+      throw err;
+    });
   },
 
   async revise(annotation) {
@@ -232,7 +243,10 @@ export const useRaceStore = create<RaceState>((set, get) => ({
   async finalize() {
     const raceId = get().activeRaceId;
     if (!raceId) return;
-    await window.cyberslots.raceFinalize(raceId);
+    await window.cyberslots.raceFinalize(raceId).catch((err) => {
+      rlog.error('race', 'raceFinalize ipc failed', { raceId }, err);
+      throw err;
+    });
   },
 
   async resumeRace() {
@@ -256,6 +270,12 @@ export const useRaceStore = create<RaceState>((set, get) => ({
 
   closeTune() {
     set({ tuneOpen: false });
+  },
+
+  dismissError() {
+    const raceId = get().activeRaceId;
+    if (!raceId) return;
+    set((s) => ({ errors: { ...s.errors, [raceId]: undefined } }));
   },
 
   async updateRole(role, cfg) {
@@ -306,6 +326,9 @@ export const useRaceStore = create<RaceState>((set, get) => ({
   async cancelRace() {
     const raceId = get().activeRaceId;
     if (!raceId) return;
-    await window.cyberslots.raceCancel(raceId);
+    await window.cyberslots.raceCancel(raceId).catch((err) => {
+      rlog.error('race', 'raceCancel ipc failed', { raceId }, err);
+      throw err;
+    });
   },
 }));

@@ -61,11 +61,29 @@ export function BrandMark({ size = 16, className = '' }: BrandProps): JSX.Elemen
  * 品牌 loading — 三颗 AI 星芒错峰脉冲（agent 轮流思考），替代 lucide Loader2 + animate-spin。
  * spinning=false 时定格为静态三星（用于暂停/停止态，避免误导仍在运行）。
  */
+// 全实例相位同步：CSS 动画默认从各自挂载时刻起跑，页面上多个 spinner（侧栏每行
+// 一个）相位各自为战；曾用渲染时刻 Date.now() 锚定负 delay，但渲染→动画启动有
+// 间隙、且重渲染重算 delay 会重定时，实测仍会漂移。改为：delay 只留固定错峰
+// （0/0.4/0.8s，负值保证起始即错峰、不会先齐亮一闪），再由下面的 animationstart
+// 监听把所有 brand-sparkle 动画的 startTime 钉到文档时间轴零点 —— 无限动画钉同
+// 一起点即恒同相，与挂载/重渲染时刻彻底无关。
+if (typeof document !== 'undefined') {
+  document.addEventListener(
+    'animationstart',
+    (e) => {
+      for (const anim of (e.target as Element).getAnimations?.() ?? []) {
+        if ((anim as CSSAnimation).animationName === 'brand-sparkle-pulse') anim.startTime = 0;
+      }
+    },
+    true,
+  );
+}
+
 export function BrandSpinner({ size = 14, className = '', spinning = true }: BrandProps & { spinning?: boolean }): JSX.Element {
-  // 负 delay 让三星起始即处于错峰相位（正 delay 会先齐亮一闪）；
+  // 固定错峰 delay（配合上方 startTime 钉零实现全实例同相）；
   // 平移必须放外层 g：动画的 CSS transform 会覆盖 path 自身的 SVG transform 属性，
-  // 若同层则 translate 被 scale 顶掉，星芒全部掉回左上角原点
-  const delays = ['0s', '-1s', '-0.8s'];
+  // 若同层则 translate 被 scale/rotate 顶掉，星芒全部掉回左上角原点
+  const delays = ['0s', '-0.4s', '-0.8s']; // 与 index.css brand-sparkle-pulse 1.2s 周期的三等分
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden>
       {[5, 12, 19].map((cx, i) => (

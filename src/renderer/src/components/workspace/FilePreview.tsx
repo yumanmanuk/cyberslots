@@ -13,6 +13,7 @@ import { Code2, Eye, ExternalLink, FolderGit2, FolderOpen, MessageSquarePlus, Mo
 import { useChatStore } from '../../store/chatStore';
 import { BrandSpinner } from '../brand';
 import { useT } from '../../i18n';
+import MdLink from '../MdLink';
 
 import type { OpenTarget } from '@shared/ipc';
 
@@ -188,7 +189,7 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
           />
         ) : isMd && mode === 'preview' ? (
           <div className="md-body px-4 py-3">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text ?? ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{text ?? ''}</ReactMarkdown>
           </div>
         ) : (
           <NumberedSource text={text ?? ''} ext={ext} path={path} fileName={fileName} sessionId={sessionId} />

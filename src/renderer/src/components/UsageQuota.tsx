@@ -190,69 +190,70 @@ export function QuotaRow({ q, roomy }: { q: ProviderQuotaInfo; roomy?: boolean }
 /** 当前活动 Antigravity 账号行：首行显账号邮箱，下方列 Claude 组的
  *  5小时/7天额度剩余量（Gemini 组及分组名已在主进程数据源裁掉）。
  *  roomy = 大窗宽松排版，缺省为悬浮小窗紧凑排版。
- *  布局与 QuotaRow 的 kimi/minimax 行严格对齐：供应商名列宽、时间窗
- *  标签/百分比/倒计时列宽均复用同一套尺寸，额度行缩进 = 名列宽 + 行内 gap，
- *  保证跨供应商纵向成列。
+ *  布局与 QuotaRow 完全同构：外层 flex items-center，邮箱 + 额度行收进右侧
+ *  同一个纵向容器，标题相对右侧全部行纵向居中（与 kimi/minimax 一致）；
+ *  供应商名列宽、时间窗标签/百分比/倒计时列宽复用同一套尺寸，右侧容器起点
+ *  即名列宽 + 行内 gap，保证跨供应商纵向成列。
  *  百分比为“剩余”语义（区别于 kimi/minimax 的“已用”），故显式加“剩”前缀。 */
 export function AgyQuotaRow({ data, roomy }: { data: AgyActiveQuota; roomy?: boolean }): JSX.Element {
   const t = useT();
-  // 缩进 = QuotaRow 供应商名列宽（roomy w-24=96px / 紧凑 68px）+ 行内 gap（20px / 8px）
-  const indent = roomy ? 'pl-[116px]' : 'pl-[76px]';
   return (
-    <div className={roomy ? 'text-ui leading-7' : 'text-[11.5px] leading-5'}>
-      <div className={`flex items-center ${roomy ? 'gap-5' : 'gap-2'}`}>
-        <span className={`shrink-0 font-medium text-ink-soft ${roomy ? 'w-24' : 'w-[68px]'}`}>Antigravity</span>
+    <div className={`flex items-center ${roomy ? 'gap-5 text-ui leading-7' : 'gap-2 text-[11.5px] leading-5'}`}>
+      <span className={`shrink-0 font-medium text-ink-soft ${roomy ? 'w-24' : 'w-[68px]'}`}>Antigravity</span>
+      {/* 邮箱 + 额度行收进同一个纵向容器 — 标题与 QuotaRow 一样相对右侧全部行纵向居中；
+          容器起点 = 名列宽 + 行内 gap，与原 indent 缩进位置一致，额度行列对齐不变。 */}
+      <div className="min-w-0 flex-1">
         {data.email ? (
-          <span className="min-w-0 flex-1 truncate text-ink-faint" title={data.email}>
+          <div className="truncate text-ink-faint" title={data.email}>
             {data.email}
-          </span>
+          </div>
         ) : null}
+        {!data.ok ? (
+          <div className="truncate text-ink-faint" title={data.error}>
+            {t('quotaFailed')}
+          </div>
+        ) : data.groups.length > 0 ? (
+          <div className={`flex min-w-0 ${roomy ? 'flex-wrap items-center gap-x-8 gap-y-0.5' : 'flex-col gap-1'}`}>
+            {data.groups.map((g) => {
+              const remain = Math.max(0, Math.round(100 - g.utilization));
+              const cd = countdown(g.resetsInSeconds ? Date.now() + g.resetsInSeconds * 1000 : undefined);
+              return roomy ? (
+                /* 宽松模式：与 QuotaRow 同宽成列（w-52 块 + w-12/w-12 子列，百分比右对齐） */
+                <span key={g.group} className="flex w-52 items-center whitespace-nowrap">
+                  <span className="w-12 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
+                  <span className={`w-12 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
+                    <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
+                    {remain}%
+                  </span>
+                  {cd && (
+                    <span className="ml-2 flex items-center gap-0.5 text-ink-faint">
+                      <Clock size={12} />
+                      {cd}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                /* 紧凑模式（悬浮小窗）：与 QuotaRow 同宽成列（w-11/w-11 子列，百分比右对齐） */
+                <span key={g.group} className="flex items-center whitespace-nowrap">
+                  <span className="w-11 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
+                  <span className={`w-11 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
+                    <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
+                    {remain}%
+                  </span>
+                  {cd && (
+                    <span className="ml-1.5 flex items-center gap-0.5 text-ink-faint">
+                      <Clock size={10} />
+                      {cd}
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="text-ink-faint">—</div>
+        )}
       </div>
-      {!data.ok ? (
-        <div className={`truncate text-ink-faint ${indent}`} title={data.error}>
-          {t('quotaFailed')}
-        </div>
-      ) : data.groups.length > 0 ? (
-        <div className={`flex min-w-0 ${roomy ? 'flex-wrap items-center gap-x-8 gap-y-0.5' : 'flex-col gap-1'} ${indent}`}>
-          {data.groups.map((g) => {
-            const remain = Math.max(0, Math.round(100 - g.utilization));
-            const cd = countdown(g.resetsInSeconds ? Date.now() + g.resetsInSeconds * 1000 : undefined);
-            return roomy ? (
-              /* 宽松模式：与 QuotaRow 同宽成列（w-52 块 + w-12/w-12 子列，百分比右对齐） */
-              <span key={g.group} className="flex w-52 items-center whitespace-nowrap">
-                <span className="w-12 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
-                <span className={`w-12 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
-                  <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
-                  {remain}%
-                </span>
-                {cd && (
-                  <span className="ml-2 flex items-center gap-0.5 text-ink-faint">
-                    <Clock size={12} />
-                    {cd}
-                  </span>
-                )}
-              </span>
-            ) : (
-              /* 紧凑模式（悬浮小窗）：与 QuotaRow 同宽成列（w-11/w-11 子列，百分比右对齐） */
-              <span key={g.group} className="flex items-center whitespace-nowrap">
-                <span className="w-11 text-ink-faint">{agyWindowLabel(t, g.group)}</span>
-                <span className={`w-11 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
-                  <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
-                  {remain}%
-                </span>
-                {cd && (
-                  <span className="ml-1.5 flex items-center gap-0.5 text-ink-faint">
-                    <Clock size={10} />
-                    {cd}
-                  </span>
-                )}
-              </span>
-            );
-          })}
-        </div>
-      ) : (
-        <div className={`text-ink-faint ${indent}`}>—</div>
-      )}
     </div>
   );
 }

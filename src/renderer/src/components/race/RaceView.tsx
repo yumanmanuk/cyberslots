@@ -4,7 +4,7 @@
  * 收敛后角色会话仍是普通 session，可在侧栏继续使用（毕业机制）。
  */
 
-import { ArrowLeft, CircleAlert, OctagonX } from 'lucide-react';
+import { ArrowLeft, CircleAlert, OctagonX, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { BrandHero } from '../brand';
@@ -71,6 +71,7 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
   const cancelRace = useRaceStore((s) => s.cancelRace);
   const resumeRace = useRaceStore((s) => s.resumeRace);
   const openTune = useRaceStore((s) => s.openTune);
+  const dismissError = useRaceStore((s) => s.dismissError);
 
   if (!race) {
     return (
@@ -193,6 +194,15 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
               </button>
             </>
           )}
+          {/* 手动关闭横幅：仅隐藏提示（已知悉/想先看泳道），阶段重试
+              入口仍在各泳道「重试」按钮上。 */}
+          <button
+            onClick={dismissError}
+            title={t('raceDismissError')}
+            className="shrink-0 rounded-lg p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+          >
+            <X size={13} />
+          </button>
         </div>
       )}
 
@@ -248,7 +258,7 @@ function DualLanes({ race, running, fill = false }: { race: RaceGroup; running: 
     if (r === 'racerB') return planStage ? !!art.planB : !!art.rebuttalB;
     return planStage ? !!art.planC : !!art.rebuttalC;
   };
-  const toneOf = (r: RacerRole): 'a' | 'b' | 'neutral' => (r === 'racerA' ? 'a' : r === 'racerB' ? 'b' : 'neutral');
+  const toneOf = (r: RacerRole): 'a' | 'b' | 'c' => (r === 'racerA' ? 'a' : r === 'racerB' ? 'b' : 'c');
   return (
     <div className={`mx-auto flex w-full ${racers.length > 2 ? 'max-w-7xl' : 'max-w-5xl'} gap-4 ${fill ? 'min-h-0 flex-1' : ''}`}>
       {racers.map((r, i) => {

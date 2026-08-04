@@ -44,7 +44,8 @@ import OpencodeModelPicker from './OpencodeModelPicker';
 import ChipInput, { type ChipInputHandle } from './ChipInput';
 import SlashMenu from './SlashMenu';
 import { selectionRangeLabel } from '../selections';
-import { claudeModelLabel } from './race/modelCatalogs';
+import { resolveEffectiveEffort } from '../effort';
+import { modelDisplayLabel } from './race/modelCatalogs';
 import { TREE_NODE_MIME } from './workspace/FileTree';
 import PlanWidget from './PlanWidget';
 
@@ -79,7 +80,6 @@ const PERM_ICON_TINTS: Record<string, string> = {
   yolo: 'text-warn',
 };
 
-const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 const EFFORT_LABEL_KEYS: Record<string, MsgKey> = {
   low: 'effortLow',
   medium: 'effortMedium',
@@ -91,7 +91,6 @@ const EFFORT_LABEL_KEYS: Record<string, MsgKey> = {
 };
 
 /** omp 的 ACP 思考值域＝off/auto + 模型目录 thinking[] 精细档（动态扩展）。 */
-const OMP_BASE_EFFORTS = ['off', 'auto'];
 
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
@@ -601,17 +600,20 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             {!isPlan && level < 4 && <PermissionPicker sessionId={sessionId} />}
             <SwarmToggle sessionId={sessionId} />
             <RaceToggle sessionId={sessionId} />
-            {(goalCapable || meta?.engine === 'codex' || meta?.engine === 'opencode' || meta?.engine === 'kimi') && (
-              <button
-                title={goalCapable ? t('goalToggle') : `${meta?.engine} ${t('goalUnsupported')}`}
-                onClick={toggleGoalMode}
-                className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition ${goalMode || goalActive ? 'bg-accent-soft font-medium text-accent' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
-                  }`}
-              >
-                {/* Target 是三层同心圆，fill 会糊成纯色圆点 — 保持描边，激活态靠底色/文字色区分（与发送按钮的 Target 同款）*/}
-                <Target size={13} />
-              </button>
-            )}
+            {/* 始终展示：不支持的引擎置灰（不用 disabled —— 仍可点击，点击弹「不支持」提示，显式告知而非隐藏）*/}
+            <button
+              title={goalCapable ? t('goalToggle') : `${meta?.engine} ${t('goalUnsupported')}`}
+              onClick={toggleGoalMode}
+              className={`flex items-center gap-1 rounded-lg px-2 py-1 text-ui transition ${!goalCapable
+                ? 'cursor-not-allowed text-ink-faint/50'
+                : goalMode || goalActive
+                  ? 'bg-accent-soft font-medium text-accent'
+                  : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+                }`}
+            >
+              {/* Target 是三层同心圆，fill 会糊成纯色圆点 — 保持描边，激活态靠底色/文字色区分（与发送按钮的 Target 同款）*/}
+              <Target size={13} />
+            </button>
 
             <div className="flex-1" />
 
@@ -782,7 +784,7 @@ function TopRails({
 const EMPTY_QUEUE: QueuedMessage[] = [];
 
 /** Pending-send outbox above the input (qoder-style "等待发送 N" 行条)。
- *  默认收起，展开后可拖拽排序、编辑回填、删除、steer。 */
+ *  首次收到消息后默认展开，展开后可拖拽排序、编辑回填、删除、steer。 */
 function QueuePanel({
   sessionId,
   onEditItem,
@@ -795,7 +797,7 @@ function QueuePanel({
   const removeQueued = useChatStore((s) => s.removeQueued);
   const moveQueued = useChatStore((s) => s.moveQueued);
   const steerQueued = useChatStore((s) => s.steerQueued);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => queue.length > 0);
   const dragFrom = useRef<number | null>(null);
   // Transient per-panel notice after a steer attempt falls back (kimi has no native steer).
   const [steerNotice, setSteerNotice] = useState<{ id: string; kind: 'moved' | 'head' } | null>(null);
@@ -805,11 +807,13 @@ function QueuePanel({
     return () => clearTimeout(timer);
   }, [steerNotice]);
 
-  // 队列新增消息时，头部条闪一下 accent（面板常折叠，给点可见反馈）。
+  // 队列新增消息时，头部条闪一下 accent；第一条消息到达时默认展开。
   const [bump, setBump] = useState(0);
   const prevLen = useRef(queue.length);
   useEffect(() => {
-    if (queue.length > prevLen.current) setBump((n) => n + 1);
+    const grew = queue.length > prevLen.current;
+    if (grew) setBump((n) => n + 1);
+    if (prevLen.current === 0 && queue.length > 0) setOpen(true);
     prevLen.current = queue.length;
   }, [queue.length]);
 
@@ -868,21 +872,21 @@ function QueuePanel({
                     if (r === 'moved' || r === 'head') setSteerNotice({ id: item.id, kind: r });
                   })
                 }
-                className="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-accent group-hover:opacity-100"
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-accent"
               >
                 <ArrowUp size={12} className="rotate-45" />
               </button>
               <button
                 title={t('queueEdit')}
                 onClick={() => onEditItem(item)}
-                className="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover:opacity-100"
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
               >
                 <Pencil size={12} />
               </button>
               <button
                 title={t('remove')}
                 onClick={() => removeQueued(sessionId, item.id)}
-                className="rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-err group-hover:opacity-100"
+                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err"
               >
                 <Trash2 size={12} />
               </button>
@@ -1045,11 +1049,10 @@ function PermissionPicker({ sessionId }: { sessionId: string }): JSX.Element | n
       <button
         title={label(current)}
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
+        className="flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
         {/* 选中态只显示档位图标，完整文案进 title */}
         <CurrentIcon size={13} />
-        <ChevronDown size={11} />
       </button>
       {open && (
         <Dropdown onClose={() => setOpen(false)}>
@@ -1196,27 +1199,6 @@ function RaceToggle({ sessionId }: { sessionId: string }): JSX.Element {
 
 // -------------------------------------------------------- model & effort
 
-/** antigravity slug → 友好显示名（composer 模型选择器 + 设置页默认模型下拉共用；与 AntigravityAdapter.AGY_MODEL_SLUGS 对齐）。 */
-export const ANTIGRAVITY_LABELS: Record<string, string> = {
-  'claude-sonnet-4-6': 'Claude Sonnet 4.6 (Thinking)',
-  'claude-opus-4-6-thinking': 'Claude Opus 4.6 (Thinking)',
-  'gemini-3.1-pro-high': 'Gemini 3.1 Pro (High)',
-  'gemini-3.6-flash-high': 'Gemini 3.6 Flash (High)',
-  'gemini-3.6-flash-medium': 'Gemini 3.6 Flash (Medium)',
-  'gemini-3.5-flash-medium': 'Gemini 3.5 Flash (Medium)',
-};
-
-/** Claude Code 模型别名 → 友好显示名（与 ClaudeAdapter.CLAUDE_MODEL_SLUGS 对齐）。 */
-export const CLAUDE_LABELS: Record<string, string> = {
-  default: 'Default（默认）',
-  sonnet: 'Claude Sonnet',
-  opus: 'Claude Opus',
-  haiku: 'Claude Haiku',
-};
-
-/** Claude 思考档（effort 斜杠命令的档位，与 ClaudeAdapter.CLAUDE_EFFORTS 对齐）。 */
-const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-
 function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
@@ -1284,12 +1266,10 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   const ompEntryOf = (id: string): OmpModelEntry | undefined => (isOmp ? ompCatalog?.models.find((c) => c.slug === id) : undefined);
   // claude：自定义模型映射（第三方网关 env）优先，回落内置别名友好名；
   // antigravity：codexCatalog 条目 → 用 slug→友好名映射展示（否则显示原始 slug）。
+  // 展示名解析链与回答信息 tooltip 共用（modelDisplayLabel）；claude 'default'
+  // 无自定义映射时的文案即 claudeDefaultFollow（claudeModelLabel 内置同款）。
   const labelFor = (id: string): string =>
-    meta?.engine === 'claude'
-      ? id === 'default' && !claudeLabels?.default
-        ? t('claudeDefaultFollow')
-        : claudeModelLabel(id, claudeLabels?.[id], lang)
-      : entryOf(id)?.displayName ?? ompEntryOf(id)?.displayName ?? ANTIGRAVITY_LABELS[id] ?? CLAUDE_LABELS[id] ?? id;
+    modelDisplayLabel(meta?.engine, id, { codexCatalog: catalog, ompCatalog, claudeLabels, lang });
   const activeId = current || available[0]!;
 
   const pick = (id: string): void => {
@@ -1372,21 +1352,6 @@ function fmtCtxWindow(n: number): string {
   return String(n);
 }
 
-/** 生效思考深度解析（与 codex 自身优先级一致）：会话覆盖 → 配置
- *  model_reasoning_effort → catalog 模型默认 → medium；候选必须在
- *  当前模型支持列表内，否则退回列表末档。 */
-function resolveEffort(
-  override: string | undefined,
-  cfgDefault: string | undefined,
-  entry: Pick<CodexCatalogModel, 'efforts' | 'defaultEffort'> | undefined,
-): string {
-  const efforts = entry?.efforts ?? EFFORTS;
-  for (const c of [override, cfgDefault, entry?.defaultEffort, 'medium']) {
-    if (c && efforts.includes(c)) return c;
-  }
-  return efforts[efforts.length - 1]!;
-}
-
 /** 思考深度 — codex 桌面版同款滑条交互：弹层里一列 4 档滑轨，
  *  拖动/点击档位即选，标题行实时显示当前档位名。sidechat 复用（align="left"）。
  *  opencode：档位 = 模型 reasoning variants 键名（none/high 等），无 variants
@@ -1422,15 +1387,25 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   // 档位列表优先取 catalog 里当前模型声明的档位。
   // 引擎未运行时回退到持久化的 meta.modelId。
   const activeModel = models?.current || models?.available[0] || meta?.modelId;
+  // 生效档解析走共享单一真源（src/renderer/src/effort.ts）——此处的显示值
+  // 与 sendPromptTo 的下发值严格一致（所见即所得）；undefined = 无档位面
+  // （控件隐藏/占位，不下发）。
+  const resolved = resolveEffectiveEffort({
+    engine: meta?.engine,
+    override,
+    activeModel: activeModel ?? '',
+    kimiModels,
+    codexCatalog: catalog,
+    codexDefaultEffort: cfgDefault,
+    opencodeCatalog: ocCatalog,
+    ompCatalog,
+  });
   // kimi：值域来自 config.toml 声明（off + support_efforts，always_thinking
   // 模型（off）；无档位声明的模型隐控件。下发路径 = prompt 带
   // setSessionConfigOption(thinking)（kimi CLI 0.30 新增）。
   if (isKimi) {
-    const kEntry = kimiModels.find((m) => m.alias === activeModel);
-    const kEfforts = kEntry?.efforts ?? [];
-    if (kEfforts.length < 2) return null;
-    const kEffort = override && kEfforts.includes(override) ? override : (kEntry?.defaultEffort ?? kEfforts[kEfforts.length - 1]!);
-    const kIdx = Math.max(0, kEfforts.indexOf(kEffort));
+    if (!resolved) return null;
+    const { value: kEffort, options: kEfforts, index: kIdx } = resolved;
     const kLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const kSelect = (i: number): void => {
       const value = kEfforts[Math.max(0, Math.min(kEfforts.length - 1, i))]!;
@@ -1453,9 +1428,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
             <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex items-center">
                 <span className={`text-ui font-medium ${kEffort === 'max' ? 'effort-max-label' : ''}`}>{kLabel(kEffort)}</span>
-                <ChevronRight size={12} className="text-ink-faint" />
               </div>
               <EffortSlider index={kIdx} count={kEfforts.length} onSelect={kSelect} />
               <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
@@ -1480,11 +1454,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
         </span>
       );
     }
-    const ompEntry = ompCatalog?.models.find((c) => c.slug === activeModel);
-    if (ompEntry && ompEntry.reasoning === false) return null;
-    const ompEfforts = ompEntry?.efforts?.length ? [...OMP_BASE_EFFORTS, ...ompEntry.efforts] : OMP_BASE_EFFORTS;
-    const ompEffort = override && ompEfforts.includes(override) ? override : ompEfforts[0]!;
-    const ompIdx = Math.max(0, ompEfforts.indexOf(ompEffort));
+    if (!resolved) return null;
+    const { value: ompEffort, options: ompEfforts, index: ompIdx } = resolved;
     const ompLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const ompSelect = (i: number): void => {
       const value = ompEfforts[Math.max(0, Math.min(ompEfforts.length - 1, i))]!;
@@ -1504,9 +1475,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
             <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex items-center">
                 <span className="text-ui font-medium">{ompLabel(ompEffort)}</span>
-                <ChevronRight size={12} className="text-ink-faint" />
               </div>
               <EffortSlider index={ompIdx} count={ompEfforts.length} onSelect={ompSelect} />
               <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
@@ -1523,8 +1493,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   // claude：思考档 = /effort 斜杠命令的档位（回合间热切）；未显选时展示 high
   // 但不写 override（保持模型默认，不主动下发 /effort）。
   if (isClaude) {
-    const cEffort = override && CLAUDE_EFFORTS.includes(override) ? override : 'high';
-    const cIdx = Math.max(0, CLAUDE_EFFORTS.indexOf(cEffort));
+    if (!resolved) return null;
+    const { value: cEffort, options: CLAUDE_EFFORTS, index: cIdx } = resolved;
     const cLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const cSelect = (i: number): void => {
       const value = CLAUDE_EFFORTS[Math.max(0, Math.min(CLAUDE_EFFORTS.length - 1, i))]!;
@@ -1544,9 +1514,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
             <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3 flex items-center">
                 <span className={`text-ui font-medium ${cEffort === 'max' ? 'effort-max-label' : ''}`}>{cLabel(cEffort)}</span>
-                <ChevronRight size={12} className="text-ink-faint" />
               </div>
               <EffortSlider index={cIdx} count={CLAUDE_EFFORTS.length} onSelect={cSelect} />
               <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
@@ -1560,20 +1529,10 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
       </div>
     );
   }
-  // 档位列表优先取 catalog 里当前模型声明的档位。
-  // 引擎未运行时回退到持久化的 meta.modelId。
-  const entry: Pick<CodexCatalogModel, 'efforts' | 'defaultEffort'> | undefined = isOpencode
-    ? ocCatalog?.models.find((c) => c.slug === activeModel)
-    : catalog.find((c) => c.slug === activeModel);
-  // opencode：reasoning variants 的模型不渲染思考深度控件。
-  if (isOpencode && !entry?.efforts?.length) return null;
-  const efforts = entry?.efforts ?? EFFORTS;
-  const effort = isOpencode
-    ? override && efforts.includes(override)
-      ? override
-      : (entry?.defaultEffort ?? efforts[0]!)
-    : resolveEffort(override, cfgDefault, entry);
-  const idx = Math.max(0, efforts.indexOf(effort));
+  // codex / opencode 统一壳：opencode 无 reasoning variants 的模型不渲染
+  // 思考深度控件（resolved 为 undefined）。
+  if (!resolved) return null;
+  const { value: effort, options: efforts, index: idx } = resolved;
   const label = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
 
   const select = (i: number): void => {
@@ -1599,9 +1558,8 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
-            <div className="mb-3 flex items-center justify-between">
+            <div className="mb-3 flex items-center">
               <span className={`text-ui font-medium ${effort === 'xhigh' ? 'effort-max-label' : ''}`}>{label(effort)}</span>
-              <ChevronRight size={12} className="text-ink-faint" />
             </div>
             <EffortSlider index={idx} count={efforts.length} onSelect={select} />
             <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
@@ -1845,23 +1803,33 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
   shownRef.current = displaySeconds;
 
   const paused = goal.status !== 'active';
+  const statusKey =
+    goal.status === 'blocked'
+      ? ('goalStatusBlocked' as const)
+      : goal.status === 'usageLimited'
+        ? ('goalStatusUsageLimited' as const)
+        : goal.status === 'budgetLimited'
+          ? ('goalStatusBudgetLimited' as const)
+          : null;
   const statusLabel =
     goal.status === 'active'
       ? t('goalRunning')
       : goal.status === 'paused'
         ? `${t('goal')} · ${t('goalPause')}`
-        : `${t('goal')} · ${goal.status}`;
+        : statusKey
+          ? `${t('goal')} · ${t(statusKey)}`
+          : `${t('goal')} · ${goal.status}`;
 
   return (
     <div className="border-b border-line bg-bg-panel/70">
       <div className="flex items-center gap-2 px-3 py-1.5 text-[12px]">
         <Target size={12} className={`shrink-0 ${goal.status === 'active' ? 'text-accent' : 'text-ink-faint'}`} />
-        <span className="shrink-0 font-medium text-ink">{statusLabel}</span>
-        <span className="min-w-0 flex-1 truncate text-ink-soft" title={goal.objective}>
+        <span className="shrink-0 font-medium leading-none text-ink">{statusLabel}</span>
+        <span className="min-w-0 flex-1 truncate leading-[1.2] text-ink-soft" title={goal.objective}>
           {goal.objective}
         </span>
         <span
-          className="shrink-0 font-mono text-[11px] tabular-nums text-ink-faint"
+          className="shrink-0 font-mono text-[11px] leading-none tabular-nums text-ink-faint"
           title={`${t('goalTokensTitle', { n: goal.tokensUsed.toLocaleString() })}${goal.tokenBudget ? t('goalTokensBudget', { n: goal.tokenBudget.toLocaleString() }) : ''}`}
         >
           {formatElapsed(displaySeconds * 1000)}
@@ -1982,7 +1950,7 @@ function ExpandDialog({
 
 function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }): JSX.Element {
   return (
-    <button title={title} onClick={onClick} className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
+    <button title={title} onClick={onClick} className="flex items-center justify-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
       {children}
     </button>
   );

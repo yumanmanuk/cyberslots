@@ -11,6 +11,7 @@ import remarkGfm from 'remark-gfm';
 
 import { downloadMarkdown } from '../../planDoc';
 import { useT } from '../../i18n';
+import MdLink from '../MdLink';
 
 export default function ArtifactZoom({
   title,
@@ -55,7 +56,7 @@ export default function ArtifactZoom({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           <div className="md-body text-[13px]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{text}</ReactMarkdown>
           </div>
         </div>
       </div>

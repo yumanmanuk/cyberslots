@@ -19,6 +19,7 @@ import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS } from '../EngineIcon';
 import ArtifactZoom from './ArtifactZoom';
 import RaceLane from './RaceLane';
+import MdLink from '../MdLink';
 
 const LETTER: Record<RacerRole, 'A' | 'B' | 'C'> = { racerA: 'A', racerB: 'B', racerC: 'C' };
 
@@ -180,7 +181,7 @@ function ReviewStep({ race, stopJudge, readOnly = false }: { race: RaceGroup; st
         {/* 与选手方案预览同款 markdown 渲染（md-body），不展示原文 */}
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="md-body text-[13px]">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{race.finalPlan ?? ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{race.finalPlan ?? ''}</ReactMarkdown>
           </div>
         </div>
       </div>

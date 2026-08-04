@@ -131,14 +131,20 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
     emit();
   };
 
-  // 外部 value 变更（清空 / 回填）→ 纯文本渲染；与当前序列化一致则不动，
-  // 避免打字/插 chip 过程中被回写清掉光标。
+  // 外部 value 变更（清空 / 回填）→ 纯文本渲染并把光标移到末尾；与当前
+  // 序列化一致则不动，避免打字/插 chip 过程中被回写清掉光标。
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
     if (serialize(el) !== value) {
       el.textContent = value;
       syncEmpty();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
     }
   }, [value]);
 

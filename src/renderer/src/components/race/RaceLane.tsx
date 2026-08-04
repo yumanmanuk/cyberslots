@@ -14,6 +14,7 @@ import { useChatStore } from '../../store/chatStore';
 import { useT } from '../../i18n';
 import EliminateButton from './EliminateButton';
 import MessageList from '../MessageList';
+import { findPendingRequest } from '../mission/SessionCard';
 
 export default function RaceLane({
   title,
@@ -32,8 +33,8 @@ export default function RaceLane({
   subtitle: string;
   /** 角色 session 尚未创建时为 undefined（显示等待占位）。 */
   sessionId?: string;
-  /** 视觉基调：a=选手A(accent) / b=选手B(warn 暖色) / neutral。 */
-  tone?: 'a' | 'b' | 'neutral';
+  /** 视觉基调：a/b/c=选手 A/B/C（徽章同为品牌金，字母区分）/ neutral=裁判·执行等。 */
+  tone?: 'a' | 'b' | 'c' | 'neutral';
   running: boolean;
   /** true = 撞满父容器高度（竞速双泳道：头固定、仅内容区滚动）；
    *  false = 限高内滚（Builder/裁判参考区等页面流式布局里）。 */
@@ -62,6 +63,10 @@ export default function RaceLane({
   // 会让统计行夹在提问/输出之间造成误读）。消耗数据不丢：角色会话
   // 从主视图打开时照常显示，用量统计页也照常累计。
   const visible = useMemo(() => messages?.filter((m) => m.kind !== 'turn_end'), [messages]);
+  // 待审批/待答直通卡：泳道没有底部 PermissionSheet，引擎弹审批时泳道只
+  // 显示一行 "Waiting for approval" 却无处可点，阶段链干等到死（2026-08-03
+  // kimi 选手 ls 审批卡死 25 分钟事故）。复用总控台同款直批卡按会话应答。
+  const pending = useMemo(() => findPendingRequest(messages), [messages]);
   // 会话真实运行态（角色会话已回灌会话表）：有会话但状态未知时
   // 先当作忙碌（防列表未刷到就闪“已停止”）；没有会话（如调参换
   // 引擎后待重建）则不存在运行中回合，老实显示已停止 + 重试入口。
@@ -95,8 +100,9 @@ export default function RaceLane({
     return () => window.clearTimeout(t);
   }, [settling]);
   const showBusy = busy || graceBusy;
-  const toneText = tone === 'a' ? 'text-accent' : tone === 'b' ? 'text-warn' : 'text-ink-soft';
-  const toneBorder = tone === 'a' ? 'border-accent' : tone === 'b' ? 'border-warn' : 'border-line';
+  // 选手徽章统一品牌金（--warn === --accent），靠字母区分；neutral 留给裁判/执行等非选手道。
+  const toneText = tone === 'b' ? 'text-warn' : tone === 'neutral' ? 'text-ink-soft' : 'text-accent';
+  const toneBorder = tone === 'b' ? 'border-warn' : tone === 'neutral' ? 'border-line' : 'border-accent';
 
   // 流式期间贴底自动滚动；用户上翻离底后不打扰（与 SideChatPanel 同策略）。
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -110,15 +116,17 @@ export default function RaceLane({
     <div className={`flex min-w-0 flex-1 flex-col ${fill ? 'min-h-0' : ''}`}>
       <div className="flex shrink-0 items-center gap-2 px-1 py-2">
         <span
-          className={`flex h-6 w-6 items-center justify-center rounded-md border bg-bg-input text-[11px] font-bold ${toneText} ${toneBorder}`}
+          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md border bg-bg-input text-[11px] font-bold ${toneText} ${toneBorder}`}
         >
           {badge ?? title.slice(-1)}
         </span>
-        <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-ink">{title}</div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-semibold text-ink">{title}</div>
           <div className="truncate font-mono text-[10.5px] text-ink-faint">{subtitle}</div>
         </div>
-        <div className="ml-auto flex items-center gap-1 text-[11px] text-ink-faint">
+        {/* 右侧状态区 shrink-0 + nowrap：长型号名时由左侧副标题截断让步，
+            状态/中止/剔除按钮永不被挤压换行（CJK 可按字断行，不设防会被压成竖排） */}
+        <div className="ml-auto flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-ink-faint">
           {done ? (
             t('raceLaneFinished')
           ) : showBusy ? (
@@ -151,6 +159,33 @@ export default function RaceLane({
           {onEliminate && <EliminateButton label={title} onConfirm={onEliminate} />}
         </div>
       </div>
+      {pending && sessionId && (
+        <div className="mx-1 mb-1.5 shrink-0 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2">
+          <div
+            className="text-[12px] leading-snug text-ink"
+            style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+          >
+            {pending.kind === 'permission' ? pending.title : pending.question}
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {pending.options.slice(0, 4).map((o) => {
+              const allow = o.kind.startsWith('allow');
+              return (
+                <button
+                  key={o.optionId}
+                  onClick={() => void useChatStore.getState().answerPermissionTo(sessionId, pending.requestId, o.optionId)}
+                  className={`rounded-md px-2 py-0.5 text-[11.5px] transition ${allow
+                      ? 'bg-accent text-white hover:opacity-85'
+                      : 'border border-line bg-bg text-ink-soft hover:bg-bg-hover'
+                    }`}
+                >
+                  {o.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div
         ref={scrollRef}
         onScroll={() => {

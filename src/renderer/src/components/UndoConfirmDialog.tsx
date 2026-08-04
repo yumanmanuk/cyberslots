@@ -15,6 +15,7 @@ const STATUS_BADGE: Record<SessionChangeEntry['status'], { label: string; cls: s
   modified: { label: 'M', cls: 'text-warn' },
   added: { label: 'A', cls: 'text-ok' },
   deleted: { label: 'D', cls: 'text-err' },
+  accepted: { label: '✓', cls: 'text-ok' },
 };
 
 export default function UndoConfirmDialog({
