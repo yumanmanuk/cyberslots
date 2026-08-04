@@ -34,7 +34,9 @@ import type {
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
+import { inlineImageMime } from '../attachments';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 import type { KapServerHost, KapServerInfo } from './KapServerHost';
 
 type Json = Record<string, unknown>;
@@ -74,14 +76,6 @@ const KNOWN_IGNORED_EVENTS = new Set([
   'warning',
 ]);
 
-const IMAGE_MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif',
-};
-
 /** 子代理卡进度行节流间隔 — assistant.delta 频率很高，逐条转发会刷爆
  *  IPC/渲染；尾条在子代理终态事件时强制冲刷，不丢最后一行。 */
 const SUBAGENT_PROGRESS_THROTTLE_MS = 300;
@@ -113,6 +107,9 @@ export interface KimiKapAdapterOptions {
   permissionMode?: PermissionMode;
   resumeSessionId?: string;
   quietResumeFallback?: boolean;
+  /** 无人值守（赛马角色会话）：自动批准权限/计划请求，防无人应答死锁
+   * （对齐 ClaudeAdapter unattended；只读约束由 READONLY_GUARD 提示词承载）。 */
+  unattended?: boolean;
 }
 
 /** 回合内 usage 累计（turn.step.completed 逐步进账 = 真实 API 调用粒度）。 */
@@ -139,8 +136,20 @@ export class KimiKapAdapter implements EngineAdapter {
   private turnId = 0;
   private disposed = false;
   private mode: PermissionMode;
+  /**
+   * 客户端权威档位（最后 setMode 目标 / 启动注入）——与 this.mode（回声同步
+   * 值）分离。强制档（race/headless 的 auto/yolo/plan）以客户端为准：KAP 新
+   * 会话初始回声恒为 manual，顺从回声降级会被 SessionManager 持久化覆盖请求
+   * 档，重启/resume 后 start() 因 desired='default' 跳过 setMode，会话永远
+   * manual —— 2026-08-03 赛马 kimi 选手卡 "Waiting for approval" 25 分钟事
+   * 故，引擎侧实测 permission=manual。回声矛盾 = 引擎未应用 → 重新断言。
+   */
+  private desiredMode: PermissionMode;
+  private lastReassertAt = 0;
 
   private active: ActivePrompt | undefined;
+  /** 最近一次 goal.updated 的状态 — bgTurn 收尾判「引擎是否还会自起下一轮」用。 */
+  private lastGoalStatus: string | undefined;
   /** 引擎自发回合（goal continuation / 压缩 / cron）— 不经 prompt() 发起，
    *  也要补全 turn 生命周期，否则 UI 状态装死（同 CodexAdapter 的教训）。 */
   private bgTurn: { engineTurnId: number; localTurn: number } | undefined;
@@ -162,6 +171,8 @@ export class KimiKapAdapter implements EngineAdapter {
   private lastSeq = 0;
   private epoch: string | undefined;
   private wsBackoff = WS_RECONNECT_MIN_MS;
+  /** Cold-session subscribe recovery attempts (bounded, reset on accept). */
+  private subscribeRetries = 0;
 
   private readonly pendingApprovals = new Set<string>();
   /** 待答问题流：一个 question_id 可携 1-4 个子问题，逐问出卡收集，
@@ -177,6 +188,7 @@ export class KimiKapAdapter implements EngineAdapter {
     private readonly emit: EngineEventSink,
   ) {
     this.mode = opts.permissionMode ?? 'default';
+    this.desiredMode = this.mode;
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -198,7 +210,18 @@ export class KimiKapAdapter implements EngineAdapter {
     // opts.modelId 优先（用户显式选择），否则绑 status 回报的当前/默认模型。
     const boundModel = this.opts.modelId || this.curModel;
     if (boundModel) await this.setModel(boundModel).catch(() => undefined);
-    if (this.mode !== 'default') await this.setMode(this.mode).catch(() => undefined);
+    // Apply the client-desired mode (opts.permissionMode), not just the engine
+    // status read by refreshStatus: old/resumed sessions may be manual, and this
+    // is the only startup path that applies the default YOLO to a KAP session.
+    const desiredMode = this.opts.permissionMode;
+    if (desiredMode && desiredMode !== 'default') {
+      // 失败必须留痕（此前静默 catch）：丢档零痕迹，只能直连 KAP 实测排查。
+      await this.setMode(desiredMode).catch((err) => {
+        const detail = errorMessage(err);
+        log.warn('engine.kimi', 'startup setMode failed — session stays engine-side manual', { sessionId: this.sessionId, mode: desiredMode, detail });
+        compatAudit.record('kimi', 'rejected-method', 'kap startup setMode', detail);
+      });
+    }
 
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.sessionId };
@@ -209,6 +232,13 @@ export class KimiKapAdapter implements EngineAdapter {
     if (this.opts.resumeSessionId) {
       try {
         const sess = await this.api<Json>('GET', `/sessions/${this.opts.resumeSessionId}`);
+        // GET /sessions/{id} only reads the session index (no hydration),
+        // while WS subscribe accepts LIVE sessions only -- a cold session is
+        // acked not_found and would silently receive no turn events (the
+        // prompt promise then hangs forever). Hydrate via the prompts route
+        // (resumeSessionById server-side) before connectWs. The ack handler
+        // (recoverColdSubscription) is the second line of defense.
+        await this.api('GET', `/sessions/${this.opts.resumeSessionId}/prompts`).catch(() => undefined);
         return String(sess.id ?? this.opts.resumeSessionId);
       } catch (err) {
         // 空会话不弹红色报错 — 无上下文可丢，降级对用户无感。
@@ -274,13 +304,18 @@ export class KimiKapAdapter implements EngineAdapter {
     //   未命中 → 原文作普通 prompt 交给模型。
     const slash = /^\/([A-Za-z0-9_:.-]+)(?:\s+([\s\S]*))?$/.exec(text.trim());
     if (slash && !attachments?.length) {
-      const [, name = '', args] = slash;
+      const [, rawName = '', args] = slash;
+      // kimi 引擎技能名小写不敏感（normalizeSkillName）— 拦截表同样小写化，
+      // 否则手输大小写不同会错失拦截、原文发给模型。
+      const name = rawName.toLowerCase();
       if (name === 'compact') {
         await this.compact();
         return;
       }
-      if (this.skillNames.has(name)) {
-        await this.runSkill(name, args?.trim() || undefined);
+      // 兼容 ACP 习惯的 /skill:name 形式 — KAP 端点只收裸名，剥前缀激活。
+      const bare = name.startsWith('skill:') ? name.slice('skill:'.length) : name;
+      if (this.skillNames.has(bare)) {
+        await this.runSkill(bare, args?.trim() || undefined);
         return;
       }
     }
@@ -294,6 +329,12 @@ export class KimiKapAdapter implements EngineAdapter {
     const done = new Promise<string>((resolve) => {
       this.active = { promptId: '', localTurn, resolve };
     });
+    // Watchdog: if WS events are lost entirely (a cold-subscription window
+    // the ack recovery could not fix, durable-buffer overflow, ...), the
+    // engine-side turn still finishes -- reconcile periodically so this
+    // prompt can never hang the UI forever.
+    const watchdog = setInterval(() => void this.reconcileActivePrompt().catch(() => undefined), 60_000);
+    watchdog.unref?.();
     try {
       const body: Json = { content: await this.buildContent(text, attachments) };
       if (effort) body.thinking = effort;
@@ -321,6 +362,7 @@ export class KimiKapAdapter implements EngineAdapter {
       this.emit({ type: 'error', turnId: localTurn, source: classifyError(err), message: errorMessage(err) });
       this.emit({ type: 'turn.ended', turnId: localTurn, stopReason: 'error' });
     } finally {
+      clearInterval(watchdog);
       this.active = undefined;
       if (!this.disposed && !this.bgTurn) this.emit({ type: 'session.status', status: 'idle' });
     }
@@ -352,11 +394,50 @@ export class KimiKapAdapter implements EngineAdapter {
   async setMode(mode: PermissionMode): Promise<void> {
     // plan 在 KAP 是独立开关（plan_mode），与 permission_mode 正交；
     // 写路径是 profile 的 agent_config（prompts 路由不消费 plan_mode）。
+    // 先记客户端权威档：POST 飞行期间的引擎回声不再把档位弹回手动。
+    this.desiredMode = mode;
     await this.api('POST', `/sessions/${this.sessionId}/profile`, {
       agent_config: { permission_mode: mapModeToKap(mode), plan_mode: mode === 'plan' },
     });
     this.mode = mode;
     this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
+  }
+
+  /**
+   * 引擎回声（status/profile 热同步）→ 客户端档位。返回档位是否变化。
+   * 强制档（非 default）以客户端为权威：回声矛盾 = 引擎未应用/丢了档位 →
+   * 重新断言引擎侧并锚住 UI，不顺从降级（对齐 OmpAdapter 的折叠防御）。
+   */
+  private syncModeFromEngine(reported: PermissionMode): boolean {
+    if (this.desiredMode !== 'default' && reported !== this.desiredMode) {
+      const anchored = this.mode !== this.desiredMode;
+      this.mode = this.desiredMode;
+      if (anchored) {
+        this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
+      }
+      this.reassertMode();
+      return anchored;
+    }
+    if (reported === this.mode) return false;
+    this.mode = reported;
+    this.emit({ type: 'modes.update', current: reported, available: ['default', 'plan', 'auto', 'yolo'] });
+    return true;
+  }
+
+  /** 把客户端强制档重写回引擎（节流 5s：回声不合时每个 status 事件都路过）。 */
+  private reassertMode(): void {
+    if (!this.sessionId) return;
+    const now = Date.now();
+    if (now - this.lastReassertAt < 5_000) return;
+    this.lastReassertAt = now;
+    const mode = this.desiredMode;
+    void this.api('POST', `/sessions/${this.sessionId}/profile`, {
+      agent_config: { permission_mode: mapModeToKap(mode), plan_mode: mode === 'plan' },
+    }).catch((err) => {
+      const detail = errorMessage(err);
+      log.warn('engine.kimi', 're-assert permission mode failed', { sessionId: this.sessionId, mode, detail });
+      compatAudit.record('kimi', 'rejected-method', 'kap profile re-assert mode', detail);
+    });
   }
 
   /** Native swarm：profile agent_config.swarm_mode（v2 IAgentSwarmService
@@ -455,12 +536,42 @@ export class KimiKapAdapter implements EngineAdapter {
     // 同一次 profile 更新里带上 model — applyAgentConfig 先 setModel 再
     // createGoal，保证 goal driver 启动初始续跑回合时 profile 已绑模型
     // （否则引擎自发回合「Model not set」，goal 建了却不跑）。
+    const busy = !!(this.active || this.bgTurn || this.compactTurn);
+    // 已有 goal 时 profile 面无 replace（40913 GOAL_ALREADY_EXISTS，实测）
+    // —— 先 cancel 再建（对齐 codex clear+set）。但 busy 时 cancel 会连坐
+    // 取消在跑回合（kimi cancelGoal 停 live turn），编辑先拦下。
+    const existing = await this.api<Json | null>('GET', `/sessions/${this.sessionId}/goal`).catch(() => null);
+    const existingObjective = existing ? String(existing.objective ?? '') : '';
+    if (existing) {
+      if (busy) {
+        throw new Error(L('已有进行中的 Goal，请先停止当前回合再改目标', 'A goal is already running — stop the current turn before changing it'));
+      }
+      await this.api('POST', `/sessions/${this.sessionId}/profile`, { agent_config: { goal_control: 'cancel' } });
+    }
     const cfg: Json = { goal_objective: objective };
     if (this.curModel) cfg.model = this.curModel;
-    await this.api('POST', `/sessions/${this.sessionId}/profile`, { agent_config: cfg });
-    // WS 也会推 goal.updated — 这里主动拉一次保证 GoalBar 无空窗。
-    const snap = await this.api<Json | null>('GET', `/sessions/${this.sessionId}/goal`).catch(() => null);
-    this.emitGoal(snap);
+    try {
+      await this.api('POST', `/sessions/${this.sessionId}/profile`, { agent_config: cfg });
+    } catch (err) {
+      // create 失败但旧 goal 已被 cancel —— 尽力恢复原目标（计数归零也好过
+      // 「UI 回滚显示旧 goal、引擎实际已没有」的脱钩），恢复不成只能认。
+      if (existingObjective) {
+        await this.api('POST', `/sessions/${this.sessionId}/profile`, {
+          agent_config: { goal_objective: existingObjective },
+        }).catch(() => undefined);
+      }
+      throw err;
+    }
+    // WS 也会推 goal.updated — 这里主动拉一次保证 GoalBar 无空窗。拉取失败
+    // （undefined）不发事件：emitGoal(null) 会把乐观 GoalBar 清成「无 goal」
+    // 与引擎脱钩，WS 推送随后会补上正确快照。
+    const snap = await this.api<Json | null>('GET', `/sessions/${this.sessionId}/goal`).catch(() => undefined);
+    if (snap !== undefined) this.emitGoal(snap);
+    // kimi 的 createGoal 自身不起回合（实测：设完会话一直 idle）——官方
+    // kimi-web 建 goal 后把 objective 当普通 prompt 发出做 starter turn
+    // （handleTurnLaunched 认领为 goal 驱动回合，之后 driver 自动续跑）。
+    // busy 时不发：在跑回合已被认领，结束自会续跑。
+    if (!busy) await this.prompt(objective);
   }
 
   async controlGoal(action: GoalControlAction): Promise<void> {
@@ -473,12 +584,14 @@ export class KimiKapAdapter implements EngineAdapter {
       this.emit({ type: 'goal.update', goal: null });
       return;
     }
-    const snap = await this.api<Json | null>('GET', `/sessions/${this.sessionId}/goal`).catch(() => null);
-    this.emitGoal(snap);
+    // 同 setGoal：快照拉取失败（undefined）不发事件，避免误清 GoalBar。
+    const snap = await this.api<Json | null>('GET', `/sessions/${this.sessionId}/goal`).catch(() => undefined);
+    if (snap !== undefined) this.emitGoal(snap);
   }
 
   private emitGoal(raw: Json | null | undefined): void {
     if (!raw) {
+      this.lastGoalStatus = undefined;
       this.emit({ type: 'goal.update', goal: null });
       return;
     }
@@ -490,6 +603,7 @@ export class KimiKapAdapter implements EngineAdapter {
       timeUsedSeconds: Math.round(Number(raw.wallClockMs ?? 0) / 1000),
       tokenBudget: budget.tokenBudget == null ? undefined : Number(budget.tokenBudget),
     };
+    this.lastGoalStatus = goal.status;
     this.emit({ type: 'goal.update', goal });
   }
 
@@ -558,6 +672,16 @@ export class KimiKapAdapter implements EngineAdapter {
     // tool_input_display 是结构化 display 块（非纯文本）— 按 kind 摘要，
     // 直接 String() 会变 [object Object]。
     const display = displaySummary(item.tool_input_display);
+    // 无人值守（赛马角色会话）：自动批准，防角色会话死锁（对齐 claude
+    // unattended）；引擎侧 permission_mode 尚未生效期间的最后一道保险。
+    if (this.opts.unattended) {
+      const title = [toolName, action, display && display.slice(0, 120)].filter(Boolean).join(' · ');
+      log.debug('engine.kimi', 'unattended auto-approve (kap)', { requestId, title: title.slice(0, 80) });
+      void this.api('POST', `/sessions/${this.sessionId}/approvals/${requestId}`, { decision: 'approved' }).catch((err) =>
+        compatAudit.record('kimi', 'rejected-method', 'kap approvals auto-approve', errorMessage(err)),
+      );
+      return;
+    }
     const options: PermissionOptionView[] = [
       { optionId: 'approve', name: L('允许', 'Allow'), kind: 'allow_once' },
       { optionId: 'approve_session', name: L('本会话总是允许', 'Always allow in this session'), kind: 'allow_always' },
@@ -638,6 +762,10 @@ export class KimiKapAdapter implements EngineAdapter {
           JSON.stringify({ type: 'subscribe', id: randomUUID(), payload: { session_ids: [this.sessionId], cursors } }),
         );
         this.wsBackoff = WS_RECONNECT_MIN_MS;
+        // New connection, new subscription attempt budget (a server restart
+        // makes every session cold again -- the recovery must not stay
+        // exhausted from a previous generation).
+        this.subscribeRetries = 0;
         if (!settled) {
           settled = true;
           resolve();
@@ -659,7 +787,10 @@ export class KimiKapAdapter implements EngineAdapter {
       ws.on('close', () => {
         if (this.ws !== ws) return;
         this.ws = undefined;
-        if (!this.disposed) this.scheduleReconnect();
+        if (!this.disposed) {
+          log.warn('engine.kimi', 'kap ws closed, scheduling reconnect', { sessionId: this.sessionId, backoffMs: this.wsBackoff });
+          this.scheduleReconnect();
+        }
       });
     });
   }
@@ -677,6 +808,7 @@ export class KimiKapAdapter implements EngineAdapter {
           return this.connectWs();
         })
         .then(() => {
+          log.info('engine.kimi', 'kap ws reconnected', { sessionId: this.sessionId });
           void this.refreshStatus().catch(() => undefined);
           void this.reconcileActivePrompt().catch(() => undefined);
         })
@@ -686,8 +818,50 @@ export class KimiKapAdapter implements EngineAdapter {
 
   /** 断线窗口可能丢 prompt.completed（durable 但缓冲可溢出）— 重连后
    *  对账：引擎侧已无我方在途 prompt 则解挂等待，防回合永久悬挂。 */
+  /** subscribe ack: adopt the server cursor on first attach (starts the
+   *  durable watermark without replaying pre-attach history) and recover
+   *  cold-session rejections. */
+  private onAckFrame(p: Json): void {
+    const cursors = (p.cursors ?? {}) as Json;
+    const cur = cursors[this.sessionId] as Json | undefined;
+    if (cur && this.lastSeq === 0) {
+      if (cur.seq != null) this.lastSeq = Number(cur.seq);
+      if (cur.epoch != null) this.epoch = String(cur.epoch);
+    }
+    const accepted = Array.isArray(p.accepted) ? p.accepted.map(String) : [];
+    if (accepted.includes(this.sessionId)) this.subscribeRetries = 0;
+    const notFound = Array.isArray(p.not_found) ? p.not_found.map(String) : [];
+    if (notFound.includes(this.sessionId)) void this.recoverColdSubscription();
+  }
+
+  /** kap-server accepts subscriptions for LIVE sessions only
+   *  (getLiveSessionById); a persisted-but-cold session is acked not_found.
+   *  Hydrate via the prompts route (resumeSessionById), then re-subscribe
+   *  with the durable cursor so journaled events in the gap replay back. */
+  private async recoverColdSubscription(): Promise<void> {
+    if (this.disposed || !this.ws) return;
+    if (this.subscribeRetries >= 3) {
+      log.warn('engine.kimi', 'kap subscribe still rejected after hydration retries', { sessionId: this.sessionId });
+      return;
+    }
+    this.subscribeRetries++;
+    try {
+      await this.api('GET', `/sessions/${this.sessionId}/prompts`);
+    } catch (err) {
+      log.warn('engine.kimi', 'kap cold-session hydrate failed', { sessionId: this.sessionId, error: errorMessage(err) });
+      return;
+    }
+    const ws = this.ws;
+    if (!ws || ws.readyState !== ws.OPEN) return;
+    const cursors = this.lastSeq > 0 ? { [this.sessionId]: { seq: this.lastSeq, epoch: this.epoch } } : undefined;
+    ws.send(JSON.stringify({ type: 'subscribe', id: randomUUID(), payload: { session_ids: [this.sessionId], cursors } }));
+    log.info('engine.kimi', 'kap re-subscribed after hydration', { sessionId: this.sessionId, attempt: this.subscribeRetries });
+  }
+
   private async reconcileActivePrompt(): Promise<void> {
-    if (!this.active) return;
+    // promptId empty = POST /prompts still in flight: nothing to reconcile
+    // against (the engine-side active prompt cannot be matched yet).
+    if (!this.active || !this.active.promptId) return;
     const data = await this.api<Json>('GET', `/sessions/${this.sessionId}/prompts`);
     const activeRemote = data.active as Json | null | undefined;
     if (!activeRemote || String(activeRemote.prompt_id ?? '') !== this.active.promptId) {
@@ -699,6 +873,10 @@ export class KimiKapAdapter implements EngineAdapter {
     const type = String(msg.type ?? '');
     // 控制帧（无 seq 字段）
     if (msg.seq === undefined) {
+      if (type === 'ack') {
+        this.onAckFrame((msg.payload ?? {}) as Json);
+        return;
+      }
       if (type === 'ping') {
         this.ws?.send(JSON.stringify({ type: 'pong', payload: msg.payload ?? {} }));
       } else if (type === 'resync_required') {
@@ -709,7 +887,7 @@ export class KimiKapAdapter implements EngineAdapter {
         if (p.epoch != null) this.epoch = String(p.epoch);
         void this.refreshStatus().catch(() => undefined);
       }
-      // server_hello / ack / error 控制帧无需处理（错误经 close 兜底）。
+      // server_hello / error control frames need no handling (close covers failures).
       return;
     }
     // 事件信封
@@ -777,9 +955,12 @@ export class KimiKapAdapter implements EngineAdapter {
           this.emit({
             type: 'turn.ended',
             turnId: local,
-            // background：goal 有独立完成通知、不派发队列/不触压缩；但 goal 续跑是
-            // 用户要看/要复制的真实回答 — showStats 让渲染层照常出统计行（复制 + token）。
+            // background：goal 有独立完成通知、不触压缩；但 goal 续跑是用户要看/要
+            // 复制的真实回答 — showStats 让渲染层照常出统计行（复制 + token）。
+            // goal 不活跃（完成/取消/暂停）或非 goal 自发回合（cron/注入）= 引擎
+            // 不会再自起下一轮 → 标 goal-idle，渲染层据此补发排队消息。
             stopReason: 'background',
+            backgroundKind: this.lastGoalStatus === 'active' ? undefined : 'goal-idle',
             showStats: true,
             usage: {
               inputTokens: this.stats.input || undefined,
@@ -806,8 +987,20 @@ export class KimiKapAdapter implements EngineAdapter {
       case 'tool.call.started': {
         if (!fromMain) return;
         const display = p.display as Json | undefined;
-        // TodoList 结构化显示 → 计划面板（与 ACP 'plan' update 同源信号：
-        // acp-adapter 的 planFromDisplayBlock 也是从这个 display 投射的）。
+        // TodoList → 计划面板。agent-core-v2 的 TodoListTool 不构造 display
+        //（源码核实：resolveExecution 只返回 description/approvalRule/execute），
+        // KAP 的真值在 args.todos 全量入参；display 分支留给 v1/ACP 同源信号
+        //（acp-adapter 的 planFromDisplayBlock 从 display 投射）。
+        if (String(p.name ?? '') === 'TodoList') {
+          const todos = (p.args as Json | undefined)?.todos;
+          if (Array.isArray(todos)) {
+            // 空数组 = 清空清单 —— 发空 entries 清面板（mapTodoEntries 对空返 undefined）。
+            this.emit({ type: 'plan.update', turnId, entries: mapTodoEntries(todos) ?? [] });
+            this.planToolCalls.add(String(p.toolCallId ?? ''));
+            return;
+          }
+          // 读取模式（无 todos 入参）：无新状态，落普通工具卡（渲染层按名隐藏）。
+        }
         if (display?.kind === 'todo_list') {
           const entries = mapTodoEntries(display.items);
           if (entries) this.emit({ type: 'plan.update', turnId, entries });
@@ -897,21 +1090,47 @@ export class KimiKapAdapter implements EngineAdapter {
           this.compactTurn = ++this.turnId;
           this.emit({ type: 'turn.started', turnId: this.compactTurn });
           this.emit({ type: 'session.status', status: 'running' });
-          this.emit({ type: 'text.delta', turnId: this.compactTurn, text: L('正在压缩上下文…', 'Compacting context…') });
+          // 进度反馈走完成态工具行而非 text.delta：正文会触发 trackTurnText
+          // 懒重置，压缩回合若插在赛马两次交接之间会把 transcript 洗成压缩
+          // 提示文本；completed 态不进重置分支，完成时同 id 合并刷新标题。
+          this.emit({
+            type: 'tool.upsert',
+            turnId: this.compactTurn,
+            toolCallId: 'kap-compact-turn',
+            title: L('正在压缩上下文…', 'Compacting context…'),
+            toolKind: 'other',
+            status: 'completed',
+          });
         }
         return;
       }
       case 'compaction.completed': {
         const r = (p.result ?? {}) as Json;
         if (this.compactTurn !== undefined) {
+          // 同 id 合并刷新「正在压缩…」行 — 见 compaction.started 的 transcript 注释。
           this.emit({
-            type: 'text.delta',
+            type: 'tool.upsert',
             turnId: this.compactTurn,
-            text: `\n${L('上下文压缩完成：', 'Context compaction finished: ')}${fmtTokens(Number(r.tokensBefore ?? 0))} → ${fmtTokens(Number(r.tokensAfter ?? 0))} tokens`,
+            toolCallId: 'kap-compact-turn',
+            title: `${L('上下文压缩完成：', 'Context compaction finished: ')}${fmtTokens(Number(r.tokensBefore ?? 0))} → ${fmtTokens(Number(r.tokensAfter ?? 0))} tokens`,
+            toolKind: 'other',
+            status: 'completed',
           });
-          this.emit({ type: 'turn.ended', turnId: this.compactTurn, stopReason: 'background' });
+          this.emit({ type: 'turn.ended', turnId: this.compactTurn, stopReason: 'background', backgroundKind: 'compact' });
           this.compactTurn = undefined;
           if (!this.active && !this.bgTurn) this.emit({ type: 'session.status', status: 'idle' });
+        } else if (this.active) {
+          // 引擎内部压缩（活跃回合内发生，无合成回合）：完成态工具行提示 ——
+          // completed 不进 trackTurnText 重置分支，赛马 transcript 无损；
+          // 进行中状态不发（in_progress 会触发重置）。
+          this.emit({
+            type: 'tool.upsert',
+            turnId: this.turnId,
+            toolCallId: 'kap-compact-' + String(this.turnId),
+            title: `${L('已自动压缩上下文：', 'Context auto-compacted: ')}${fmtTokens(Number(r.tokensBefore ?? 0))} → ${fmtTokens(Number(r.tokensAfter ?? 0))} tokens`,
+            toolKind: 'other',
+            status: 'completed',
+          });
         }
         void this.refreshStatus().catch(() => undefined);
         return;
@@ -919,9 +1138,22 @@ export class KimiKapAdapter implements EngineAdapter {
       case 'compaction.blocked':
       case 'compaction.cancelled': {
         if (this.compactTurn !== undefined) {
-          this.emit({ type: 'turn.ended', turnId: this.compactTurn, stopReason: 'cancelled' });
+          // 压缩未执行/被取消：按 background 收尾（'cancelled' 会被 chatStore
+          // 当「用户点停止」抑制队列派发 —— 引擎端取消不该背这个语义）。
+          this.emit({
+            type: 'tool.upsert',
+            turnId: this.compactTurn,
+            toolCallId: 'kap-compact-turn',
+            title: L('上下文压缩未执行（引擎端取消）', 'Context compaction was not performed (cancelled engine-side)'),
+            toolKind: 'other',
+            status: 'completed',
+          });
+          this.emit({ type: 'turn.ended', turnId: this.compactTurn, stopReason: 'background', backgroundKind: 'compact' });
           this.compactTurn = undefined;
           if (!this.active && !this.bgTurn) this.emit({ type: 'session.status', status: 'idle' });
+        } else if (type === 'compaction.blocked') {
+          // 无合成回合（多因回合进行中）：手动压缩竞态下原本毫无反馈 —— 显性化。
+          this.emit({ type: 'error', source: 'engine', message: L('压缩未执行：引擎正忙或上下文不足', 'Compaction not performed: engine busy or insufficient context') });
         }
         return;
       }
@@ -959,11 +1191,7 @@ export class KimiKapAdapter implements EngineAdapter {
       this.emit({ type: 'models.update', current: model, available: this.modelCatalog });
     }
     if (p.permission != null || p.planMode != null) {
-      const mode = mapKapToMode(String(p.permission ?? 'manual'), p.planMode === true);
-      if (mode !== this.mode) {
-        this.mode = mode;
-        this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
-      }
+      this.syncModeFromEngine(mapKapToMode(String(p.permission ?? 'manual'), p.planMode === true));
     }
     // swarm 回声：含引擎自发退出（auto-exit）与模型经 AgentSwarm 工具自行进入。
     if (p.swarmMode != null && (p.swarmMode === true) !== this.curSwarm) {
@@ -1043,6 +1271,15 @@ export class KimiKapAdapter implements EngineAdapter {
       return;
     }
     if (type === 'tool.call.started') {
+      // 子代理的 TodoList 写：v2 清单会话级共享（写入 main 代理的 wire），
+      // 同样投射计划面板；不进子代理进度行。
+      if (String(p.name ?? '') === 'TodoList') {
+        const todos = (p.args as Json | undefined)?.todos;
+        if (Array.isArray(todos)) {
+          this.emit({ type: 'plan.update', turnId: this.currentTurn(), entries: mapTodoEntries(todos) ?? [] });
+        }
+        return;
+      }
       const summary = displaySummary(p.display) || String(p.name ?? '');
       if (summary) this.pushSubagentLine(view, `⚙ ${summary}`, true);
       view.buf = '';
@@ -1103,7 +1340,8 @@ export class KimiKapAdapter implements EngineAdapter {
   private async refreshSkills(): Promise<void> {
     const data = await this.api<Json>('GET', `/sessions/${this.sessionId}/skills`);
     const skills = (Array.isArray(data.skills) ? data.skills : []) as Json[];
-    this.skillNames = new Set(skills.map((s) => String(s.name ?? '')).filter(Boolean));
+    // 拦截表统一小写（引擎 normalizeSkillName 小写不敏感；prompt 拦截处同小写比对）。
+    this.skillNames = new Set(skills.map((s) => String(s.name ?? '').toLowerCase()).filter(Boolean));
     this.emit({
       type: 'commands.update',
       commands: [
@@ -1120,9 +1358,11 @@ export class KimiKapAdapter implements EngineAdapter {
     const s = await this.api<Json>('GET', `/sessions/${this.sessionId}/status`);
     this.curModel = s.model == null ? this.curModel : String(s.model);
     this.emit({ type: 'models.update', current: this.curModel, available: this.modelCatalog });
-    const mode = mapKapToMode(String(s.permission ?? 'manual'), s.plan_mode === true);
-    this.mode = mode;
-    this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
+    const reported = mapKapToMode(String(s.permission ?? 'manual'), s.plan_mode === true);
+    // 初次水合无条件广播一次锚定 UI（值 = 防降级后的权威档）。
+    if (!this.syncModeFromEngine(reported)) {
+      this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
+    }
     this.curSwarm = s.swarm_mode === true;
     this.emit({ type: 'swarm.update', active: this.curSwarm });
     const used = Number(s.context_tokens ?? 0);
@@ -1143,7 +1383,7 @@ export class KimiKapAdapter implements EngineAdapter {
     const blocks: Json[] = [];
     const notes: string[] = [];
     for (const path of attachments ?? []) {
-      const mime = IMAGE_MIME[extname(path).toLowerCase()];
+      const mime = inlineImageMime(path);
       if (mime) {
         try {
           blocks.push({
@@ -1172,7 +1412,9 @@ export class KimiKapAdapter implements EngineAdapter {
       notes.push(`[附件] ${path}`);
     }
     const fullText = notes.length ? `${text}\n\n${notes.join('\n')}` : text;
-    blocks.unshift({ type: 'text', text: fullText });
+    // ???????kimi ACP Internal error / codex ?? 400 ?????
+    // KAP content ? min(1)????/????????????????????
+    if (fullText.trim() || blocks.length === 0) blocks.unshift({ type: 'text', text: fullText });
     return blocks;
   }
 
@@ -1257,7 +1499,7 @@ function mapStopReason(reason: string): string {
 function guessMime(path: string): string {
   const ext = extname(path).toLowerCase();
   return (
-    IMAGE_MIME[ext] ??
+    inlineImageMime(path) ??
     {
       '.txt': 'text/plain',
       '.md': 'text/markdown',

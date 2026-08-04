@@ -7,8 +7,9 @@
 import { app } from 'electron';
 import { BrowserWindow, Notification } from 'electron';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { WebContents } from 'electron';
 
 import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, PermissionOptionView, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
@@ -23,6 +24,7 @@ import type { KapServerHost } from './kimi/KapServerHost';
 import { CodexAdapter } from './codex/CodexAdapter';
 import { ChangeTracker } from './changeTracker';
 import { compatAudit } from './compatAudit';
+import { log } from '../log/logger';
 import { OpencodeAdapter } from './opencode/OpencodeAdapter';
 import { OmpAdapter } from './omp/OmpAdapter';
 import { AntigravityAdapter } from './antigravity/AntigravityAdapter';
@@ -61,6 +63,8 @@ interface UsageRow {
 
 export class SessionManager {
   private readonly sessions = new Map<string, LiveSession>();
+  /** 各会话活跃 goal 跟踪（goal.update 事件维护）— 见 onEngineEvent。 */
+  private readonly goalActive = new Map<string, boolean>();
   private target: WebContents | undefined;
   /** 逐会话文件编辑台账 + 回退能力（变更面板接受/拒绝）。 */
   private readonly changes = new ChangeTracker();
@@ -74,6 +78,19 @@ export class SessionManager {
      *  产出新内容（正文/工具活动）才清 —— 防无产出的自发回合（auto-
      *  compact 等）把赛马刚拿到的 transcript 产物摧毁成空串。 */
   private readonly turnFresh = new Set<string>();
+  /** 回合内「工具前正文」暂存：工具启动会清空 turnText（收敛为最后一段
+   *  连续正文）；若回合止于工具、没有再产出收尾总结，turnText 为空 ≠
+   *  本回合无产出 —— transcript 回落此段，避免慢热/截断收尾的回合被
+   *  赛马误判「未产出内容」。 */
+  private readonly turnFallback = new Map<string, string>();
+  /** 当前适配器代的 turnId 偏移：会话全局回合号 = base + 适配器局部号。
+   *  各适配器的回合计数器都从 1 重启（切引擎/重启/resume 换实例即撞号），
+   *  而渲染层按 turnId 折叠「已完成回合」——撞号会把进行中回合的过程块
+   *  折进历史回合的 Worked 行（执行中界面全空、Working 指示被误抑制）。
+   *  故每次 adapter 重建都以「会话历史最大回合号」为底续号（startRuntime）。 */
+  private readonly turnIdBase = new Map<string, number>();
+  /** 本进程已发出的最大会话全局回合号（重映射时同步推进，供续号取底）。 */
+  private readonly maxSessionTurnId = new Map<string, number>();
 
   constructor(
     private readonly settings: SettingsStore,
@@ -128,11 +145,21 @@ export class SessionManager {
     };
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
+    log.info('session', 'session created', {
+      sessionId: id,
+      engine: meta.engine,
+      chatMode: meta.chatMode,
+      cwd: meta.cwd,
+      workspaceId: meta.workspaceId,
+      raceId: meta.raceId,
+      modelId: meta.modelId || undefined,
+      permissionMode: meta.permissionMode,
+    });
 
     // 不等引擎起完 — 立刻返回 meta 让 UI 秒跳新会话，进程后台启动，
     // 状态由 session.status 事件推进（starting → idle / error）。
     const live = this.sessions.get(id)!;
-    live.starting = this.startRuntime(live).catch(() => undefined);
+    void this.trackStarting(live, this.startRuntime(live)).catch(() => undefined);
     return meta;
   }
 
@@ -148,22 +175,62 @@ export class SessionManager {
     this.touch(s.meta);
     // Fallback-fork branches carry the parent history as a one-shot prefix.
     let engineText = text;
+    let seedAttached = false;
     if (s.meta.contextSeed) {
+      seedAttached = true;
       engineText = `${s.meta.contextSeed}\n\n用户消息：${text}`;
-      s.meta.contextSeed = undefined;
-      this.persistMetas();
     } else if (text.startsWith('/')) {
       // 发送侧斜杠路由：引擎不解析斜杠文本时客户端补齐执行语义
-      //（opencode 命令走原生端点；codex/antigravity 展开模板/技能）。
+      //（opencode 命令/技能走原生端点；codex 技能原生注入；
+      //  codex/antigravity 展开模板/技能文本）。
       const route = await routeSlashPrompt(s.meta.cwd, s.meta.engine, text).catch(() => null);
       if (route?.type === 'command' && s.adapter?.command) {
-        await s.adapter.command(route.name, route.args);
+        await s.adapter.command(route.name, route.args, attachments, route.path, route.skill);
         this.touch(s.meta);
         return;
       }
+      if (route?.type === 'skill') {
+        if (s.adapter?.promptSkill) {
+          await s.adapter.promptSkill(route.name, route.path, route.args);
+          this.touch(s.meta);
+          return;
+        }
+        // 无原生注入面的引擎（理论兜底 — 目前仅 codex 返回 skill 路由且
+        // CodexAdapter 已实现 promptSkill）：退回「读技能文件」文本展开。
+        engineText = [
+          `请读取技能文件 ${route.path}，严格按其中的说明执行任务。`,
+          route.args ? `任务输入：${route.args}` : '（无附加输入，按技能默认流程执行。）',
+        ].join('\n');
+      }
       if (route?.type === 'text') engineText = route.text;
     }
-    await s.adapter?.prompt(engineText, attachments, effort);
+    const promptStart = Date.now();
+    log.info('session', 'prompt dispatched', {
+      sessionId,
+      engine: s.meta.engine,
+      // 当前生效模型（models.update 事件持续回填）；空串 = 引擎默认模型。
+      modelId: s.meta.modelId || 'engine-default',
+      chars: engineText.length,
+      attachments: attachments?.length ?? 0,
+      // 渲染层下发的就是界面显示档（含未显选时的默认档，所见即所得）；
+      // undefined = 该引擎/模型无档位面（antigravity/目录未就绪）→ 跟随引擎当前档。
+      effort: effort ?? 'engine-current',
+      slashCommand: engineText !== text,
+    });
+    try {
+      await s.adapter?.prompt(engineText, attachments, effort);
+      // Clear the one-shot seed only after a successful dispatch: when the
+      // adapter throws (rpc closed / disposed / busy), the message never
+      // reached the engine and the seed must survive for the retry.
+      if (seedAttached) {
+        s.meta.contextSeed = undefined;
+        this.persistMetas();
+      }
+      log.info('session', 'prompt turn completed', { sessionId, ms: Date.now() - promptStart });
+    } catch (err) {
+      log.error('session', 'prompt turn failed', { sessionId, ms: Date.now() - promptStart }, err);
+      throw err;
+    }
     this.touch(s.meta);
   }
 
@@ -174,15 +241,28 @@ export class SessionManager {
     // 登记 in-flight — 并发调用（如快速连点的 warmUp 与 prompt）汇合到
     // 同一次启动，否则会并行 spawn 两个引擎，adapter 互覆 → 孤儿进程
     // + 两路状态事件打架（会话卡在 starting 转圈）。
-    s.starting = this.startRuntime(s);
-    await s.starting;
+    await this.trackStarting(s, this.startRuntime(s));
   }
 
   /** Spawn + 握手；create（后台）与 ensureRuntime（懒唤醒）共用。
    *  失败时广播 error 事件并抛出，adapter 清空以便下次重试。 */
+  /** Registers an in-flight startRuntime promise; only the registrar's own
+   *  generation clears the slot, so a stale finally cannot wipe the next
+   *  generation's registration (close() -> immediate prompt() re-entry). */
+  private trackStarting(s: LiveSession, p: Promise<void>): Promise<void> {
+    const tracked = p.finally(() => {
+      if (s.starting === tracked) s.starting = undefined;
+    });
+    s.starting = tracked;
+    return tracked;
+  }
+
   private async startRuntime(s: LiveSession): Promise<void> {
+    const wasResume = !!s.meta.engineSessionId;
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
+    // 新适配器代：局部 turnId 从 1 重计 → 以会话已知最大回合号续号。
+    this.turnIdBase.set(s.meta.id, this.sessionMaxTurnId(s.meta.id));
     // 能力快照：单一真源 = adapter 可选方法存在性（同一引擎不同通道
     // 能力不同，如 kimi KAP/ACP）— UI 据此显隐 goal/steer 等控件。
     s.meta.capabilities = {
@@ -201,16 +281,40 @@ export class SessionManager {
       type: 'session.meta',
       patch: { capabilities: s.meta.capabilities, kimiChannel: s.meta.kimiChannel },
     });
+    const startTs = Date.now();
     try {
       const { engineSessionId } = await adapter.start();
+      // close() detached us mid-start: the session was closed/reset while
+      // the engine handshake was in flight. Writing back engineSessionId /
+      // status would resurrect it (undo silently failing) and leak the
+      // engine process -- self-destruct instead.
+      if (s.adapter !== adapter) {
+        log.info('session', 'engine runtime start raced close, disposing', { sessionId: s.meta.id, engine: s.meta.engine });
+        await adapter.dispose().catch(() => undefined);
+        return;
+      }
       s.meta.engineSessionId = engineSessionId;
       s.meta.status = 'idle';
       this.persistMetas();
+      log.info('session', 'engine runtime ready', {
+        sessionId: s.meta.id,
+        engine: s.meta.engine,
+        channel: s.meta.kimiChannel,
+        engineSessionId,
+        resumed: wasResume,
+        ms: Date.now() - startTs,
+      });
       this.forward(s.meta.id, { type: 'session.status', status: 'idle' });
     } catch (err) {
       s.adapter = undefined;
       s.meta.status = 'error';
       this.persistMetas();
+      log.error(
+        'session',
+        'engine runtime start failed',
+        { sessionId: s.meta.id, engine: s.meta.engine, ms: Date.now() - startTs },
+        err,
+      );
       this.forward(s.meta.id, { type: 'session.status', status: 'error' });
       this.forward(s.meta.id, {
         type: 'error',
@@ -219,13 +323,25 @@ export class SessionManager {
       });
       await adapter.dispose().catch(() => undefined);
       throw err;
-    } finally {
-      s.starting = undefined;
     }
   }
 
   async cancel(sessionId: string): Promise<void> {
-    await this.require(sessionId).adapter?.cancel();
+    log.info('session', 'turn cancel requested', { sessionId });
+    const s = this.require(sessionId);
+    // 官方 codex 客户端行为（TUI pause_active_goal_for_interrupt）：中断时
+    // 有活跃 goal 一并暂停 —— 否则 codex 回合中断后 idle 会立刻自动重启
+    // goal 续跑，「停止」看起来无效。（kimi 引擎中断会自己 pauseOnInterrupt，
+    // 多发一次 pause 无害且幂等。）
+    if (this.goalActive.get(sessionId) && s.adapter?.controlGoal) {
+      // pause 失败/超时都不能拖住停止 —— 引擎卡死时停止按钮必须照样可用，
+      // 3s 上限后照常 interrupt（暂停失败的最坏结果是续跑再起，再点一次即可）。
+      const pause = s.adapter.controlGoal('pause').catch((err) => {
+        log.warn('session', 'goal pause on cancel failed', { sessionId, error: String(err) });
+      });
+      await Promise.race([pause, new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
+    }
+    await s.adapter?.cancel();
   }
 
   /** 预热：选中会话时提前唤醒引擎（已在跑则无操作），
@@ -251,22 +367,38 @@ export class SessionManager {
   async fork(sessionId: string): Promise<SessionMeta> {
     const src = this.require(sessionId);
     await this.ensureRuntime(src);
-    // claude 原生分叉：父会话有 engineSessionId 时，新会话首个 prompt 以
-    // --resume <父> --fork-session 分叉（引擎侧真分支，免重放历史）。
-    const claudeFork = src.meta.engine === 'claude' && src.meta.engineSessionId ? src.meta.engineSessionId : undefined;
-    const native = !claudeFork && src.adapter?.fork ? await src.adapter.fork() : null;
+    // claude native fork: copy the transcript file NOW for an exact fork
+    // point (lazy --fork-session at the branch's first prompt would leak
+    // post-fork parent turns into the branch). Falls back to the lazy path
+    // when the transcript file cannot be located.
+    let claudeForkNewId: string | undefined;
+    let claudeForkPending: string | undefined;
+    if (src.meta.engine === 'claude' && src.meta.engineSessionId) {
+      claudeForkNewId = forkClaudeTranscript(src.meta.engineSessionId);
+      if (!claudeForkNewId) claudeForkPending = src.meta.engineSessionId;
+    }
+    const claudeForkAny = !!(claudeForkNewId || claudeForkPending);
+    const native = !claudeForkAny && src.adapter?.fork ? await src.adapter.fork() : null;
     const id = randomUUID();
     const history = this.getMessages(sessionId);
     const meta: SessionMeta = {
-      ...src.meta,
+      // Explicit field whitelist (was: ...src.meta spread, which leaked
+      // archived/unread/raceId/capabilities/kimiChannel onto the branch).
       id,
-      engineSessionId: native?.engineSessionId, // undefined → fresh session on revive
-      forkPendingFromId: claudeFork, // claude: 首个 prompt 时 --fork-session 的父 id
+      engine: src.meta.engine,
+      kimiChannel: src.meta.engine === 'kimi' ? src.meta.kimiChannel : undefined,
+      cwd: src.meta.cwd,
+      chatMode: src.meta.chatMode,
+      workspaceId: src.meta.workspaceId,
+      modelId: src.meta.modelId,
+      permissionMode: src.meta.permissionMode,
+      engineSessionId: claudeForkNewId ?? native?.engineSessionId, // undefined → fresh session on revive
+      forkPendingFromId: claudeForkPending,
       title: `⑂ ${src.meta.title.replace(/^⑂ /, '')}`,
       parentId: src.meta.id,
       chained: undefined, // sidechat 分支平级展示，不折叠父会话（区别于 forkToEngine）
       // 原生分叉（native 或 claudeFork）无需重放种子；否则注入历史。
-      contextSeed: native || claudeFork ? undefined : serializeHistory(history),
+      contextSeed: native || claudeForkAny ? undefined : serializeHistory(history),
       forkSeedCount: history.length, // 面板隐藏这段继承历史，仅显示分支内新问答
       status: 'closed', // revived lazily on first prompt
       createdAt: Date.now(),
@@ -276,6 +408,14 @@ export class SessionManager {
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
     this.saveMessages(id, history);
+    log.info('session', 'session forked', {
+      sessionId: id,
+      parentId: src.meta.id,
+      engine: meta.engine,
+      nativeFork: !!native,
+      claudeFork: claudeForkNewId ? 'file' : claudeForkPending ? 'lazy' : false,
+      historyMessages: history.length,
+    });
     return meta;
   }
 
@@ -298,16 +438,24 @@ export class SessionManager {
       await this.close(sessionId);
       src.meta.engine = engine;
       src.meta.engineSessionId = undefined;
+      // channel tag belongs to the kimi engine only -- clear it when switching
+      // away (buildAdapter re-stamps it if the session ever switches back).
+      if (engine !== 'kimi') src.meta.kimiChannel = undefined;
       if (engineChanged) src.meta.modelId = '';
       src.meta.permissionMode = engine === 'antigravity' ? 'auto' : src.meta.permissionMode;
       this.touch(src.meta);
+      log.info('session', 'empty session engine switched in place', { sessionId, engine });
       return src.meta;
     }
     const id = randomUUID();
     const meta: SessionMeta = {
-      ...src.meta,
+      // Explicit field whitelist (was: ...src.meta spread -- same leak as fork()).
       id,
       engine,
+      kimiChannel: engine === 'kimi' ? src.meta.kimiChannel : undefined,
+      cwd: src.meta.cwd,
+      chatMode: src.meta.chatMode,
+      workspaceId: src.meta.workspaceId,
       engineSessionId: undefined,
       title: src.meta.title.replace(/^[⑂⇄] /, ''), // 视觉连续：沿用原标题，不加分支前缀
       parentId: src.meta.id,
@@ -336,6 +484,13 @@ export class SessionManager {
       createdAt: Date.now(),
     };
     this.saveMessages(id, [...history, divider]);
+    log.info('session', 'session forked to engine', {
+      sessionId: id,
+      parentId: src.meta.id,
+      fromEngine: src.meta.engine,
+      toEngine: engine,
+      historyMessages: history.length,
+    });
     return meta;
   }
 
@@ -343,6 +498,7 @@ export class SessionManager {
     const s = this.require(sessionId);
     await this.ensureRuntime(s);
     if (!s.adapter?.compact) throw new Error(L(`引擎 ${s.meta.engine} 不支持上下文压缩`, `Engine ${s.meta.engine} does not support context compaction`));
+    log.info('session', 'context compaction requested', { sessionId, engine: s.meta.engine });
     await s.adapter.compact();
   }
 
@@ -364,9 +520,10 @@ export class SessionManager {
     return s ? this.changes.revert(sessionId, s.meta.cwd, path) : Promise.resolve();
   }
 
-  /** 接受（保留改动、停止跟踪）；path 省略 = 全部。 */
-  changesAccept(sessionId: string, path?: string): void {
-    this.changes.accept(sessionId, path);
+  /** 接受（保留改动、标记已接受）；path 省略 = 全部。 */
+  async changesAccept(sessionId: string, path?: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) await this.changes.accept(sessionId, s.meta.cwd, path);
   }
 
   /** 回退到某提问将撤销的文件清单；null = 该提问无快照（旧消息/cron 注入）。 */
@@ -432,6 +589,7 @@ export class SessionManager {
 
   async controlGoal(sessionId: string, action: GoalControlAction): Promise<void> {
     const s = this.require(sessionId);
+    await this.ensureRuntime(s);
     if (!s.adapter?.controlGoal) throw new Error(L(`引擎 ${s.meta.engine} 不支持原生 Goal`, `Engine ${s.meta.engine} does not support native Goal`));
     await s.adapter.controlGoal(action);
   }
@@ -512,7 +670,11 @@ export class SessionManager {
     if (!ws) return;
     const seed = `工作区「${ws.name}」的目录集已更新，当前包含以下根目录（第一个是工作目录，其余目录同属本项目范围，可用绝对路径访问；不在列表内的旧目录已移出本工作区）：\n${ws.folders.join('\n')}`;
     for (const s of this.sessions.values()) {
-      if (s.meta.workspaceId === workspaceId) s.meta.contextSeed = seed;
+      // Append rather than overwrite: a pending fork/undo history seed must
+      // not be clobbered by the workspace-folder announcement.
+      if (s.meta.workspaceId === workspaceId) {
+        s.meta.contextSeed = s.meta.contextSeed ? `${s.meta.contextSeed}\n\n${seed}` : seed;
+      }
     }
     this.persistMetas();
   }
@@ -520,25 +682,37 @@ export class SessionManager {
   async close(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    await s.adapter?.dispose().catch(() => undefined);
+    const hadAdapter = !!s.adapter;
+    // Detach BEFORE dispose: an in-flight startRuntime checks this reference
+    // after adapter.start() resolves and self-destructs instead of writing
+    // engineSessionId/status back over the closed/reset session (undo/fork
+    // during the startup window used to silently fail + orphan the engine).
+    const adapter = s.adapter;
     s.adapter = undefined;
+    await adapter?.dispose().catch(() => undefined);
     s.meta.status = 'closed';
+    log.info('session', 'session closed', { sessionId, engine: s.meta.engine, engineWasRunning: hadAdapter });
     this.touch(s.meta);
   }
 
   async delete(sessionId: string): Promise<void> {
+    const engine = this.sessions.get(sessionId)?.meta.engine;
     await this.close(sessionId);
     this.sessions.delete(sessionId);
+    this.goalActive.delete(sessionId);
     this.changes.clear(sessionId);
     this.localListeners.delete(sessionId);
     this.turnText.delete(sessionId);
     this.turnOpen.delete(sessionId);
+    this.turnIdBase.delete(sessionId);
+    this.maxSessionTurnId.delete(sessionId);
     this.persistMetas();
     try {
       rmSync(this.messagesFile(sessionId), { force: true });
     } catch {
       /* best effort */
     }
+    log.info('session', 'session deleted', { sessionId, engine });
   }
 
   // -------------------------------------------------- message persistence
@@ -562,7 +736,7 @@ export class SessionManager {
       mkdirSync(join(app.getPath('userData'), 'messages'), { recursive: true });
       writeFileSync(this.messagesFile(sessionId), JSON.stringify(messages), 'utf8');
     } catch (err) {
-      console.error('[sessions] save messages failed:', err);
+      log.error('session', 'save messages failed', { sessionId }, err);
     }
   }
 
@@ -675,7 +849,11 @@ export class SessionManager {
 
   /** Kill every child process — called on app quit (anti-orphan). */
   async disposeAll(): Promise<void> {
-    await Promise.allSettled([...this.sessions.values()].map((s) => s.adapter?.dispose()));
+    const live = [...this.sessions.values()].filter((s) => s.adapter).length;
+    log.info('session', 'disposeAll: killing engine processes', { live, total: this.sessions.size });
+    const results = await Promise.allSettled([...this.sessions.values()].map((s) => s.adapter?.dispose()));
+    const failed = results.filter((r) => r.status === 'rejected');
+    if (failed.length) log.warn('session', 'disposeAll: some engines failed to dispose', { failed: failed.length });
   }
 
   // ---------------------------------------------------------------- private
@@ -711,6 +889,8 @@ export class SessionManager {
         permissionMode: meta.permissionMode,
         resumeSessionId,
         quietResumeFallback,
+        // 赛马角色会话无人值守：自动批准权限请求，防死锁（对齐 claude unattended）。
+        unattended: !!meta.raceId,
       };
       const sink = (event: EngineEvent): void => this.onEngineEvent(meta.id, event);
       // 通道选路：KAP（kimi web REST+WS，goal/steer/fork/真实 usage 全原生）
@@ -729,7 +909,7 @@ export class SessionManager {
           // → 降级 ACP 兼容兜底；证据入兼容审计，对用户仅提示一次。
           const msg = err instanceof Error ? err.message : String(err);
           compatAudit.record('kimi', 'rejected-method', 'kap-server unavailable', msg);
-          console.warn(`[kap-host] KAP 不可用，降级 ACP: ${msg}`);
+          log.warn('engine.kimi', 'KAP unavailable, falling back to ACP', { sessionId: meta.id, detail: msg });
         }
       }
       meta.kimiChannel = 'acp';
@@ -767,6 +947,8 @@ export class SessionManager {
           permissionMode: meta.permissionMode,
           resumeThreadId: resumeSessionId,
           quietResumeFallback,
+          // 赛马角色会话无人值守（对齐 claude unattended）。
+          unattended: !!meta.raceId,
           configOverrideArgs: overrideArgs,
           // 其余根目录并入 workspace-write 沙盒可写根（codex 是唯一有
           // OS 沙盒会硬拦写的引擎）。
@@ -787,6 +969,8 @@ export class SessionManager {
           permissionMode: meta.permissionMode,
           resumeSessionId,
           quietResumeFallback,
+          // 赛马角色会话无人值守（对齐 claude unattended）。
+          unattended: !!meta.raceId,
           // opencode 引擎侧无多根概念 — 其余根目录经会话级
           // external_directory 规则预放行，免逐次弹权限卡。
           extraDirs: extraRoots,
@@ -807,6 +991,8 @@ export class SessionManager {
           permissionMode: meta.permissionMode,
           resumeSessionId,
           quietResumeFallback,
+          // 赛马角色会话无人值守（对齐 claude unattended）。
+          unattended: !!meta.raceId,
           // 其余根目录走 omp 原生 multi-root（spawn 级 --add-dir）。
           extraDirs: extraRoots,
         },
@@ -827,6 +1013,7 @@ export class SessionManager {
           resumeSessionId,
           // 工作态会话：把项目根传给适配器，首个 prompt 注入工作目录上下文
           // （headless agent 不把进程 cwd 当「工作区」自述，不告知就说“未设置工作区”）。
+          quietResumeFallback,
           workDir: meta.chatMode === 'work' ? meta.cwd : undefined,
         },
         (event) => this.onEngineEvent(meta.id, event),
@@ -860,11 +1047,42 @@ export class SessionManager {
     throw new Error(L(`未知引擎: ${meta.engine}`, `Unknown engine: ${meta.engine}`));
   }
 
+  /** 适配器局部回合号 → 会话全局回合号（同一适配器代内 base 恒定、局部号
+   *  单调递增 → 全局号单调）。turnId<=0 为「无回合」哨兵
+   *  （system / 无回合 error / steer·cron 的 user.echo），原样透传。 */
+  private withSessionTurnId(sessionId: string, event: EngineEvent): EngineEvent {
+    const raw = (event as { turnId?: number }).turnId;
+    if (typeof raw !== 'number' || raw <= 0) return event;
+    const base = this.turnIdBase.get(sessionId) ?? 0;
+    const mapped = base + raw;
+    if (mapped > (this.maxSessionTurnId.get(sessionId) ?? 0)) this.maxSessionTurnId.set(sessionId, mapped);
+    // 只在变体本就有 turnId 时到达（raw 取自事件自身）；联合 spread 加不了
+    // 成员未声明的属性，这里收窄回 EngineEvent。
+    return { ...event, turnId: mapped } as EngineEvent;
+  }
+
+  /** 会话已知最大回合号：运行态计数与磁盘历史取大（进程重启后首个适配器
+   *  代只能靠磁盘历史续号；分支会话复制来的历史也在磁盘文件里）。 */
+  private sessionMaxTurnId(sessionId: string): number {
+    let max = this.maxSessionTurnId.get(sessionId) ?? 0;
+    for (const m of this.getMessages(sessionId)) if (m.turnId > max) max = m.turnId;
+    return max;
+  }
+
   private onEngineEvent(sessionId: string, event: EngineEvent): void {
+    event = this.withSessionTurnId(sessionId, event);
     const s = this.sessions.get(sessionId);
     if (s) {
       if (event.type === 'session.status') {
         s.meta.status = event.status;
+        // Engine process died unexpectedly (kimi/codex/omp ACP adapters emit
+        // detail 'engine-exited'): drop the dead adapter so the next prompt /
+        // warmUp goes through ensureRuntime -> fresh startRuntime -> resume
+        // via the persisted engineSessionId. Previously the dead adapter
+        // lingered and every prompt failed with 'rpc closed' until app restart.
+        if (event.detail === 'engine-exited') {
+          s.adapter = undefined;
+        }
         // 仅真正开跑才刷 updatedAt — 预热/唤醒的状态过渡不该改变
         // 侧栏排序（与 renderer 侧同规则）。
         if (event.status === 'running') s.meta.updatedAt = Date.now();
@@ -895,6 +1113,13 @@ export class SessionManager {
       } else if (event.type === 'turn.started') {
         // AI 尚未动手：首个回合拍基线影子快照（含用户未提交手改）。
         void this.changes.onTurnStart(s.meta.id, s.meta.cwd);
+      } else if (event.type === 'goal.update') {
+        // 跟踪活跃 goal：① 完成桌面通知仅发给「本会话真实经历过进行中」的
+        // goal（resume 快照重放引擎 DB 里的 complete 残留行不重复通知）；
+        // ② cancel 时联动暂停（见 cancel()）。
+        const wasActive = this.goalActive.get(sessionId) === true;
+        this.goalActive.set(sessionId, !!event.goal && event.goal.status !== 'complete');
+        if (event.goal?.status === 'complete' && wasActive) this.notifyGoalComplete(s.meta, event.goal.objective);
       } else if (event.type === 'tool.upsert') {
         // 文件编辑事件 → 标记本会话编辑过该文件（供变更面板过滤）。
         const kind = event.toolKind ?? '';
@@ -912,11 +1137,31 @@ export class SessionManager {
           }
         }
       }
+      if (event.type === 'error') {
+        // 引擎/供应商侧错误全量留痕（UI 通知可能关闭或被错过）。
+        log.warn('session', 'engine error event', {
+          sessionId,
+          engine: s.meta.engine,
+          source: event.source,
+          quotaExhausted: event.quotaExhausted,
+          message: event.message,
+        });
+      }
       this.maybeNotify(s.meta, event);
     }
     this.trackTurnText(sessionId, event);
     this.emitLocal(sessionId, event);
     this.forward(sessionId, event);
+  }
+
+  /** Goal 完成桌面通知（仅窗口失焦时）— 调用方已判过「曾活跃」。 */
+  private notifyGoalComplete(meta: SessionMeta, objective: string): void {
+    const prefs = this.settings.get().notifications;
+    if (!prefs.taskComplete || BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
+    new Notification({
+      title: L(`Goal 执行完成：${meta.title}`, `Goal completed: ${meta.title}`),
+      body: objective.slice(0, 100),
+    }).show();
   }
 
   /** System notifications per user preference; only when the window is unfocused. */
@@ -935,11 +1180,6 @@ export class SessionManager {
       )
         return;
       new Notification({ title: L(`任务完成：${meta.title}`, `Task done: ${meta.title}`), body: L('回到窗口查看结果', 'Return to the window to view the result') }).show();
-    } else if (event.type === 'goal.update' && event.goal?.status === 'complete' && prefs.taskComplete) {
-      new Notification({
-        title: L(`Goal 执行完成：${meta.title}`, `Goal completed: ${meta.title}`),
-        body: event.goal.objective.slice(0, 100),
-      }).show();
     } else if (event.type === 'permission.request' && prefs.question) {
       new Notification({ title: L(`需要你的确认：${meta.title}`, `Needs your confirmation: ${meta.title}`), body: event.title }).show();
     } else if (event.type === 'error' && prefs.error) {
@@ -990,9 +1230,14 @@ export class SessionManager {
       this.turnFresh.add(sessionId);
       this.turnOpen.add(sessionId);
     } else if (event.type === 'text.delta') {
-      if (this.turnFresh.delete(sessionId)) this.turnText.set(sessionId, '');
+      // 本回合真产出 → 上回合产物与暂存一并作废（懒重置点）。
+      if (this.turnFresh.delete(sessionId)) {
+        this.turnText.set(sessionId, '');
+        this.turnFallback.delete(sessionId);
+      }
       if (!this.turnOpen.has(sessionId)) {
         this.turnText.set(sessionId, '');
+        this.turnFallback.delete(sessionId);
         this.turnOpen.add(sessionId);
       }
       this.turnText.set(sessionId, (this.turnText.get(sessionId) ?? '') + event.text);
@@ -1005,18 +1250,41 @@ export class SessionManager {
         this.turnOpen.has(sessionId) &&
         (event.status === 'pending' || event.status === 'in_progress')
       ) {
-        this.turnFresh.delete(sessionId); // 真干活了 → 懒重置作废
-        this.turnText.set(sessionId, '');
+        // 本回合尚无正文（工具先行）→ turnText 是上回合遗留：直接清掉，
+        // 不得入暂存（否则上回合产物会伪装成本回合产出被回落采用）。
+        if (this.turnFresh.delete(sessionId)) {
+          this.turnText.set(sessionId, '');
+          this.turnFallback.delete(sessionId);
+        } else {
+          // 清空前暂存非空正文：回合若止于工具、无收尾总结，transcript 仍有
+          // 本回合真实产出可回落（慢热选手被误判「未产出」的主要源头）。
+          const prev = (this.turnText.get(sessionId) ?? '').trim();
+          if (prev) this.turnFallback.set(sessionId, prev);
+          this.turnText.set(sessionId, '');
+        }
       }
     } else if (event.type === 'turn.ended') {
       this.turnOpen.delete(sessionId);
       this.turnFresh.delete(sessionId);
+      // 收尾正文为空但暂存非空 → transcript 将回落暂存段；每回合仅此
+      // 时点留痕一次（摘要计数，正文不入日志）。
+      const fallback = (this.turnFallback.get(sessionId) ?? '').trim();
+      if (!(this.turnText.get(sessionId) ?? '').trim() && fallback) {
+        log.debug('session', 'turn ended without closing text; transcript falls back to pre-tool segment', {
+          sessionId,
+          fallbackChars: fallback.length,
+        });
+      }
     }
   }
 
-  /** 最新一个回合的助手正文（赛马角色间产物交接用）。 */
+  /** 最新一个回合的助手正文（赛马角色间产物交接用）。优先「最后一段
+   *  连续正文」；回合止于工具而无收尾总结时回落到工具前暂存段 ——
+   *  有产出但无终稿 ≠ 未产出，回落也为空才真是空回合。 */
   transcript(sessionId: string): string {
-    return (this.turnText.get(sessionId) ?? '').trim();
+    const final = (this.turnText.get(sessionId) ?? '').trim();
+    if (final) return final;
+    return (this.turnFallback.get(sessionId) ?? '').trim();
   }
 
   /** Builder 改动的文本摘要（供审计角色对照 diff）。 */
@@ -1024,7 +1292,7 @@ export class SessionManager {
     const list = await this.changesList(sessionId);
     if (!list.length) return '（无文件改动）';
     return list
-      .map((c) => `${c.status === 'added' ? 'A' : c.status === 'deleted' ? 'D' : 'M'} ${c.path} (+${c.adds}/-${c.dels})`)
+      .map((c) => `${c.status === 'accepted' ? '✓' : c.status === 'added' ? 'A' : c.status === 'deleted' ? 'D' : 'M'} ${c.path} (+${c.adds}/-${c.dels})${c.status === 'accepted' ? ' [已接受]' : ''}`)
       .join('\n');
   }
 
@@ -1053,7 +1321,7 @@ export class SessionManager {
     try {
       writeFileSync(this.metaFile, JSON.stringify(this.list(), null, 2), 'utf8');
     } catch (err) {
-      console.error('[sessions] persist failed:', err);
+      log.error('session', 'persist sessions.json failed', { count: this.sessions.size }, err);
     }
   }
 
@@ -1072,8 +1340,9 @@ export class SessionManager {
           adapter: undefined,
         });
       }
+      log.info('session', 'persisted sessions restored', { count: this.sessions.size });
     } catch (err) {
-      console.error('[sessions] load failed:', err);
+      log.error('session', 'load sessions.json failed', undefined, err);
     }
   }
 }
@@ -1259,4 +1528,36 @@ function serializeHistory(messages: UnifiedMessage[]): string {
     '历史中的工具调用与文件改动都已真实执行完毕，请勿重复执行；磁盘文件以当前实际内容为准。',
     '请基于以上上下文回答用户接下来的消息。',
   ].join('\n');
+}
+
+// ----------------------------------------------------- claude file-level fork
+
+/** Copy a claude transcript (~/.claude/projects/<slug>/<sid>.jsonl) to a new
+ *  session id for an exact-point fork. `claude --resume <newId>` detects the
+ *  lines belong to another (still existing) session and migrates them into a
+ *  fresh session id on first contact (probe-claude-fork-init: PASS -- the
+ *  init event already carries the final id, so the existing captureSession
+ *  backfill applies). Returns undefined when the transcript cannot be found
+ *  or copied (caller falls back to the lazy --fork-session path). */
+function forkClaudeTranscript(parentEngineSessionId: string): string | undefined {
+  try {
+    const root = join(homedir(), '.claude', 'projects');
+    for (const dir of readdirSync(root)) {
+      const src = join(root, dir, `${parentEngineSessionId}.jsonl`);
+      if (!existsSync(src)) continue;
+      const raw = readFileSync(src);
+      // jsonl is append-only: cut at the last complete line so a line caught
+      // mid-write cannot corrupt the copy.
+      let end = raw.length;
+      while (end > 0 && (raw[end - 1] === 0x0a || raw[end - 1] === 0x0d)) end--;
+      const lastNl = raw.lastIndexOf(0x0a, Math.max(0, end - 1));
+      if (lastNl <= 0) return undefined;
+      const newId = randomUUID();
+      writeFileSync(join(root, dir, `${newId}.jsonl`), raw.subarray(0, lastNl + 1));
+      return newId;
+    }
+  } catch {
+    /* fall through to lazy fork */
+  }
+  return undefined;
 }

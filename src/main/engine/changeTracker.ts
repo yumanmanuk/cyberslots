@@ -7,7 +7,7 @@
  *   - 变更清单 = 该会话 touched 的文件 ∩「自基线以来有差异」的文件；
  *   - 回退 = `git checkout <baselineHash> -- <file>`（还原到编辑前，或删新建）；
  *   - diff = 快照里的内容 vs 当前磁盘。
- * 只持久化 { baselineHash, touched[] }（轻量，非全文）；跨重启仍可回退。
+ * 只持久化 { baselineHash, touched[], accepted[], marks[] }（轻量，非全文）；跨重启仍可回退。
  * 多会话：各持自己的不可变基线 hash，回退互不打架（+ N会话徽标/二次确认）。
  */
 
@@ -16,6 +16,7 @@ import { basename, isAbsolute, join, relative } from 'node:path';
 import { app } from 'electron';
 
 import type { SessionChangeDiff, SessionChangeEntry } from '@shared/ipc';
+import { log } from '../log/logger';
 import { ShadowGit } from './shadowGit';
 
 interface SessionState {
@@ -23,6 +24,8 @@ interface SessionState {
   baselineHash: string | null;
   /** 本会话编辑过的绝对路径（供变更清单过滤到「本对话」范围）。 */
   touched: Set<string>;
+  /** 已接受文件快照（保留改动并展示为已接受，直到再次被编辑/回退）。 */
+  accepted: Map<string, AcceptedChange>;
   /** 逐提问快照（发送前拍）——「回退到某个提问」的还原点。 */
   marks: PromptMark[];
 }
@@ -32,6 +35,18 @@ interface PromptMark {
   messageId: string;
   /** 该提问发送前的影子快照 tree hash。 */
   hash: string;
+  ts: number;
+}
+
+interface AcceptedChange {
+  /** 已接受文件绝对路径。 */
+  path: string;
+  /** 接受时的文件名（路径变化不影响列表展示）。 */
+  name: string;
+  /** 接受时的原始变更类型。 */
+  status: 'modified' | 'added' | 'deleted';
+  adds: number;
+  dels: number;
   ts: number;
 }
 
@@ -74,8 +89,11 @@ export class ChangeTracker {
     if (!s.baselineHash) return;
     const stat = await this.shadow.diffStat(root, s.baselineHash);
     let added = false;
-    for (const rel of stat.keys()) {
+    for (const [rel, st] of stat) {
       const abs = join(root, rel);
+      const acc = s.accepted.get(abs);
+      // 已接受且统计未变化 = 仍是同一份已接受改动，不要重新变成待接受。
+      if (acc && acc.status === st.status && acc.adds === st.adds && acc.dels === st.dels) continue;
       if (!s.touched.has(abs)) {
         s.touched.add(abs);
         added = true;
@@ -84,11 +102,11 @@ export class ChangeTracker {
     if (added) this.persist(sessionId);
   }
 
-  /** 本会话 AI 编辑过、且与基线有差异的文件清单。 */
+  /** 本会话 AI 编辑过、且与基线有差异的文件清单（已接受文件也保留展示）。 */
   async list(sessionId: string, root: string): Promise<SessionChangeEntry[]> {
     this.ensureLoaded(sessionId);
     const s = this.state(sessionId);
-    if (!s.baselineHash || s.touched.size === 0) return [];
+    if (!s.baselineHash || (s.touched.size === 0 && s.accepted.size === 0)) return [];
     const stat = await this.shadow.diffStat(root, s.baselineHash);
     const out: SessionChangeEntry[] = [];
     for (const abs of s.touched) {
@@ -96,6 +114,10 @@ export class ChangeTracker {
       const st = stat.get(rel);
       if (!st) continue; // 无差异（已回退 / 与基线一致）
       out.push({ path: abs, name: basename(abs), adds: st.adds, dels: st.dels, status: st.status, sessions: this.sessionCount(abs) });
+    }
+    for (const acc of s.accepted.values()) {
+      if (s.touched.has(acc.path)) continue; // 再次被编辑后以待接受状态优先
+      out.push({ path: acc.path, name: acc.name, adds: acc.adds, dels: acc.dels, status: 'accepted', sessions: this.sessionCount(acc.path) });
     }
     return out;
   }
@@ -118,6 +140,7 @@ export class ChangeTracker {
     for (const abs of targets) {
       await this.shadow.revertFile(root, s.baselineHash, abs);
       s.touched.delete(abs);
+      s.accepted.delete(abs);
     }
     this.persist(sessionId);
   }
@@ -158,16 +181,27 @@ export class ChangeTracker {
       await this.shadow.revertFile(root, mark.hash, join(root, rel));
     }
     // 该提问及其后的消息已被移除 — 对应还原点一并作废。
+    // 回退到历史提问后，已接受标记不再对应当前文件状态，全部清空。
+    s.accepted.clear();
     s.marks = s.marks.filter((m) => m.ts < mark.ts);
     this.persist(sessionId);
   }
 
-  /** 接受（保留改动、停止跟踪，不动磁盘）；path 省略 = 全部。 */
-  accept(sessionId: string, path?: string): void {
+  /** 接受（保留改动、标记已接受，不动磁盘）；path 省略 = 全部。 */
+  async accept(sessionId: string, root: string, path?: string): Promise<void> {
     this.ensureLoaded(sessionId);
     const s = this.state(sessionId);
-    if (path) s.touched.delete(path);
-    else s.touched.clear();
+    if (!s.baselineHash) return;
+    const stat = await this.shadow.diffStat(root, s.baselineHash);
+    const targets = path ? [path] : [...s.touched];
+    for (const abs of targets) {
+      if (!s.touched.has(abs)) continue;
+      const rel = relative(root, abs).split('\\').join('/');
+      const st = stat.get(rel);
+      s.touched.delete(abs);
+      if (!st) continue; // 已回退/与基线一致，不生成已接受记录
+      s.accepted.set(abs, { path: abs, name: basename(abs), status: st.status, adds: st.adds, dels: st.dels, ts: Date.now() });
+    }
     this.persist(sessionId);
   }
 
@@ -187,7 +221,7 @@ export class ChangeTracker {
   private state(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (!s) {
-      s = { baselineHash: null, touched: new Set(), marks: [] };
+      s = { baselineHash: null, touched: new Set(), accepted: new Map(), marks: [] };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -210,7 +244,12 @@ export class ChangeTracker {
     try {
       const f = this.file(sessionId);
       if (!existsSync(f)) return;
-      const raw = JSON.parse(readFileSync(f, 'utf8')) as { baselineHash?: unknown; touched?: unknown; marks?: unknown };
+      const raw = JSON.parse(readFileSync(f, 'utf8')) as {
+        baselineHash?: unknown;
+        touched?: unknown;
+        accepted?: unknown;
+        marks?: unknown;
+      };
       if (raw && typeof raw === 'object' && Array.isArray(raw.touched)) {
         const marks = Array.isArray(raw.marks)
           ? raw.marks.filter(
@@ -218,28 +257,47 @@ export class ChangeTracker {
                 !!m && typeof m === 'object' && typeof (m as PromptMark).messageId === 'string' && typeof (m as PromptMark).hash === 'string' && typeof (m as PromptMark).ts === 'number',
             )
           : [];
+        const accepted = new Map<string, AcceptedChange>();
+        if (raw.accepted && typeof raw.accepted === 'object' && !Array.isArray(raw.accepted)) {
+          for (const [path, value] of Object.entries(raw.accepted as Record<string, unknown>)) {
+            const a = value as Partial<AcceptedChange> | null;
+            if (
+              a &&
+              typeof a === 'object' &&
+              typeof a.path === 'string' &&
+              typeof a.name === 'string' &&
+              (a.status === 'modified' || a.status === 'added' || a.status === 'deleted') &&
+              typeof a.adds === 'number' &&
+              typeof a.dels === 'number'
+            ) {
+              accepted.set(path, a as AcceptedChange);
+            }
+          }
+        }
         this.sessions.set(sessionId, {
           baselineHash: typeof raw.baselineHash === 'string' ? raw.baselineHash : null,
           touched: new Set(raw.touched.filter((x): x is string => typeof x === 'string')),
+          accepted,
           marks,
         });
       }
-    } catch {
-      /* 台账损坏 = 视作无记录，不阻断 */
+    } catch (err) {
+      // 台账损坏 = 视作无记录，不阻断；但留痕（变更面板莫名变空时可溯源）。
+      log.warn('changes', 'change ledger corrupted, treating as empty', { sessionId }, err);
     }
   }
 
   private persist(sessionId: string): void {
     try {
       const s = this.sessions.get(sessionId);
-      if (!s || (!s.baselineHash && s.touched.size === 0 && s.marks.length === 0)) {
+      if (!s || (!s.baselineHash && s.touched.size === 0 && s.accepted.size === 0 && s.marks.length === 0)) {
         rmSync(this.file(sessionId), { force: true });
         return;
       }
       mkdirSync(this.dir, { recursive: true });
-      writeFileSync(this.file(sessionId), JSON.stringify({ baselineHash: s.baselineHash, touched: [...s.touched], marks: s.marks }), 'utf8');
-    } catch {
-      /* best effort */
+      writeFileSync(this.file(sessionId), JSON.stringify({ baselineHash: s.baselineHash, touched: [...s.touched], accepted: Object.fromEntries(s.accepted), marks: s.marks }), 'utf8');
+    } catch (err) {
+      log.error('changes', 'change ledger persist failed', { sessionId }, err);
     }
   }
 }

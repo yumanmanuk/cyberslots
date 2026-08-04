@@ -13,6 +13,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
+import { pathToFileURL } from 'node:url';
 
 import {
   ClientSideConnection,
@@ -35,8 +36,10 @@ import type {
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
 import { ThinkSplitter } from '../thinkSplitter';
+import { readInlineImage } from '../attachments';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 import { kimiSpawnEnv, resolveKimiCli } from './resolveKimi';
 
 const INIT_TIMEOUT_MS = 30_000;
@@ -58,6 +61,9 @@ export interface KimiAdapterOptions {
   resumeSessionId?: string;
   /** 会话没有客户端历史时恢复失败静默降级（空会话无上下文可丢）。 */
   quietResumeFallback?: boolean;
+  /** 无人值守（赛马角色会话）：自动批准权限/计划请求，防无人应答死锁
+   * （对齐 ClaudeAdapter unattended；只读约束由 READONLY_GUARD 提示词承载）。 */
+  unattended?: boolean;
   /** Optional explicit path to kimi dist/main.mjs (settings override). */
   cliEntry?: string;
 }
@@ -73,11 +79,16 @@ export class KimiAdapter implements EngineAdapter {
   private turnId = 0;
   private disposed = false;
   private promptActive = false;
+  /** compact() 触发的 /compact 回合标记 — 见 prompt() 的 compactTurn。 */
+  private compactTurnActive = false;
   /** Latest usage_update snapshot — folded into turn.ended stats. */
   private lastUsage: { used: number; size: number } | undefined;
   /** 本回合流出的正文字符数 — kimi ACP 实测不推 usage_update
    *  （scripts/probe-usage.mjs），下行 token 只能估算（UI 带 ~）。 */
   private turnOutputChars = 0;
+  /** ACP initialize 声明的图片 prompt 能力（promptCapabilities.image）。
+   *  仅在显式 true 时内联 image 块；未声明/旧版保持 resource_link 路径引用。 */
+  private imagePromptCap = false;
   private readonly splitter = new ThinkSplitter();
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly stderrTail: string[] = [];
@@ -85,7 +96,9 @@ export class KimiAdapter implements EngineAdapter {
   constructor(
     private readonly opts: KimiAdapterOptions,
     private readonly emit: EngineEventSink,
-  ) {}
+  ) {
+    this.mode = opts.permissionMode ?? 'default';
+  }
 
   // ------------------------------------------------------------ lifecycle
 
@@ -100,6 +113,13 @@ export class KimiAdapter implements EngineAdapter {
       windowsHide: true, // 防止 Windows 下闪出 cmd 控制台窗口
     });
     this.child = child;
+    log.info('engine.kimi', 'engine spawned', {
+      command: spec.command,
+      args: spec.args.join(' '),
+      cwd: this.opts.cwd,
+      pid: child.pid,
+      resumed: !!this.opts.resumeSessionId,
+    });
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d: string) => {
@@ -111,6 +131,12 @@ export class KimiAdapter implements EngineAdapter {
     });
     child.on('exit', (code, signal) => {
       if (this.disposed) return;
+      log.warn('engine.kimi', 'engine exited unexpectedly', {
+        code,
+        signal: signal ?? 'none',
+        pid: child.pid,
+        stderrTail: this.stderrTail.slice(-8).join(' | '),
+      });
       this.emit({
         type: 'error',
         source: 'engine',
@@ -120,6 +146,7 @@ export class KimiAdapter implements EngineAdapter {
     });
     child.on('error', (err) => {
       if (this.disposed) return;
+      log.error('engine.kimi', 'engine spawn failed', { command: spec.command }, err);
       this.emit({ type: 'error', source: 'client', message: `${L('无法启动 kimi CLI', 'Failed to launch the kimi CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
@@ -127,7 +154,7 @@ export class KimiAdapter implements EngineAdapter {
     const stream = ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout));
     this.client = new ClientSideConnection(() => this.buildClient(), stream);
 
-    await withTimeout(
+    const initRes = await withTimeout(
       this.client.initialize({
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
@@ -135,6 +162,9 @@ export class KimiAdapter implements EngineAdapter {
       INIT_TIMEOUT_MS,
       'ACP initialize',
     );
+    this.imagePromptCap =
+      (initRes as { agentCapabilities?: { promptCapabilities?: { image?: boolean } } })
+        .agentCapabilities?.promptCapabilities?.image === true;
 
     const sess = await this.openSession();
     this.sessionId = sess.sessionId;
@@ -142,7 +172,12 @@ export class KimiAdapter implements EngineAdapter {
 
     if (this.opts.modelId) await this.setModel(this.opts.modelId).catch(() => undefined);
     if (this.opts.permissionMode && this.opts.permissionMode !== 'default') {
-      await this.setMode(this.opts.permissionMode).catch(() => undefined);
+      // 失败留痕（此前静默 catch）：ACP 不回声档位，丢档无任何痕迹。
+      await this.setMode(this.opts.permissionMode).catch((err) => {
+        const detail = errorMessage(err);
+        log.warn('engine.kimi', 'startup setMode failed (acp) — session may stay manual', { mode: this.opts.permissionMode, detail });
+        compatAudit.record('kimi', 'rejected-method', 'acp startup setMode', detail);
+      });
     }
 
     this.emit({ type: 'session.status', status: 'idle' });
@@ -203,6 +238,10 @@ export class KimiAdapter implements EngineAdapter {
     // 值域 = off + 模型 support_efforts）；旧版/档位不在值域时静默忽略，
     // 会话继续跑当前档 — 不因思考深度阻断提问。
     await this.applyThinking(effort).catch(() => undefined);
+    // /compact 命令回合（compact() 触发或用户手输）：kimi ACP 端执行压缩后不推
+    // usage_update，若按普通回合收尾，chatStore 会拿旧 usage 重复触发自动压缩
+    // → 死循环。标 background 复用「自发回合不再触压缩」的现有防护。
+    const compactTurn = this.compactTurnActive || /^\/compact(?:\s|$)/.test(text.trim());
     const turnId = ++this.turnId;
     this.splitter.reset();
     this.promptActive = true;
@@ -211,10 +250,25 @@ export class KimiAdapter implements EngineAdapter {
     this.emit({ type: 'session.status', status: 'running' });
     const started = Date.now();
     try {
-      const blocks: Array<Record<string, unknown>> = [{ type: 'text', text }];
+      // 附件装配（kimi-code acp-adapter 源码 + 探针 0.31.0 双证）：图片
+      // 走 ACP 原生 image 块（base64 内联，服务端转 image_url 并压缩/格式
+      // 门控）；resource_link 在 kimi 侧只投影成裸路径文本（模型需再调
+      // ReadMediaFile 才能看到图）—— 非图片/读失败/旧版无 image 能力时
+      // 退化 resource_link 路径引用。
+      // 空文本块有毒：kimi ACP 实测空 text 块直接 Internal error，
+      //  上游 API 对空 text content 亦一律 400 —— 正文空白时不发文本块。
+      const blocks: Array<Record<string, unknown>> = [];
+      if (text.trim()) blocks.push({ type: 'text', text });
       for (const path of attachments ?? []) {
-        blocks.push({ type: 'resource_link', uri: pathToFileUri(path), name: path });
+        const img = this.imagePromptCap ? readInlineImage(path) : undefined;
+        if (img) {
+          blocks.push({ type: 'image', data: img.data, mimeType: img.mediaType });
+        } else {
+          blocks.push({ type: 'resource_link', uri: pathToFileURL(path).href, name: path });
+        }
       }
+      // 无正文且无附件理论上不可达（Composer 已挡），兜底防空 prompt。
+      if (blocks.length === 0) blocks.push({ type: 'text', text });
       const res = await client.prompt({
         sessionId: this.sessionId,
         prompt: blocks as never,
@@ -229,7 +283,8 @@ export class KimiAdapter implements EngineAdapter {
       this.emit({
         type: 'turn.ended',
         turnId,
-        stopReason: res.stopReason,
+        stopReason: compactTurn ? 'background' : res.stopReason,
+        backgroundKind: compactTurn ? 'compact' : undefined,
         usage,
         durationMs: Date.now() - started,
       });
@@ -285,8 +340,17 @@ export class KimiAdapter implements EngineAdapter {
     }
   }
 
+  /** 客户端权威档位（构造注入 / 最后 setMode 目标）——防引擎回声降级，
+   *  对齐 KimiKapAdapter.desiredMode（KAP 曾因顺从 manual 回声丢档，2026-08-03
+   *  赛马 kimi 选手卡审批事故）。 */
+  private mode: PermissionMode;
+
   async setMode(mode: PermissionMode): Promise<void> {
+    this.mode = mode;
     await this.requireClient().setSessionMode({ sessionId: this.sessionId, modeId: mode });
+    // kimi ACP does not always emit current_mode_update after setSessionMode;
+    // anchor the UI/main-process mode here so new sessions do not stay manual.
+    this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
   }
 
   /** Native sidechat fork via ACP unstable_forkSession.
@@ -320,7 +384,12 @@ export class KimiAdapter implements EngineAdapter {
   /** Context compaction rides the CLI's native /compact slash command
    *  (listed in available_commands, phase 0). Runs as a normal turn. */
   async compact(): Promise<void> {
-    await this.prompt('/compact');
+    this.compactTurnActive = true;
+    try {
+      await this.prompt('/compact');
+    } finally {
+      this.compactTurnActive = false;
+    }
   }
 
   answerPermission(requestId: string, optionId?: string): void {
@@ -371,12 +440,18 @@ export class KimiAdapter implements EngineAdapter {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        // TodoList 识别（rawInput.todos 入参 / v1 描述标题如 "Updating todo
+        // list"）→ 补 toolName：渲染层按 'todo' 隐藏工具卡，避免与 acp-adapter
+        // 额外投射的 'plan' 面板双显（acp-adapter 对 TodoList 两张都发）。
+        const rawInput = u.rawInput as Record<string, unknown> | undefined;
+        const isTodoList = Array.isArray(rawInput?.todos) || /todo list/i.test(String(u.title ?? ''));
         this.emit({
           type: 'tool.upsert',
           turnId,
           toolCallId: String(u.toolCallId ?? ''),
           title: u.title == null ? undefined : String(u.title),
           toolKind: u.kind == null ? undefined : String(u.kind),
+          toolName: isTodoList ? 'TodoList' : undefined,
           status: u.status == null ? undefined : (String(u.status) as ToolCallStatus),
           content: mapToolContent(u.content),
           locations: mapLocations(u.locations),
@@ -406,7 +481,7 @@ export class KimiAdapter implements EngineAdapter {
       }
       case 'current_mode_update': {
         const mode = String(u.currentModeId ?? '') as PermissionMode;
-        if (mode) this.emit({ type: 'modes.update', current: mode, available: [] });
+        if (mode) this.emit({ type: 'modes.update', current: mode, available: ['default', 'plan', 'auto', 'yolo'] });
         return;
       }
       case 'usage_update': {
@@ -439,6 +514,18 @@ export class KimiAdapter implements EngineAdapter {
     }));
     const isQuestion = options.length > 0 && options.every((o) => QUESTION_OPTION_RE.test(o.optionId));
     const title = p.toolCall?.title ? String(p.toolCall.title) : isQuestion ? L('模型提问', 'Model question') : L('请求授权', 'Authorization request');
+
+    // 无人值守（赛马角色会话）：自动放行首个 allow 档，防无人应答死锁
+    //（对齐 ClaudeAdapter unattended / OmpAdapter）。
+    if (this.opts.unattended) {
+      const auto = options.find((o) => o.kind.startsWith('allow'))?.optionId ?? options[0]?.optionId;
+      log.debug('engine.kimi', 'unattended auto-approve (acp)', { title: title.slice(0, 80), optionId: auto });
+      return Promise.resolve(
+        auto === undefined
+          ? ({ outcome: { outcome: 'cancelled' } } as RequestPermissionResponse)
+          : ({ outcome: { outcome: 'selected', optionId: auto } } as RequestPermissionResponse),
+      );
+    }
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       this.pendingPermissions.set(requestId, { resolve });
@@ -480,11 +567,23 @@ export class KimiAdapter implements EngineAdapter {
           });
         }
       } else if (id === 'mode') {
-        this.emit({
-          type: 'modes.update',
-          current: current as PermissionMode,
-          available: values as PermissionMode[],
-        });
+        // 引擎回声与客户端强制档（race/headless 的 auto/yolo/plan）矛盾时以
+        // 客户端为准并重新断言（对齐 KimiKapAdapter.syncModeFromEngine）——
+        // 顺从 default 回声会把 meta 弹回并持久化，重启后永远 manual。
+        const reported = current as PermissionMode;
+        if (this.mode !== 'default' && reported !== this.mode) {
+          this.emit({ type: 'modes.update', current: this.mode, available: values as PermissionMode[] });
+          const mode = this.mode;
+          void this.requireClient()
+            .setSessionMode({ sessionId: this.sessionId, modeId: mode })
+            .catch((err) => {
+              const detail = errorMessage(err);
+              log.warn('engine.kimi', 're-assert mode failed (acp)', { mode, detail });
+              compatAudit.record('kimi', 'rejected-method', 'acp re-assert setSessionMode', detail);
+            });
+        } else {
+          this.emit({ type: 'modes.update', current: reported, available: values as PermissionMode[] });
+        }
       }
     }
   }
@@ -549,11 +648,6 @@ function classifyError(err: unknown): 'client' | 'engine' | 'provider' {
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
-}
-
-function pathToFileUri(p: string): string {
-  const normalized = p.replace(/\\/g, '/');
-  return normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`;
 }
 
 /** 粗粒度 token 估算：混合中英文按 ≈ 1 token / 1.7 字符。只用于

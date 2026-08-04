@@ -31,9 +31,18 @@ export interface EngineAdapter {
   /**
    * 原生斜杠命令回合（opencode POST /session/{id}/command）。仅引擎侧
    * 不解析 prompt 文本里的斜杠、但提供专用命令端点时实现；由
-   * SessionManager.prompt 的发送侧斜杠路由调度。
+   * SessionManager.prompt 的发送侧斜杠路由调度。attachments 为附件路径
+   * （实现方按自家协议并入或文本注入）。
    */
-  command?(name: string, args: string): Promise<void>;
+  /** path/isSkill 仅 opencode 兜底用：服务端清单缺项时客户端读源文件展开
+ * （命令模板代入 / 技能全文+base dir 提示），其余适配器忽略。 */
+command?(name: string, args: string, attachments?: string[], path?: string, isSkill?: boolean): Promise<void>;
+  /**
+   * 原生技能注入回合（codex app-server v2 turn/start 的 {type:'skill'} 输入
+   * 项 — core 直读 SKILL.md 全文注入，与 TUI $mention 等效）。仅引擎协议
+   * 原生支持时实现；缺省时由路由层退回「读技能文件」文本展开。
+   */
+  promptSkill?(name: string, path: string, args: string): Promise<void>;
   /**
    * Inject user input into the in-flight turn (codex turn/steer).
    * Returns false when there is no steerable active turn.

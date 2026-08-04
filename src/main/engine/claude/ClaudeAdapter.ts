@@ -42,9 +42,11 @@ import type {
   UsageInfo,
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
+import { readInlineImage } from '../attachments';
 import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 import { claudeSpawnEnv, resolveClaudeCli } from './resolveClaude';
 
 const INIT_TIMEOUT_MS = 30_000;
@@ -114,10 +116,29 @@ export class ClaudeAdapter implements EngineAdapter {
   private readonly stderrTail: string[] = [];
   /** 本回合结束的 resolve（result 事件到达时兑现）。 */
   private turnDone: (() => void) | undefined;
+  /** compact() 触发的 /compact 回合标记 — 见 prompt() 的 compactPromptActive。 */
+  private compactTurnActive = false;
+  /** 当前回合是否为 /compact 命令回合（含用户手输）：background 收尾 + 进度提示。 */
+  private compactPromptActive = false;
+  /** compact 回合内 compacting 提示只发一次。 */
+  private compactStatusSeen = false;
+  /** result.modelUsage 里的 contextWindow（usage.update 的 size 来源，2.1.x 实测携带）。 */
+  private lastContextSize = 0;
+  /** 最近一次主线程 API 调用的上下文占用（assistant 消息 usage 的
+   *  input + cache_read + cache_creation）。Claude Code 的 result.usage 是
+   *  回合内多次 API 调用的累计值，不能当上下文占用；必须取最后一次
+   *  assistant 消息的单次 usage（2.1.220 源码验证，状态栏同口径）。 */
+  private lastApiInputTokens = 0;
   /** 待应答的 can_use_tool 权限请求（requestId → pending）。 */
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   /** tool_use_id → 前端展示用 toolCallId（保持 upsert 稳定）。 */
   private readonly toolCallSeen = new Set<string>();
+  /** Claude 2.1.x Task* 清单（跨回合持久；引擎不推快照，客户端增量聚合）。 */
+  private readonly taskEntries = new Map<string, PlanEntry>();
+  /** TaskCreate tool_use_id → 暂存（引擎分配的数字 id 在 tool_result 文本里）。 */
+  private readonly pendingTaskCreates = new Map<string, { subject: string; description?: string }>();
+  /** Task* 工具调用 id — 其 tool_use/tool_result 不出工具卡（已投射计划面板）。 */
+  private readonly taskToolCalls = new Set<string>();
   /** 本回合累计输出字符数（result 无 usage 时兜底估算）。 */
   private turnOutputChars = 0;
   private lastUsage: UsageInfo | undefined;
@@ -184,6 +205,13 @@ export class ClaudeAdapter implements EngineAdapter {
       windowsHide: true, // 防止 Windows 下闪出 cmd 控制台窗口
     }) as ChildProcessWithoutNullStreams;
     this.child = child;
+    log.info('engine.claude', 'engine spawned', {
+      command: spec.command,
+      args: spec.args.join(' '),
+      cwd: this.opts.cwd,
+      pid: child.pid,
+      resumed: !!this.opts.resumeSessionId && !this.ownSessionId,
+    });
 
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (d: string) => this.onStdout(d));
@@ -197,11 +225,43 @@ export class ClaudeAdapter implements EngineAdapter {
     });
     child.on('error', (err) => {
       if (this.disposed) return;
+      log.error('engine.claude', 'engine spawn failed', { command: spec.command }, err);
       this.emit({ type: 'error', source: 'client', message: `${L('无法启动 claude CLI', 'Failed to launch the claude CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
     child.on('exit', (code, signal) => {
       if (this.disposed) return;
+      // 空会话静默降级：--resume 目标在引擎侧无落盘（空会话从未对话、或
+      // 首条 prompt 因故未送达），无上下文可丢 —— 换新 sessionId 重开进程，
+      // 对用户无感（kimi/opencode 已有同款兜底，此处补齐消费）。
+      if (
+        this.opts.resumeSessionId &&
+        this.opts.quietResumeFallback &&
+        !this.promptActive &&
+        code !== 0 &&
+        this.stderrTail.some((l) => l.includes('No conversation found'))
+      ) {
+        log.warn('engine.claude', 'resume target missing, falling back to a fresh session', {
+          staleSessionId: this.sessionId,
+          code,
+          signal: signal ?? 'none',
+        });
+        this.sessionId = randomUUID();
+        this.ownSessionId = true;
+        this.stderrTail.length = 0;
+        this.child = undefined;
+        this.spawnProcess();
+        // 新 engineSessionId 回填 meta 并落盘 —— 否则下次唤醒仍 resume 失效旧 id。
+        this.emit({ type: 'session.meta', patch: { engineSessionId: this.sessionId } });
+        return;
+      }
+      log.warn('engine.claude', 'engine exited unexpectedly', {
+        code,
+        signal: signal ?? 'none',
+        pid: child.pid,
+        promptActive: this.promptActive,
+        stderrTail: this.stderrTail.slice(-8).join(' | '),
+      });
       // 进程意外退出：结束进行中的回合，避免 UI 永久转圈。
       if (this.promptActive) {
         const tail = this.stderrTail.slice(-8).join('\n');
@@ -274,6 +334,9 @@ export class ClaudeAdapter implements EngineAdapter {
 
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     if (this.disposed) throw new Error('claude session disposed');
+    // 并发防护：stream-json stdin 交错两条 user 消息会污染进行中的回合
+    //（正常路径不会触发 —— UI busy 禁用 + 排队机制；双保险）。
+    if (this.promptActive) throw new Error(L('回合进行中，无法发送', 'Turn in flight — cannot send'));
     if (!this.child) this.spawnProcess();
     // effort 热切：Claude 的思考档是运行时斜杠命令 `/effort <level>`
     // （非 control 协议，非 spawn 旗标 —— scripts/probe-claude-effort.mjs 实测）。
@@ -282,6 +345,11 @@ export class ClaudeAdapter implements EngineAdapter {
       await this.applyEffort(effort);
     }
 
+    // /compact 命令回合（compact() 触发或用户手输）：标 background 收尾，
+    // 防 chatStore 拿旧 usage 重复触发自动压缩；引擎 auto-compact 在普通
+    // 回合内部发生，不走这里。
+    this.compactPromptActive = this.compactTurnActive || /^\/compact(?:\s|$)/.test(text.trim());
+    this.compactStatusSeen = false;
     const turnId = ++this.turnId;
     this.promptActive = true;
     this.turnOutputChars = 0;
@@ -318,19 +386,31 @@ export class ClaudeAdapter implements EngineAdapter {
     });
   }
 
-  /** 组装 Anthropic content blocks：文本 + 图片附件。 */
+  /** 组装 Anthropic content blocks：文本 + 原生 image 块（base64）。
+   *  协议事实（探针实测 CLI 2.1.220）：stream-json 输入接受
+   *  {type:image, source:{type:base64, media_type, data}}，图片直接进模型
+   *  上下文 —— 零工具往返、任何权限模式可用（工作区外的粘贴临时文件不再
+   *  触发 Read 审批）；空 text 块 + 图片块亦被正常接受。
+   *  非图片附件保持路径引用（引擎 Read 工具按需读取）；白名单外格式
+   * （bmp 等）与读取失败的图片同样退化为路径引用，不污染会话历史。 */
   private buildUserContent(text: string, attachments?: string[]): Array<Record<string, unknown>> {
     const blocks: Array<Record<string, unknown>> = [];
-    const imgs = (attachments ?? []).filter((p) => /\.(png|jpe?g|gif|webp)$/i.test(p));
-    const others = (attachments ?? []).filter((p) => !imgs.includes(p));
-    let body = text;
-    if (others.length) body += `\n\n附件路径：\n${others.join('\n')}`;
-    blocks.push({ type: 'text', text: body });
-    // 图片以本地路径引用（Claude Code 支持读本地图片路径；直接内联 base64
-    // 会撑爆 stdin，交给引擎的 Read 工具按需读取更稳）。
-    for (const img of imgs) {
-      blocks.push({ type: 'text', text: `[图片] ${img}` });
+    const pathRefs: string[] = [];
+    const images: Array<Record<string, unknown>> = [];
+    for (const path of attachments ?? []) {
+      const img = readInlineImage(path);
+      if (img) {
+        images.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+      } else {
+        pathRefs.push(path);
+      }
     }
+    let body = text;
+    if (pathRefs.length) body += '\n\n附件路径：\n' + pathRefs.join('\n');
+    // ? text ????kimi ACP Internal error / codex ?? 400 ?????
+    // ????????????????????????????????
+    if (body.trim() || images.length === 0) blocks.push({ type: 'text', text: body });
+    blocks.push(...images);
     return blocks;
   }
 
@@ -397,9 +477,15 @@ export class ClaudeAdapter implements EngineAdapter {
     }
   }
 
-  /** 上下文压缩：走 Claude 原生 /compact 斜杠命令（作为普通回合，用户可见）。 */
+  /** 上下文压缩：走 Claude 原生 /compact 斜杠命令（stream-json 输入实测
+   *  2.1.220 识别并执行压缩；回合以 background 收尾，防自动压缩连环触发）。 */
   async compact(): Promise<void> {
-    await this.prompt('/compact');
+    this.compactTurnActive = true;
+    try {
+      await this.prompt('/compact');
+    } finally {
+      this.compactTurnActive = false;
+    }
   }
 
   answerPermission(requestId: string, optionId?: string): void {
@@ -476,17 +562,71 @@ export class ClaudeAdapter implements EngineAdapter {
       // MCP 服务器状态回显：失败的服务器发一次非致命提示（已连接的工具直接可用）。
       this.reportMcpStatus(ev.mcp_servers);
       // slash_commands 由 init 携带（每回合重发，去重交给渲染层）。
-      const cmds = Array.isArray(ev.slash_commands) ? (ev.slash_commands as unknown[]) : [];
+      // 过滤 TUI 专属命令（headless 下无效/有害的交互式入口，2.1.220 实测清单）：
+      //   color/theme/config → 交互式设置面板；heapdump → 写诊断快照文件；
+      //   team-onboarding → 交互式引导；__ 前缀 → CLI 内部命令（如 __remote-workflow）。
+      // clear/model/compact/effort 等 headless 实测有效，保留。
+      const TUI_ONLY = new Set(['color', 'theme', 'config', 'heapdump', 'team-onboarding']);
+      const cmds = (Array.isArray(ev.slash_commands) ? (ev.slash_commands as unknown[]) : [])
+        .map((c) => String(c))
+        .filter((n) => !TUI_ONLY.has(n) && !n.startsWith('__'));
       if (cmds.length) {
         this.emit({
           type: 'commands.update',
-          commands: cmds.map((c) => ({ name: String(c) })),
+          commands: cmds.map((name) => ({ name })),
         });
       }
       // 注：不用 init.model 覆写 this.modelId — init.model 是引擎解析出的
       // 后端模型全名（代理场景下可能是 minimax/kimi 等上游名），而非
       // 用户选的别名；覆写会把选择器当前值冲成列表外的陆生值。
       // 模型选择以 start() 静态下发 + setModel() 用户显选为准。
+    }
+    if (subtype === 'status' && this.compactPromptActive) {
+      // /compact 回合的进度反馈：compacting → 提示一次；失败有 claude 自己的
+      // assistant 文本兜底（"Not enough messages to compact."），不重复发。
+      // 引擎 auto-compact 在普通回合内部发生（compactPromptActive=false），
+      // 其 status 一律静默，不污染正文与赛马 transcript。
+      if (ev.status === 'compacting' && !this.compactStatusSeen) {
+        this.compactStatusSeen = true;
+        this.emit({ type: 'text.delta', turnId: this.turnId, text: L('正在压缩上下文…', 'Compacting context…') });
+      }
+      return;
+    }
+    if (subtype === 'compact_boundary' && this.compactPromptActive) {
+      // 压缩成功边界（transcript 级标记，compactMetadata 带 pre/postTokens）→ X→Y 展示。
+      const meta = (ev.compactMetadata ?? {}) as Record<string, unknown>;
+      const pre = num(meta.preTokens);
+      const post = num(meta.postTokens);
+      this.emit({
+        type: 'text.delta',
+        turnId: this.turnId,
+        text:
+          pre != null && post != null
+            ? L('已压缩上下文：' + pre + ' → ' + post + ' tokens', 'Context compacted: ' + pre + ' → ' + post + ' tokens')
+            : L('已压缩上下文', 'Context compacted'),
+      });
+      return;
+    }
+    // 引擎 auto-compact（内部阈值，普通回合内发生）：留一条完成态工具行作解释
+    //（result usage 随后骤降，ContextRing 不会降得莫名其妙）。只发 completed ——
+    // in_progress 会进 trackTurnText 重置分支污染赛马 transcript，text.delta
+    // 同理；进行中状态一律静默。
+    if (!this.compactPromptActive && (subtype === 'compact_boundary' || subtype === 'compact_result')) {
+      const meta = (ev.compactMetadata ?? {}) as Record<string, unknown>;
+      const pre = num(meta.preTokens);
+      const post = num(meta.postTokens);
+      this.emit({
+        type: 'tool.upsert',
+        turnId: this.turnId,
+        toolCallId: 'auto-compact-' + String(this.turnId),
+        title:
+          pre != null && post != null
+            ? L('已自动压缩上下文：' + pre + ' → ' + post + ' tokens', 'Context auto-compacted: ' + pre + ' → ' + post + ' tokens')
+            : L('已自动压缩上下文', 'Context auto-compacted'),
+        toolKind: 'other',
+        status: 'completed',
+      });
+      return;
     }
     // system/status / thinking_tokens / notification 等 — 无 UI 影响。
   }
@@ -542,6 +682,18 @@ export class ClaudeAdapter implements EngineAdapter {
     if (!message) return;
     // 内部静默命令进行中：不泄露其工具/文本块。
     if (this.internalCommandDone) return;
+    // 主线程 assistant 完整消息携带本次 API 调用的单次 usage：
+    // result.usage 是回合累计，不能用于 ContextRing/自动压缩的 used。
+    if (role === 'assistant' && !subagentId) {
+      const mu = (message.usage ?? {}) as Record<string, unknown>;
+      const input = num(mu.input_tokens) ?? 0;
+      const cacheRead = num(mu.cache_read_input_tokens) ?? 0;
+      const cacheCreate = num(mu.cache_creation_input_tokens) ?? 0;
+      const output = num(mu.output_tokens) ?? 0;
+      if (input + cacheRead + cacheCreate + output > 0) {
+        this.lastApiInputTokens = input + cacheRead + cacheCreate;
+      }
+    }
     const turnId = this.turnId;
     const content = message.content;
     if (!Array.isArray(content)) return;
@@ -571,12 +723,22 @@ export class ClaudeAdapter implements EngineAdapter {
       if (planText) this.emit({ type: 'plan.update', turnId, entries: parsePlanEntries(planText) });
     }
     // TodoWrite 工具 = 任务清单 → plan.update（与 kimi/codex 的 plan 观感对齐）。
+    // （2.1.x 旧版工具；当前 CLI 已被下方 Task* 工具族取代，保留兼容旧版。）
     if ((name === 'TodoWrite' || name === 'todo_write') && Array.isArray(input.todos)) {
       const entries = (input.todos as Array<Record<string, unknown>>).map((td) => ({
         content: String(td.content ?? td.activeForm ?? ''),
         status: normalizeTodoStatus(String(td.status ?? 'pending')),
       }));
       if (entries.length) this.emit({ type: 'plan.update', turnId, entries });
+    }
+    // Claude 2.1.220 实测：TodoWrite 已从工具表移除，任务清单改由 Task* 工具族
+    // 增量维护（TaskCreate {subject,description} / TaskUpdate {taskId,status|
+    // deleted} / TaskList / TaskGet）——跨回合持久、免权限、主/子代理共享同一
+    // 编号空间，引擎不推快照（子代理转发的消息同样进这里，不可按 subagentId
+    // 过滤）。聚合投射计划面板，工具卡不再出（对齐 kimi/codex 的 plan 观感）。
+    if (name === 'TaskCreate' || name === 'TaskUpdate' || name === 'TaskGet' || name === 'TaskList') {
+      this.handleTaskToolUse(id, name, input, turnId);
+      return;
     }
     this.toolCallSeen.add(id);
     // 子代理工具加 ↳ 前缀（时间线里一眼辨认是子代理在干活）。
@@ -595,11 +757,77 @@ export class ClaudeAdapter implements EngineAdapter {
     });
   }
 
+  /** Task* 工具（2.1.x 任务清单）：不出工具卡，聚合维护 taskEntries 投射 plan.update。 */
+  private handleTaskToolUse(id: string, name: string, input: Record<string, unknown>, turnId: number): void {
+    this.taskToolCalls.add(id); // tool_result 处跳过工具卡并做结果合并
+    if (name === 'TaskCreate') {
+      // 引擎分配的数字 id 只出现在 tool_result 文本（"Task #N created successfully"）。
+      this.pendingTaskCreates.set(id, { subject: String(input.subject ?? ''), description: str(input.description) });
+      return;
+    }
+    if (name === 'TaskUpdate') {
+      const taskId = str(input.taskId);
+      if (!taskId) return;
+      const status = str(input.status);
+      const subject = str(input.subject);
+      if (status === 'deleted') {
+        this.taskEntries.delete(taskId);
+      } else {
+        const prev = this.taskEntries.get(taskId);
+        this.taskEntries.set(taskId, {
+          content: subject ?? prev?.content ?? `#${taskId}`,
+          status: status ? normalizeTodoStatus(status) : prev?.status ?? 'pending',
+        });
+      }
+      this.emitTasksPlan(turnId);
+    }
+    // TaskGet / TaskList：此处只抑制工具卡；TaskList 的快照合并在 tool_result 做。
+  }
+
+  /** Task* 的 tool_result：TaskCreate 回填引擎分配 id；TaskList 文本快照作清单真源。 */
+  private applyTaskResult(toolUseId: string, content: string, turnId: number): void {
+    const created = this.pendingTaskCreates.get(toolUseId);
+    if (created) {
+      this.pendingTaskCreates.delete(toolUseId);
+      // "Task #N created successfully: <subject>" — 数字 id 只在这份文本里。
+      const m = /#(\d+)/.exec(content);
+      if (m?.[1]) {
+        this.taskEntries.set(m[1], { content: created.subject || `#${m[1]}`, status: 'pending' });
+        this.emitTasksPlan(turnId);
+      }
+      return;
+    }
+    // TaskList 结果逐行 "#N [status] subject"（实测 2.1.220）——全量快照，
+    // 覆盖增量视图（含会话恢复后旧任务的回填与 deleted 的权威清理）。
+    const lines = [...content.matchAll(/^\s*#(\d+)\s+\[(pending|in_progress|completed)\]\s+(.+)$/gm)];
+    if (lines.length) {
+      this.taskEntries.clear();
+      for (const m of lines) {
+        this.taskEntries.set(m[1]!, { content: m[3]!.trim(), status: normalizeTodoStatus(m[2]!) });
+      }
+      this.emitTasksPlan(turnId);
+    }
+  }
+
+  /** 当前 Task* 清单（数字 id 升序）→ plan.update。 */
+  private emitTasksPlan(turnId: number): void {
+    const entries = [...this.taskEntries.entries()]
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([, e]) => e);
+    this.emit({ type: 'plan.update', turnId, entries });
+  }
+
   private emitToolResult(block: Record<string, unknown>, turnId: number): void {
     const id = String(block.tool_use_id ?? '');
     if (!id) return;
     const isError = block.is_error === true;
     const content = extractResultText(block.content);
+    // Task* 工具：已投射计划面板，不出发卡；成功结果合并进清单。
+    if (this.taskToolCalls.delete(id)) {
+      if (!isError && content) this.applyTaskResult(id, content, turnId);
+      else this.pendingTaskCreates.delete(id);
+      return;
+    }
     this.emit({
       type: 'tool.upsert',
       turnId,
@@ -706,9 +934,26 @@ export class ClaudeAdapter implements EngineAdapter {
       cachedInputTokens: cacheRead || undefined,
       totalTokens: totalInput + output > 0 ? totalInput + output : undefined,
     };
-    if (typeof ev.total_cost_usd === 'number') {
+    // contextWindow 来自 result.modelUsage（2.1.x 实测携带）；缺失时沿用上次的值。
+    // 没有它 size=0 会让应用层自动压缩判定（used/size）与 ContextRing 永远失效。
+    const modelUsage = (ev.modelUsage ?? {}) as Record<string, Record<string, unknown> | undefined>;
+    for (const mu of Object.values(modelUsage)) {
+      const cw = num(mu?.contextWindow);
+      if (cw && cw > 0) this.lastContextSize = cw;
+    }
+    // compact 失败（"Not enough messages to compact."）的 result usage 全 0：
+    // 发 used=0 会把 ContextRing 瞬显成空窗，跳过这次更新保持旧读数。
+    const usageAllZero = totalInput + output === 0;
+    if (!usageAllZero && (typeof ev.total_cost_usd === 'number' || this.lastContextSize > 0)) {
       // 成本走 usage.update（与其他引擎口径一致；ContextRing/用量统计用）。
-      this.emit({ type: 'usage.update', used: usage.inputTokens ?? 0, size: 0, costUsd: ev.total_cost_usd });
+      // used 用最后一次 assistant 消息的单次 API usage；无 assistant usage
+      // 时才退回 result 累计值（仅兜底，可能被工具循环放大）。
+      this.emit({
+        type: 'usage.update',
+        used: this.lastApiInputTokens > 0 ? this.lastApiInputTokens : (usage.inputTokens ?? 0),
+        size: this.lastContextSize,
+        costUsd: typeof ev.total_cost_usd === 'number' ? ev.total_cost_usd : undefined,
+      });
     }
     this.lastUsage = usage;
     const durationMs = num(ev.duration_ms);
@@ -716,7 +961,9 @@ export class ClaudeAdapter implements EngineAdapter {
       ? subtype === 'error_during_execution'
         ? 'interrupted'
         : 'error'
-      : 'end_turn';
+      : this.compactPromptActive
+        ? 'background'
+        : 'end_turn';
     this.finishTurn(stopReason, undefined, usage, durationMs);
   }
 
@@ -728,9 +975,12 @@ export class ClaudeAdapter implements EngineAdapter {
       type: 'turn.ended',
       turnId: this.turnId,
       stopReason,
+      // compact 回合收尾时该标记仍为 true（本函数末尾才重置）→ 渲染层据此补发队列。
+      backgroundKind: this.compactPromptActive ? 'compact' : undefined,
       usage: finalUsage,
       durationMs: durationMs ?? (startedAt ? Date.now() - startedAt : undefined),
     });
+    this.compactPromptActive = false;
     if (this.turnDone) this.turnDone();
   }
 

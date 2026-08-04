@@ -1,9 +1,10 @@
 /**
  * Locates the Claude Code CLI (`claude`) and produces a spawn spec.
  *
- * Claude Code 在 Windows 上多为 npm 全局安装（APPDATA\npm\claude.cmd +
- * node_modules\@anthropic-ai\claude-code\cli.js）或 native 安装
- * (`claude install`) 落 %LOCALAPPDATA%\Programs 或用户自定义目录并入 PATH。
+ * Claude Code 在 Windows 上多为 npm 全局安装（2.x 起为 native 包：
+ * node_modules\@anthropic-ai\claude-code\bin\claude.exe；1.x 旧装是
+ * cli.js + claude.cmd shim）或 native 安装（`claude install`）落
+ * %LOCALAPPDATA%\Programs 或用户自定义目录并入 PATH。
  * 解析优先：显式路径 → npm 全局 cli.js（用自带 Node 直跑，绕开 .cmd shim）
  * → PATH shim（claude，shell=true — .cmd 在 Node 20.12+ 需 shell）。
  *
@@ -51,6 +52,15 @@ export function resolveClaudeCli(extraArgs: string[], explicitEntry?: string): S
 
   if (npmCli && existsSync(npmCli)) {
     return { command: process.execPath, args: [npmCli, ...extraArgs], label: `node ${npmCli}` };
+  }
+
+  // npm 全局 native 可执行（2.x 起 cli.js 不存在，包内真身是 bin/claude.exe；
+  //  实测 2.1.220 即此形态）。直接跑 exe —— 无 Node 依赖、无 .cmd 闪窗。
+  const npmNative = process.env.APPDATA
+    ? join(process.env.APPDATA, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
+    : undefined;
+  if (npmNative && existsSync(npmNative)) {
+    return { command: npmNative, args: extraArgs, label: npmNative };
   }
 
   // native 安装的常见落点（用户级）。

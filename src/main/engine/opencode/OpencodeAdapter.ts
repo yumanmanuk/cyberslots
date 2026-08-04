@@ -11,6 +11,9 @@
  * - 模型逐条 prompt 在 body 里带（providerID/modelID 拆自复合 slug）。
  */
 
+import { basename, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 import type {
   EngineEvent,
   OpencodeCatalog,
@@ -23,8 +26,11 @@ import type {
 } from '@shared/types';
 import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
+import { inlineImageMime, isTextLikePath } from '../attachments';
 import { ThinkSplitter } from '../thinkSplitter';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
+import { readCommandBody, substituteArgs } from '../../slash/slashService';
 import type { OpencodeEventHub, OpencodeSseEvent } from './OpencodeEventHub';
 import type { OpencodeServerHost } from './OpencodeServerHost';
 
@@ -39,6 +45,9 @@ export interface OpencodeAdapterOptions {
   resumeSessionId?: string;
   /** 会话没有客户端历史时恢复失败静默降级。 */
   quietResumeFallback?: boolean;
+  /** 无人值守（赛马角色会话）：自动批准权限/计划请求，防无人应答死锁
+   * （对齐 ClaudeAdapter unattended；只读约束由 READONLY_GUARD 提示词承载）。 */
+  unattended?: boolean;
   /** 多根工作区的其余根目录。opencode 引擎侧无多根概念（单
    *  directory/worktree 边界），根外访问走 external_directory 权限
    *  审批（默认 ask）—— 这里通过会话级 permission ruleset 预放行，
@@ -86,14 +95,23 @@ export class OpencodeAdapter implements EngineAdapter {
   private readonly splitter = new ThinkSplitter();
   /** messageID → role（过滤用户消息 echo 的 part 事件）。 */
   private readonly messageRoles = new Map<string, string>();
+  /** 消息 mode（build/plan/compaction…）— compaction 消息的 part 全静默。 */
+  private readonly messageModes = new Map<string, string>();
+  /** 消息 id → 属性记录，FIFO 512 上限（长会话只增不删会缓涨内存）。 */
+  private rememberMsg(map: Map<string, string>, id: string, value: string): void {
+    if (!map.has(id) && map.size >= 512) map.delete(map.keys().next().value!);
+    map.set(id, value);
+  }
   /** 本回合 assistant 消息的 token/cost 快照（message.updated 持续刷新）。 */
   private turnTokens: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number } | undefined;
   private turnCost = 0;
   /** 本回合 API 调用计数 — 每个 step-finish = 一次 LLM 请求完成。 */
   private turnApiCalls = 0;
   private readonly pendingPermissions = new Set<string>();
-  /** 服务端命令名拦截表（小写）：GET /command 拉取，prompt 时命中改走原生命令端点。 */
-  private serverCommands = new Set<string>();
+  /** 服务端命令名拦截表（小写 → 清单原始名）：GET /command 拉取，prompt 时
+   *  命中改走原生命令端点。服务端按原始名精确匹配 — 必须回贴清单名，
+   *  用户手输大小写不同才不至于假命中后 Command not found。 */
+  private serverCommands = new Map<string, string>();
 
   constructor(
     private readonly opts: OpencodeAdapterOptions,
@@ -162,6 +180,9 @@ export class OpencodeAdapter implements EngineAdapter {
     // 服务端命令清单（opencode.json/插件/md 命令全集，目录扫描覆盖不到
     // 前两类）→ 斜杠面板「引擎命令」组 + prompt 拦截表。best effort。
     await this.refreshCommands().catch(() => undefined);
+    // 恢复会话回填待办：引擎侧 todo 会话级持久（SQLite），todo.updated 只在
+    // todowrite 时推 —— 启动时拉一次免面板空窗（老版 server 无端点则静默跳过）。
+    if (resumed) await this.backfillTodos().catch(() => undefined);
     this.emit({ type: 'session.status', status: 'idle' });
     return { engineSessionId: this.sessionID };
   }
@@ -183,19 +204,29 @@ export class OpencodeAdapter implements EngineAdapter {
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
     await this.ensureLive();
     // 服务端已知命令拦截：server 不解析 message 文本里的斜杠（TUI 职责），
-    // 命中清单即改走原生命令端点；带附件时不拦截（command 端点无 parts 字段）。
-    const slash = /^\/([A-Za-z0-9][\w:.-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
-    if (slash && !attachments?.length && this.serverCommands.has(slash[1]!.toLowerCase())) {
-      await this.command(slash[1]!, (slash[2] ?? '').trim());
-      return;
+    // 命中清单即改走原生命令端点（命令名回贴清单原始名 — 服务端精确匹配）。
+    // 带附件同样走端点：file parts 与 message 通道同一装配（CommandInput
+    //  原生有 parts 字段），不可消化类型退化路径文本随 arguments 展开。
+    const slash = /^\/([A-Za-z0-9][\w:./-]*)(?:\s+([\s\S]*))?$/.exec(text.trim());
+    if (slash) {
+      const hit = this.serverCommands.get(slash[1]!.toLowerCase());
+      if (hit) {
+        await this.command(hit, (slash[2] ?? '').trim(), attachments);
+        return;
+      }
     }
-    // 附件与 kimi 同策：文本注入路径（file part 的 url 语义未经探针验证）。
+    // 附件装配与 command 端点同策（见 buildAttachmentParts）。
+    const { fileParts, pathNotes } = this.buildAttachmentParts(attachments);
     let full = text;
-    for (const path of attachments ?? []) full += `\n[附件] ${path}`;
+    if (pathNotes.length) full += (full ? '\n' : '') + pathNotes.map((p) => '[附件] ' + p).join('\n');
+    // ? text part ???????????????????????????
+    // ???????? part ??????????????????????
+    const parts: Json[] = [...fileParts];
+    if (full.trim() || parts.length === 0) parts.unshift({ type: 'text', text: full });
 
     const { providerID, modelID } = this.parseModel();
     const body: Json = {
-      parts: [{ type: 'text', text: full }],
+      parts,
       agent: agentFor(this.mode),
     };
     if (providerID && modelID) body.model = { providerID, modelID };
@@ -205,18 +236,90 @@ export class OpencodeAdapter implements EngineAdapter {
 
   /** 原生斜杠命令回合：POST /session/{id}/command，服务端展开命令模板
    *  （opencode server 不解析 message 文本里的斜杠 — TUI 侧职责，
-   *  此处由 SessionManager 的发送侧斜杠路由调度进来）。 */
-  async command(name: string, args: string): Promise<void> {
+   *  此处由 SessionManager 的发送侧斜杠路由调度进来）。
+   *  附件：file parts 与 message 通道同一装配（CommandInput 原生 parts
+   *  字段）；不可消化类型退化路径文本追加进 arguments（随 $ARGUMENTS 展开）。 */
+  async command(name: string, args: string, attachments?: string[], path?: string, isSkill?: boolean): Promise<void> {
     await this.ensureLive();
+    // 服务端清单缺项（会话启动后新增的文件 / GET /command 曾失败）→ 客户端
+    // 展开兜底：命令 = 模板 $ARGUMENTS 代入；技能 = 全文 + base dir 提示
+    // （对齐服务端注入形态）。硬打端点只会换一条报错。
+    if (!this.serverCommands.has(name.toLowerCase()) && path) {
+      log.info('session', 'opencode command fallback: client-side expansion', { name });
+      const raw = await readCommandBody(path);
+      const text = isSkill
+        ? [
+            `请严格按以下技能文件 ${path} 的说明执行任务（其中的相对路径以 ${dirname(path)} 为基准解析）：`,
+            '',
+            raw,
+            '',
+            args ? `任务输入：${args}` : '（无附加输入，按技能默认流程执行。）',
+          ].join('\n')
+        : substituteArgs(raw, args);
+      const { fileParts, pathNotes } = this.buildAttachmentParts(attachments);
+      let full = text;
+      if (pathNotes.length) full += (full ? '\n' : '') + pathNotes.map((p) => '[附件] ' + p).join('\n');
+      const parts: Json[] = [...fileParts];
+      if (full.trim() || parts.length === 0) parts.unshift({ type: 'text', text: full });
+      const fallbackBody: Json = { parts, agent: agentFor(this.mode) };
+      const sel = this.parseModel();
+      if (sel.providerID && sel.modelID) fallbackBody.model = { providerID: sel.providerID, modelID: sel.modelID };
+      await this.runTurn(`/session/${this.sessionID}/message`, fallbackBody);
+      return;
+    }
     const { providerID, modelID } = this.parseModel();
     const body: Json = { command: name, arguments: args, agent: agentFor(this.mode) };
     if (providerID && modelID) body.model = { providerID, modelID };
+    const { fileParts, pathNotes } = this.buildAttachmentParts(attachments);
+    if (fileParts.length) body.parts = fileParts;
+    if (pathNotes.length) {
+      body.arguments = (args ? args + '\n' : '') + pathNotes.map((p) => '[附件] ' + p).join('\n');
+    }
     await this.runTurn(`/session/${this.sessionID}/command`, body);
   }
 
+  /** 附件装配（opencode 1.18.9 源码 + 探针双证）：parts 原生支持
+   *  {type:'file', mime, url, filename} —— file:// URL 由服务端自读
+   * （bypassCwdCheck，工作区外可读）：图片转 data URL 直接进模型（零工具
+   *  往返），text/plain 走 Read 工具内联正文；PDF 以文档块进模型。
+   *  其余二进制（zip/exe 等）退化路径文本注记，不冒险发不可消化类型。
+   *  message 与 command 端点共用。 */
+  private buildAttachmentParts(attachments?: string[]): { fileParts: Json[]; pathNotes: string[] } {
+    const fileParts: Json[] = [];
+    const pathNotes: string[] = [];
+    for (const path of attachments ?? []) {
+      const filename = basename(path);
+      const url = pathToFileURL(path).href;
+      const imgMime = inlineImageMime(path);
+      if (imgMime) {
+        fileParts.push({ type: 'file', mime: imgMime, url, filename });
+      } else if (isTextLikePath(path)) {
+        fileParts.push({ type: 'file', mime: 'text/plain', url, filename });
+      } else if (/\.pdf$/i.test(path)) {
+        fileParts.push({ type: 'file', mime: 'application/pdf', url, filename });
+      } else {
+        pathNotes.push(path);
+      }
+    }
+    return { fileParts, pathNotes };
+  }
+
+  /** GET /session/{id}/todo → plan.update（与 todo.updated 同口径映射）。 */
+  private async backfillTodos(): Promise<void> {
+    const res = await this.api(`/session/${this.sessionID}/todo`);
+    if (!res.ok || !Array.isArray(res.json)) return;
+    const entries: PlanEntry[] = (res.json as Json[])
+      .filter((t) => String(t.status ?? '') !== 'cancelled')
+      .map((t) => ({
+        content: String(t.content ?? ''),
+        status: mapTodoStatus(String(t.status ?? 'pending')),
+        priority: t.priority ? String(t.priority) : undefined,
+      }));
+    if (entries.length) this.emit({ type: 'plan.update', turnId: this.turnId, entries });
+  }
+
   /** 服务端命令清单：GET /command → commands.update（斜杠面板）+ 拦截表。 */
-  private async refreshCommands(): Promise<void> {
-    const res = await this.api('/command');
+  private async refreshCommands(): Promise<void> {    const res = await this.api('/command');
     if (!res.ok || !Array.isArray(res.json)) return;
     const commands = (res.json as Array<Record<string, unknown>>)
       .map((c) => ({
@@ -224,7 +327,7 @@ export class OpencodeAdapter implements EngineAdapter {
         description: c.description == null ? undefined : String(c.description),
       }))
       .filter((c) => c.name);
-    this.serverCommands = new Set(commands.map((c) => c.name.toLowerCase()));
+    this.serverCommands = new Map(commands.map((c) => [c.name.toLowerCase(), c.name]));
     if (commands.length) this.emit({ type: 'commands.update', commands });
   }
 
@@ -314,11 +417,21 @@ export class OpencodeAdapter implements EngineAdapter {
 
   /** Native compaction（summarize），进度走正常事件流。 */
   async compact(): Promise<void> {
+    await this.ensureLive();
     const { providerID, modelID } = this.parseModel();
-    await this.api(`/session/${this.sessionID}/summarize`, {
+    // summarize 的 payload 必填（实测 1.18.9 缺 providerID → 400 BadRequest）——
+    // 模型标识不完整时显式报错，不再静默发出注定失败的请求；非 2xx 同样显性化。
+    if (!providerID || !modelID) {
+      this.emit({ type: 'error', source: 'client', message: L('无法压缩：当前模型标识不完整', 'Cannot compact: incomplete model id') });
+      return;
+    }
+    const res = await this.api(`/session/${this.sessionID}/summarize`, {
       method: 'POST',
-      body: JSON.stringify(providerID && modelID ? { providerID, modelID } : {}),
+      body: JSON.stringify({ providerID, modelID }),
     });
+    if (!res.ok) {
+      this.emit({ type: 'error', source: 'engine', message: L('压缩失败 (HTTP ' + res.status + ')', 'Compaction failed (HTTP ' + res.status + ')') });
+    }
   }
 
   // -------------------------------------------------------------- events
@@ -352,8 +465,12 @@ export class OpencodeAdapter implements EngineAdapter {
         if (!info) return;
         const mid = String(info.id ?? '');
         const role = String(info.role ?? '');
-        if (mid) this.messageRoles.set(mid, role);
-        if (role === 'assistant') {
+        if (mid) this.rememberMsg(this.messageRoles, mid, role);
+        const msgMode = String(info.mode ?? '');
+        if (mid && msgMode) this.rememberMsg(this.messageModes, mid, msgMode);
+        // compaction 摘要消息不计入回合 token 统计：其 input ≈ 压缩前全量上下文，
+        // 记入会让回合统计与 ContextRing 在压缩刚结束时瞬显满窗（实测 1.18.9）。
+        if (role === 'assistant' && msgMode !== 'compaction') {
           const tokens = info.tokens as Json | undefined;
           if (tokens) {
             const cache = (tokens.cache ?? {}) as Json;
@@ -376,6 +493,30 @@ export class OpencodeAdapter implements EngineAdapter {
         // 回合结束的唯一 resolve 信号（探针实测 error → idle 顺序）。
         this.finishTurn(this.turnHadError ? 'error' : 'end_turn');
         return;
+      case 'session.compacted': {
+        // 压缩完成（手动 summarize 或引擎 overflow 自动压缩，实测 1.18.9 均推送）：
+        // 合成一条完成的工具行提示 — completed 态不进 trackTurnText 的重置分支，
+        // 赛马 transcript 无损。
+        this.emit({
+          type: 'tool.upsert',
+          turnId: this.turnId,
+          toolCallId: 'compacted-' + Date.now(),
+          title: L('已压缩上下文', 'Context compacted'),
+          toolKind: 'other',
+          status: 'completed',
+        });
+        return;
+      }
+      case 'session.status': {
+        // compact 等无回合包络的引擎工作也反映到状态条；正常回合的 running/idle
+        // 由 runTurn/finishTurn 自管（turnDone 在 = 回合中，不覆盖）。
+        if (!this.turnDone) {
+          const t = String(((props.status as Json | undefined) ?? {}).type ?? '');
+          if (t === 'busy') this.emit({ type: 'session.status', status: 'running' });
+          else if (t === 'idle') this.emit({ type: 'session.status', status: 'idle' });
+        }
+        return;
+      }
       case 'session.error': {
         const error = props.error as Json | undefined;
         const data = (error?.data ?? {}) as Json;
@@ -391,7 +532,9 @@ export class OpencodeAdapter implements EngineAdapter {
         // 两套字段兼容取值，避免升级 server 后权限卡消失。
         const id = String(props.id ?? '');
         if (!id) return;
-        if (this.mode === 'auto' || this.mode === 'yolo') {
+        // 赛马无人值守（unattended）视同 auto 档自动应答，防角色会话死锁
+        //（对齐 ClaudeAdapter unattended）。
+        if (this.mode === 'auto' || this.mode === 'yolo' || this.opts.unattended) {
           this.pendingPermissions.add(id);
           this.answerPermission(id, this.mode === 'yolo' ? 'always' : 'once');
           return;
@@ -448,6 +591,9 @@ export class OpencodeAdapter implements EngineAdapter {
     const mid = String(part.messageID ?? '');
     const role = this.messageRoles.get(mid);
     if (role !== 'assistant') return; // user echo 或 role 未知（实测 message.updated 先于 part）
+    // compaction 消息的 part（摘要文本/推理/step-finish）全静默：摘要不属于
+    // 用户可见回答，流入上一回合气泡只会误导；压缩完成由 session.compacted 提示。
+    if (this.messageModes.get(mid) === 'compaction') return;
     const partID = String(part.id ?? '');
     const turnId = this.turnId;
     switch (part.type) {

@@ -5,28 +5,60 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { cp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep, extname } from 'node:path';
+import { basename, join, relative, resolve, sep, extname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { app, BrowserWindow, dialog, shell } from 'electron';
 
 import type { FileContent, FsNode, OpenerAvailability, OpenerId, OpenTarget } from '@shared/ipc';
 import { L } from '../i18n';
+import { log } from '../log/logger';
 
 const execFileAsync = promisify(execFile);
 const PREVIEW_CAP = 512 * 1024; // 512 KB
 const IGNORED = new Set(['.git', 'node_modules', '.DS_Store', '.hg', '.svn']);
 
+/** 粘贴附件目录的数量上限 —— codex localImage 按路径引用、resume/compact
+ *  时会重读文件，不能按龄期乱删；只保留最新 N 个（防无限膨胀），
+ *  超出才从最旧开始清。500 × 典型截图 ≈ 百 MB 级，上限可控。 */
+const PASTED_KEEP_MAX = 500;
+
+/** 机会式清扫：只在写入新附件时顺带修剪（best-effort，失败不影响保存）。 */
+function sweepPastedDir(dir: string): void {
+  try {
+    const entries = readdirSync(dir)
+      .map((name) => {
+        try {
+          return { name, mtime: statSync(join(dir, name)).mtimeMs };
+        } catch {
+          return { name, mtime: 0 };
+        }
+      })
+      .sort((a, b) => a.mtime - b.mtime);
+    const excess = entries.length - PASTED_KEEP_MAX;
+    for (let i = 0; i < excess; i++) {
+      try {
+        unlinkSync(join(dir, entries[i]!.name));
+      } catch {
+        /* 单文件删除失败跳过 */
+      }
+    }
+  } catch {
+    /* 目录不可读 = 不清 */
+  }
+}
+
 /** 把剪贴板/拖拽的二进制（如粘贴的图片）写入一个临时文件，返回绝对
- *  路径（作为附件传给引擎）。落在 userData/pasted 下，app 退出不主动清。 */
+ *  路径（作为附件传给引擎）。落在 userData/pasted 下，数量封顶清扫。 */
 export function saveTempAttachment(bytes: Uint8Array, ext: string): string {
   const dir = join(app.getPath('userData'), 'pasted');
   mkdirSync(dir, { recursive: true });
   const safeExt = /^[a-z0-9]{1,8}$/i.test(ext) ? ext.toLowerCase() : 'png';
   const file = join(dir, `${randomUUID()}.${safeExt}`);
   writeFileSync(file, bytes);
+  sweepPastedDir(dir);
   return file;
 }
 
@@ -47,6 +79,46 @@ export async function listTree(root: string, sub = ''): Promise<FsNode[]> {
   }
   nodes.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
   return nodes;
+}
+
+/** AI 正文提及的路径 → 工作区内真实文件。相对路径先按 root 直接拼；
+ *  不存在时全树模糊定位：路径后缀匹配优先（`components/SettingsView.tsx`
+ *  命中 `src/renderer/src/components/SettingsView.tsx`），退化为同名文件。
+ *  绝对路径只认「存在」，不做模糊（指向工作区外的由调用方另行处理）。 */
+export async function resolveWorkspaceFile(root: string, rawPath: string): Promise<string | null> {
+  const isFile = async (p: string): Promise<boolean> => stat(p).then((s) => s.isFile()).catch(() => false);
+  if (isAbsolute(rawPath)) return (await isFile(rawPath)) ? rawPath : null;
+
+  const rootAbs = resolve(root);
+  const direct = resolve(rootAbs, rawPath);
+  if (await isFile(direct)) return direct;
+
+  const want = rawPath.replace(/^[.\\/]+/, '').replace(/[\\/]+/g, '/').toLowerCase();
+  const base = want.split('/').pop()!;
+  let suffixHit: string | null = null;
+  let baseHit: string | null = null;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if ((suffixHit && baseHit) || depth > 10) return;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // 权限/符号链接坏链 — 跳过该子树
+    }
+    for (const e of entries) {
+      if (IGNORED.has(e.name)) continue;
+      const full = join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full, depth + 1);
+        continue;
+      }
+      const rel = relative(rootAbs, full).replace(/[\\/]+/g, '/').toLowerCase();
+      if (!suffixHit && (rel === want || rel.endsWith(`/${want}`))) suffixHit = full;
+      else if (!baseHit && e.name.toLowerCase() === base) baseHit = full;
+    }
+  };
+  await walk(rootAbs, 0);
+  return suffixHit ?? baseHit;
 }
 
 export async function readFilePreview(path: string): Promise<FileContent> {
@@ -154,7 +226,7 @@ export async function importPaths(root: string, srcPaths: string[]): Promise<num
       await cp(srcAbs, dest, { recursive: true, force: true, errorOnExist: false });
       ok++;
     } catch (err) {
-      console.error('[fs] import failed:', src, err);
+      log.error('fs', 'import failed', { src }, err);
     }
   }
   return ok;

@@ -25,6 +25,7 @@ import type { EngineAdapter, EngineEventSink } from '../EngineAdapter';
 import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
+import { log } from '../../log/logger';
 import { NdjsonRpc } from './rpc';
 import { codexSpawnEnv, resolveCodexCli } from './resolveCodex';
 
@@ -47,6 +48,9 @@ export interface CodexAdapterOptions {
   resumeThreadId?: string;
   /** 会话没有客户端历史时恢复失败静默降级（空会话的 rollout 常不存在，报错纯噪音）。 */
   quietResumeFallback?: boolean;
+  /** 无人值守（赛马角色会话）：自动批准权限/计划请求，防无人应答死锁
+   * （对齐 ClaudeAdapter unattended；只读约束由 READONLY_GUARD 提示词承载）。 */
+  unattended?: boolean;
   /** Optional explicit path to codex bin/codex.js (settings override). */
   cliEntry?: string;
   /** 路由开启时的 `-c key=value` 命令行覆盖（零文件写入）。 */
@@ -117,11 +121,25 @@ export class CodexAdapter implements EngineAdapter {
   private turnBusyMs = 0;
   private busySince = 0;
   private readonly busyKeys = new Set<string>();
-  /** Last goal snapshot — lets us synthesize the completion announcement
-   *  if the engine clears the goal without pushing a `complete` update. */
+  /** 最近一份 goal 快照 — GoalBar/完成公告的数据源；complete 时置 null
+   *  （公告由渲染层发；引擎 DB 里的 complete 残留行由 setGoal 先 clear 兜掉）。 */
   private lastGoal: GoalInfo | null = null;
-  private lastGoalAt = 0;
-  private userClearedGoal = false;
+  /** setGoal replace 进行中 —— 窗口内 thread/goal/cleared 通知要吞掉（防 GoalBar 闪烁）。 */
+  private replacingGoal = false;
+  /** background 回合的本地回合号 — turn.started 时自增分配，结束按它发
+   *  turn.ended（不能读 this.turnId：竞态下它已是排队 prompt 回合的号）。 */
+  private backgroundLocalTurnId = 0;
+  /** background 回合是 compact（compact() 自记，不发 showStats 统计行）。 */
+  private backgroundIsCompact = false;
+  /** compact() 已调用、对应 background 回合未开始的待消费标记（带时间戳：
+   *  超窗未消费即作废 —— 引擎吞掉请求时不误标下一个 goal 续跑回合）。 */
+  private compactPending = false;
+  private compactPendingAt = 0;
+  /** background 回合开始时的 `total` 基线 — 结束差值 = 该回合 token
+   *  （独立变量，不与 prompt 回合的 turnUsageBaseline 互相污染）。 */
+  private bgUsageBaseline: UsageBreakdown | undefined;
+  /** background 回合的 API 调用计数（tokenUsage 推送逐条累计）。 */
+  private bgApiCalls = 0;
   /** 上一次上报的上下文占用（token）— 压缩前后对比用。 */
   private lastContextUsed = 0;
   /** 压缩开始时的占用快照 + 待回填的压缩行 id（真实释放量要等压缩后的 tokenUsage）。 */
@@ -153,6 +171,13 @@ export class CodexAdapter implements EngineAdapter {
       windowsHide: true, // 防止 Windows 下闪出 cmd 控制台窗口
     });
     this.child = child;
+    log.info('engine.codex', 'engine spawned', {
+      command: spec.command,
+      args: spec.args.join(' '),
+      cwd: this.opts.cwd,
+      pid: child.pid,
+      resumed: !!this.opts.resumeThreadId,
+    });
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (d: string) => {
@@ -165,6 +190,12 @@ export class CodexAdapter implements EngineAdapter {
     child.on('exit', (code, signal) => {
       this.rpc?.close('engine exited');
       if (this.disposed) return;
+      log.warn('engine.codex', 'engine exited unexpectedly', {
+        code,
+        signal: signal ?? 'none',
+        pid: child.pid,
+        stderrTail: this.stderrTail.slice(-8).join(' | '),
+      });
       this.emit({
         type: 'error',
         source: 'engine',
@@ -174,6 +205,7 @@ export class CodexAdapter implements EngineAdapter {
     });
     child.on('error', (err) => {
       if (this.disposed) return;
+      log.error('engine.codex', 'engine spawn failed', { command: spec.command }, err);
       this.emit({ type: 'error', source: 'client', message: `${L('无法启动 codex CLI', 'Failed to launch the codex CLI')}: ${err.message}` });
       this.emit({ type: 'session.status', status: 'error', detail: 'spawn-failed' });
     });
@@ -271,6 +303,32 @@ export class CodexAdapter implements EngineAdapter {
   // ------------------------------------------------------------- actions
 
   async prompt(text: string, attachments?: string[], effort?: string): Promise<void> {
+    // 空文本 item 有毒：上游 API 对空 text content 一律 400
+    //（探针实测 text content is empty）—— 正文空白且有附件时不发文本块。
+    const input: Json[] = [];
+    if (text.trim()) input.push({ type: 'text', text });
+    for (const path of attachments ?? []) {
+      // 图片白名单对齐 provider 可消化格式（bmp 不在列 —— API 会拒且坏图
+      //  污染会话历史；bmp 退化路径文本，交给引擎 view_image 类工具）。
+      if (/\.(png|jpe?g|gif|webp)$/i.test(path)) input.push({ type: 'localImage', path });
+      else input.push({ type: 'text', text: `[附件] ${path}` });
+    }
+    await this.runTurn(input, effort);
+  }
+
+  /** 原生技能注入回合：{type:'skill'} 输入项 — codex core 直读 SKILL.md
+   *  全文注入（<skill> 片段），与 TUI $mention 等效；技能无参数语义，
+   *  用户参数按 TUI 习惯以 `$name args` 文本随行。 */
+  async promptSkill(name: string, path: string, args: string): Promise<void> {
+    const input: Json[] = [
+      { type: 'skill', name, path },
+      { type: 'text', text: args ? `${name} ${args}` : `${name}` },
+    ];
+    await this.runTurn(input, undefined);
+  }
+
+  /** 共享回合生命周期：turn/start → turn/completed（prompt 与 promptSkill 共用）。 */
+  private async runTurn(input: Json[], effort?: string): Promise<void> {
     const rpc = this.requireRpc();
     const turnId = ++this.turnId;
     this.lastTurnUsage = undefined;
@@ -282,11 +340,6 @@ export class CodexAdapter implements EngineAdapter {
     this.emit({ type: 'turn.started', turnId });
     this.emit({ type: 'session.status', status: 'running' });
 
-    const input: Json[] = [{ type: 'text', text }];
-    for (const path of attachments ?? []) {
-      if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(path)) input.push({ type: 'localImage', path });
-      else input.push({ type: 'text', text: `[附件] ${path}` });
-    }
     const modeCfg = MODE_MAP[this.mode];
     const params: Json = {
       threadId: this.threadId,
@@ -402,6 +455,9 @@ export class CodexAdapter implements EngineAdapter {
   async compact(): Promise<void> {
     try {
       await this.requireRpc().request('thread/compact/start', { threadId: this.threadId });
+      // 标记：下一个 background 回合是压缩 — endBackgroundTurn 不发 showStats。
+      this.compactPending = true;
+      this.compactPendingAt = Date.now();
     } catch (err) {
       // 显性化压缩失败（如回合进行中被引擎拒绝），不再静默。
       this.emit({ type: 'error', source: classifyError(err), message: `${L('压缩失败：', 'Compaction failed: ')}${errorMessage(err)}` });
@@ -431,18 +487,34 @@ export class CodexAdapter implements EngineAdapter {
   // goal controls for codex sessions.
 
   async setGoal(objective: string): Promise<void> {
-    const res = await this.requireRpc().request<Json>('thread/goal/set', {
-      threadId: this.threadId,
-      objective,
-      status: 'active',
-    });
-    this.emitGoal((res.goal as Json | undefined) ?? null);
+    const rpc = this.requireRpc();
+    // 官方 replace 语义（TUI /goal 设新目标 = clear + set）：先清存量 goal
+    // —— 含 complete 残留行（codex 完成不删行）。否则带新 objective 的 set
+    // 走 update 路径，新目标继承旧 tokens/time/createdAt/tokenBudget。
+    // 无 goal 时 clear 返回 cleared:false、不报错不推通知（已实测），放心调。
+    // replacingGoal 窗口内吞掉前置清理推的 cleared —— 否则乐观 GoalBar 被清、
+    // 新快照到达才恢复，闪一帧。通知与响应同连接 FIFO：cleared 必在 clear
+    // 响应之前或紧随其后到达（set 尚未发出），窗口外不存在误吞。
+    this.replacingGoal = true;
+    try {
+      await rpc.request('thread/goal/clear', { threadId: this.threadId }).catch((err) => {
+        // 老版本无此实验方法 —— 退化为 update 语义（新目标继承旧计数），审计留痕。
+        compatAudit.record('codex', 'rejected-method', 'thread/goal/clear', errorMessage(err));
+      });
+      const res = await rpc.request<Json>('thread/goal/set', {
+        threadId: this.threadId,
+        objective,
+        status: 'active',
+      });
+      this.emitGoal((res.goal as Json | undefined) ?? null);
+    } finally {
+      this.replacingGoal = false;
+    }
   }
 
   async controlGoal(action: GoalControlAction): Promise<void> {
     const rpc = this.requireRpc();
     if (action === 'clear') {
-      this.userClearedGoal = true;
       await rpc.request('thread/goal/clear', { threadId: this.threadId });
       this.lastGoal = null;
       this.emit({ type: 'goal.update', goal: null });
@@ -469,7 +541,6 @@ export class CodexAdapter implements EngineAdapter {
       tokenBudget: raw.tokenBudget == null ? undefined : Number(raw.tokenBudget),
     };
     this.lastGoal = goal.status === 'complete' ? null : goal;
-    this.lastGoalAt = Date.now();
     // `complete` passes through untouched — the renderer announces the
     // completion (objective + elapsed) before clearing its local state.
     this.emit({ type: 'goal.update', goal });
@@ -491,7 +562,14 @@ export class CodexAdapter implements EngineAdapter {
         if (!this.turnDone && !this.backgroundTurnActive) {
           this.backgroundTurnActive = true;
           this.backgroundCodexTurnId = String(startedTurn?.id ?? '');
-          this.emit({ type: 'turn.started', turnId: ++this.turnId });
+          this.backgroundLocalTurnId = ++this.turnId;
+          // 120s 有效窗：引擎吞掉 compact 请求时标记不残留，防误标后续
+          // goal 续跑（showStats 被吞）；contextCompaction item 到来时还有兜底。
+          this.backgroundIsCompact = this.compactPending && Date.now() - this.compactPendingAt < 120_000;
+          this.compactPending = false;
+          this.bgUsageBaseline = this.latestTotalUsage;
+          this.bgApiCalls = 0;
+          this.emit({ type: 'turn.started', turnId: this.backgroundLocalTurnId });
           this.emit({ type: 'session.status', status: 'running' });
         }
         return;
@@ -529,6 +607,7 @@ export class CodexAdapter implements EngineAdapter {
         const size = Number(usage?.modelContextWindow ?? 0);
         if (last) {
           if (this.turnDone) this.turnApiCalls += 1;
+          else if (this.backgroundTurnActive) this.bgApiCalls += 1;
           this.lastTurnUsage = {
             inputTokens: Number(last.inputTokens ?? 0),
             cachedInputTokens: Number(last.cachedInputTokens ?? 0),
@@ -569,19 +648,11 @@ export class CodexAdapter implements EngineAdapter {
         this.emitGoal((params.goal as Json | undefined) ?? null);
         return;
       case 'thread/goal/cleared': {
-        // Engine-initiated clear right after an active goal (and not by the
-        // user) means the goal finished — synthesize the completion so the
-        // UI can announce objective + elapsed even without a `complete` push.
-        const finished = !this.userClearedGoal && this.lastGoal && this.lastGoal.status === 'active';
-        if (finished) {
-          // Top up the elapsed time since the last snapshot so "用时" is accurate.
-          const extraSec = this.lastGoalAt ? Math.round((Date.now() - this.lastGoalAt) / 1000) : 0;
-          this.emit({
-            type: 'goal.update',
-            goal: { ...this.lastGoal!, status: 'complete', timeUsedSeconds: this.lastGoal!.timeUsedSeconds + extraSec },
-          });
-        }
-        this.userClearedGoal = false;
+        // setGoal replace 前置清理推的 cleared 在窗口内吞掉（理由见 setGoal）。
+        if (this.replacingGoal) return;
+        // 实测 codex 完成必推 updated(complete)、从不在完成时清行 —— cleared
+        // 只来自用户 clear / resume 无 goal 快照，一律按「无 goal」处理；
+        // 不合成完成公告（前提不成立，会误报）。
         this.lastGoal = null;
         this.emit({ type: 'goal.update', goal: null });
         return;
@@ -654,16 +725,46 @@ export class CodexAdapter implements EngineAdapter {
    *  自动压缩）按 stopReason 过滤。 */
   private endBackgroundTurn(turn: Json | undefined): void {
     this.backgroundTurnActive = false;
+    const bgCodexId = this.backgroundCodexTurnId;
     this.backgroundCodexTurnId = '';
-    this.activeCodexTurnId = '';
+    // 仅当活动 turn id 仍属于该 background 回合才清空 —— 竞态下它可能已是
+    // 排队 prompt 回合的 id，清掉会让那回合的 cancel/steer 变哑弹。
+    if (this.activeCodexTurnId && this.activeCodexTurnId === bgCodexId) this.activeCodexTurnId = '';
     this.cancelRequested = false;
+    // 本地回合号用自己的（竞态时 this.turnId 已属排队 prompt 回合）。
+    const localTurn = this.backgroundLocalTurnId || this.turnId;
+    this.backgroundLocalTurnId = 0;
     const status = String(turn?.status ?? 'completed');
     const err = turn?.error as Json | undefined;
     if (status === 'failed' && err) {
-      this.emit({ type: 'error', turnId: this.turnId, source: 'provider', message: String(err.message ?? 'turn failed') });
+      this.emit({ type: 'error', turnId: localTurn, source: 'provider', message: String(err.message ?? 'turn failed') });
     }
-    this.emit({ type: 'turn.ended', turnId: this.turnId, stopReason: 'background' });
-    if (!this.disposed) this.emit({ type: 'session.status', status: 'idle' });
+    // goal 续跑是用户要看/要复制的真实回答 → showStats 让渲染层照常出统计行
+    // （复制 + token + 参与 Worked-for 回合折叠，与 kimi KAP 通道对齐）；
+    // 压缩等内部回合不发。token 用回合前后 thread 级 `total` 差值（同 prompt 口径）。
+    const isCompact = this.backgroundIsCompact;
+    this.backgroundIsCompact = false;
+    const summed =
+      this.latestTotalUsage && this.bgUsageBaseline ? diffBreakdown(this.latestTotalUsage, this.bgUsageBaseline) : undefined;
+    this.bgUsageBaseline = undefined;
+    const usage: UsageInfo | undefined = summed
+      ? { ...this.lastTurnUsage, ...summed, apiCalls: this.bgApiCalls || undefined }
+      : this.lastTurnUsage
+        ? { ...this.lastTurnUsage, apiCalls: this.bgApiCalls || undefined }
+        : undefined;
+    this.emit({
+      type: 'turn.ended',
+      turnId: localTurn,
+      stopReason: 'background',
+      // goal 不活跃（完成/清除/暂停）= 引擎不会再自起下一轮 → 标 goal-idle，
+      // 渲染层据此补发排队消息（否则消息滞留到用户下次操作，顺序还会倒置）。
+      backgroundKind: isCompact ? 'compact' : this.lastGoal?.status === 'active' ? undefined : 'goal-idle',
+      showStats: isCompact ? undefined : true,
+      usage,
+      durationMs: this.turnDurationMs(turn),
+    });
+    // prompt 回合在飞（排队消息撞进续跑）时不发 idle —— 那回合自己收尾。
+    if (!this.turnDone && !this.disposed) this.emit({ type: 'session.status', status: 'idle' });
   }
 
   /** Map codex ThreadItem lifecycle into tool.upsert / message events. */
@@ -730,19 +831,26 @@ export class CodexAdapter implements EngineAdapter {
         });
         return;
       case 'contextCompaction': {
-        // 压缩以前完全不可见（落入 default）— 现在渲染为一条工具行，
-        // 进行中→完成；完成后的真实释放量由下一次 tokenUsage 回填。
+        // 压缩渲染为一条工具行；完成后的真实释放量由下一次 tokenUsage 回填。
+        // 仅 completed 才 upsert：in_progress 会命中 SessionManager.trackTurnText
+        // 的「新工具活动重置」分支，把赛马 transcript 清成空串（压缩无实质产物）。
         const status = mapItemStatus(String(item.status ?? 'inProgress'));
-        if (status !== 'completed') this.compactBeforeUsed = this.lastContextUsed || undefined;
+        // 引擎侧事实兜底：background 回合内出现压缩 item 即认定为压缩回合，
+        // 不依赖 compactPending 的新鲜度（其有效窗过期/漏标的场景）。
+        if (this.backgroundTurnActive) this.backgroundIsCompact = true;
+        if (status !== 'completed') {
+          this.compactBeforeUsed = this.lastContextUsed || undefined;
+          return;
+        }
         this.emit({
           type: 'tool.upsert',
           turnId,
           toolCallId: id,
-          title: status === 'completed' ? L('已压缩上下文', 'Context compacted') : L('正在压缩上下文…', 'Compacting context…'),
+          title: L('已压缩上下文', 'Context compacted'),
           toolKind: 'other',
           status,
         });
-        if (status === 'completed') this.compactReportId = id;
+        this.compactReportId = id;
         return;
       }
       default:
@@ -769,6 +877,11 @@ export class CodexAdapter implements EngineAdapter {
         { optionId: 'acceptForSession', name: L('本会话总是允许', 'Always allow in this session'), kind: 'allow_always' },
         { optionId: 'decline', name: L('拒绝', 'Reject'), kind: 'reject_once' },
       ];
+      // 无人值守（赛马角色会话）：自动接受，防无人应答死锁（对齐 claude unattended）。
+      if (this.opts.unattended) {
+        log.debug('engine.codex', 'unattended auto-approve', { method, title: title.slice(0, 80) });
+        return Promise.resolve({ decision: 'accept' });
+      }
       const busyKey = `approval:${requestId}`;
       this.busyAdd(busyKey);
       return new Promise((resolve) => {
