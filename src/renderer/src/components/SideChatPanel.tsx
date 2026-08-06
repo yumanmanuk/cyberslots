@@ -12,6 +12,7 @@ import { ArrowUp, ChevronDown, Square } from 'lucide-react';
 
 import { useChatStore } from '../store/chatStore';
 import { useT } from '../i18n';
+import { BrandSpinner } from './brand';
 import MessageList from './MessageList';
 import PermissionSheet from './PermissionSheet';
 import { EffortPicker } from './Composer';
@@ -25,6 +26,7 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const ui = useChatStore((s) => s.ui[sessionId]);
+  const cancelling = useChatStore((s) => !!s.cancelling[sessionId]);
   const sendKey = useChatStore((s) => s.settings?.sendKey ?? 'enter');
   // 未发送草稿按分支会话保留（卸载时写回 store，与主 Composer 同机制）。
   const [text, setText] = useState(() => useChatStore.getState().drafts[sessionId] ?? '');
@@ -53,6 +55,7 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
   }, [messages]);
 
   // 同 ChatView：折叠块 200ms 高度动画期间用 ResizeObserver 逐帧贴底。
+  // 同时监听滚动容器：输入框高度变化时视口缩放，仅监听内容不够。
   useEffect(() => {
     const el = scrollRef.current;
     const content = contentRef.current;
@@ -61,6 +64,7 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
       if (stick.current) el.scrollTop = el.scrollHeight;
     });
     ro.observe(content);
+    ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
@@ -91,7 +95,7 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
   };
 
   return (
-    <aside className="flex shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
+    <aside className="flex min-h-0 shrink-0 flex-col bg-bg-panel/50" style={{ width }}>
       <div
         ref={scrollRef}
         onScroll={() => {
@@ -124,15 +128,16 @@ export default function SideChatPanel({ sessionId, width }: { sessionId: string;
           />
           <div className="flex items-center gap-1.5 px-3 pb-2.5">
             <MiniModelPicker sessionId={sessionId} />
-            {(meta?.engine === 'codex' || meta?.engine === 'opencode' || meta?.engine === 'kimi') && <EffortPicker sessionId={sessionId} align="left" />}
+            {(meta?.engine === 'codex' || meta?.engine === 'opencode' || meta?.engine === 'kimi' || meta?.engine === 'omp' || meta?.engine === 'claude') && <EffortPicker sessionId={sessionId} align="left" />}
             <div className="flex-1" />
             {busy ? (
               <button
                 onClick={() => void useChatStore.getState().cancelSession(sessionId)}
-                title={t('stop')}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80"
+                disabled={cancelling}
+                title={cancelling ? t('stopping') : t('stop')}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80 disabled:opacity-80"
               >
-                <Square size={13} fill="currentColor" />
+                {cancelling ? <BrandSpinner size={14} /> : <Square size={13} fill="currentColor" />}
               </button>
             ) : (
               <button

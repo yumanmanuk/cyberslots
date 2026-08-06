@@ -8,6 +8,8 @@
  * and nothing engine-specific leaks past this file.
  */
 
+import type { RaceAdoptStrategy, RacePreJudgeMode } from './race';
+
 // ---------------------------------------------------------------- engines
 
 export type EngineId = 'kimi' | 'codex' | 'opencode' | 'omp' | 'antigravity' | 'claude';
@@ -69,6 +71,10 @@ export interface SessionMeta {
   cwd: string;
   chatMode: 'chat' | 'work';
   modelId: string;
+  /** 会话级思考深度（用户显式选择/本程序新会话默认；undefined = 跟随
+   *  引擎配置/目录默认解析链）。与 renderer `efforts` 内存态同源，持久化
+   *  到 sessions.json，重启后据此回填 —— codex 引擎会话档不跨进程保留。 */
+  effort?: string;
   permissionMode: PermissionMode;
   status: SessionStatus;
   createdAt: number;
@@ -165,6 +171,23 @@ export interface CodeSelection {
   text: string;
 }
 
+/** 终端选区引用 —— 与 CodeSelection 同级的「添加到对话」载荷。
+ *  终端内容没有文件/行号，只携带 tab 来源（cwd）与文本快照。 */
+export interface TerminalSelection {
+  id: string;
+  /** 终端 tab id（追溯来源）。 */
+  termId: string;
+  /** 终端 cwd —— 卡片/提示里展示来源。 */
+  cwd: string;
+  /** 终端标签（cwd 基名），复用选区卡片的文件名位。 */
+  fileName: string;
+  /** 选中文本快照（终端输出）。 */
+  text: string;
+}
+
+/** 输入框/历史气泡里可挂载的选区引用：文件选区或终端选区。 */
+export type ChatSelection = CodeSelection | TerminalSelection;
+
 /** One rendered item in the conversation stream. */
 export type UnifiedMessage =
   | {
@@ -173,13 +196,26 @@ export type UnifiedMessage =
       turnId: number;
       text: string;
       attachments?: string[];
-      /** 随这条提问发送的代码选区引用（气泡里显示为卡片；
+      /** 随这条提问发送的选区引用（气泡里显示为卡片；
        *  发送时已序列化进 prompt，此处仅供 UI 回显）。 */
-      selections?: CodeSelection[];
+      selections?: ChatSelection[];
       createdAt: number;
       steer?: boolean;
       /** 该条提问是作为 Goal 发送的（气泡下方标注 Sent as goal）。 */
       sentAsGoal?: boolean;
+      /** 赛马结果汇报：UI 渲染为可折叠卡片（最终方案 + 执行结果），
+       *  text 字段含完整汇报文本（发给引擎作 AI 上下文，使后续提问能基于赛马结果回答）。 */
+      raceResult?: {
+        raceId: string;
+        prompt: string;
+        finalPlan: string;
+        version: number;
+        delivered: boolean;
+        /** 审计未通过但用户人工放行交付（UI 显示「人工放行」而非普通已交付）。 */
+        overridden?: boolean;
+        auditPassed: boolean;
+        repairRound: number;
+      };
     }
   | { kind: 'text'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; planDoc?: boolean }
   | { kind: 'thinking'; id: string; turnId: number; text: string; streaming: boolean; createdAt: number; durationMs?: number }
@@ -209,6 +245,10 @@ export type UnifiedMessage =
       body?: string;
       toolCallId?: string;
       options: PermissionOptionView[];
+      /** 请求来源（'browser' = 工具服务层出口钩子审批，缺省 = 引擎原生）。 */
+      origin?: 'engine' | 'browser';
+      /** origin='browser' 时的动作回放/外发知悉信息。 */
+      browserAction?: BrowserActionPreview;
       /** Filled once answered — UI locks the card. */
       answeredOptionId?: string;
       createdAt: number;
@@ -258,6 +298,60 @@ export interface PermissionOptionView {
   optionId: string;
   name: string;
   kind: string; // allow_once | allow_always | reject_once | reject_always
+}
+
+// -------------------------------------------------- browser / computer use
+
+/** 工具服务层动作分级（以服务层 schema 元数据声明，不做 toolName 字符串匹配）：
+ *  read = 只读（screenshot / listTabs）——按当前 PermissionMode 放行；
+ *  navigate = 导航单列（改变页面状态且有钓鱼风险）——域名白名单内按
+ *  PermissionMode 放行，白名单外强制审批；
+ *  write = 写动作（click / type / scroll / eval）——必须走审批。 */
+export type BrowserToolTier = 'read' | 'navigate' | 'write';
+
+/** 浏览器工具审批卡片上的动作回放/知悉信息（origin='browser' 时随
+ *  permission.request 下发）。 */
+export interface BrowserActionPreview {
+  tool: string;
+  tier: BrowserToolTier;
+  /** 人类可读动作摘要（选择器/坐标/目标 URL 等；输入文本只给长度，绝不带内容）。 */
+  summary: string;
+  selector?: string;
+  x?: number;
+  y?: number;
+  /** type 目标为 password/支付类字段时置 true —— 审批卡片高亮警示。 */
+  sensitive?: boolean;
+  /** 审批时刻抓取的当前页截图（压缩 jpeg data URL）—— 卡片动作回放用。 */
+  previewImage?: string;
+  /** 截图/结果外发知悉：将捕获什么、发往哪个模型端点。 */
+  outbound?: { captures: string; endpoint: string };
+}
+
+/** 受管浏览器动作历史记录（摘要-only：动作类型、目标选择器/坐标、耗时、
+ *  成功否；绝不携带输入文本/截图/DOM payload）。 */
+export interface BrowserActionRecord {
+  id: string;
+  tool: string;
+  tier: BrowserToolTier;
+  /** 人类可读动作摘要（输入文本只给长度，绝不带内容）。 */
+  summary: string;
+  at: number;
+  durationMs?: number;
+  ok: boolean;
+  error?: string;
+}
+
+export type BrowserServiceStatus = 'off' | 'starting' | 'running' | 'error';
+
+/** 渲染层「浏览器」面板状态快照（browserGetState 返回 / browserEvent 全量推送）。 */
+export interface BrowserPanelState {
+  status: BrowserServiceStatus;
+  pageTitle?: string;
+  pageUrl?: string;
+  /** 最近一张截图（压缩 jpeg data URL）；无 = 尚未截图。 */
+  screenshot?: string;
+  actions: BrowserActionRecord[];
+  error?: string;
 }
 
 export interface UsageInfo {
@@ -353,8 +447,14 @@ export type EngineEvent =
   | { type: 'session.status'; status: SessionStatus; detail?: string }
   | { type: 'session.meta'; patch: Partial<SessionMeta> }
   | { type: 'turn.started'; turnId: number }
-  /** Echo of a user prompt injected outside the renderer (cron runs). */
-  | { type: 'user.echo'; turnId: number; text: string }
+  /** Echo of a user prompt injected outside the renderer (cron runs / steer).
+   *  messageId 与主进程 changeTracker 的 undo 快照共用（steer 才有）。 */
+  | { type: 'user.echo'; turnId: number; text: string; attachments?: string[]; messageId?: string }
+  /** 引擎确认已真正消费一次 steer 注入（codex：pending input 被 drain 并产出
+   *  匹配 client_user_message_id 的 userMessage item）。此前 steer 只是被 RPC
+   *  接受、尚未发给 LLM —— 消费方（SessionManager）应借此延迟 user.echo，
+   *  与官方客户端「先 pending、等 LLM 空闲点再发出」的观感对齐。 */
+  | { type: 'steer.confirmed'; turnId: number; messageId: string }
   | { type: 'text.delta'; turnId: number; text: string }
   | { type: 'thinking.delta'; turnId: number; text: string; durationMs?: number }
   | {
@@ -379,11 +479,18 @@ export type EngineEvent =
       body?: string;
       toolCallId?: string;
       options: PermissionOptionView[];
+      /** 请求来源：缺省 = 引擎原生审批；'browser' = 工具服务层（browser use）
+       *  出口钩子发起的审批 —— 应答由主进程按 requestId 前缀路由，不进引擎。 */
+      origin?: 'engine' | 'browser';
+      /** origin='browser' 时的动作回放/外发知悉信息（审批卡片增强展示）。 */
+      browserAction?: BrowserActionPreview;
     }
   | { type: 'permission.resolved'; requestId: string; optionId?: string }
   | { type: 'commands.update'; commands: SlashCommandInfo[] }
   | { type: 'models.update'; current: string; available: string[] }
   | { type: 'modes.update'; current: PermissionMode; available: PermissionMode[] }
+  /** omp ACP 推送的 thinking 配置选项值域（精细档动态扩展）。 */
+  | { type: 'thinking.update'; current: string; available: string[] }
   | { type: 'usage.update'; used: number; size: number; costUsd?: number }
   /** 引擎原生 swarm 模式状态（kimi KAP；开关回声与引擎自发退出同源）。 */
   | { type: 'swarm.update'; active: boolean }
@@ -466,7 +573,6 @@ export interface EngineRoutingSettings {
   codex: boolean;
 }
 
-// ---------------------------------------------- CLI 配置只读快照（展示用）
 // 本程序只读取 CLI 自己的配置文件（~/.kimi-code、~/.codex），永不写入；
 // key 绝不以明文跨进 renderer，只给 hasKey 标记。
 
@@ -680,7 +786,9 @@ export interface ClaudeConfigSnapshot {
   /** 认证方式：oauth（claude login）/ apikey（ANTHROPIC_API_KEY 环境变量）/ none。 */
   authMethod?: 'oauth' | 'apikey' | 'none';
   /** 第三方网关自定义模型映射（settings.json env 的 ANTHROPIC_MODEL /
-   *  ANTHROPIC_DEFAULT_*_MODEL(_NAME) 推导）：别名 → 自定义模型显示名。 */
+   *  ANTHROPIC_DEFAULT_*_MODEL(_NAME)、ANTHROPIC_CUSTOM_MODEL_OPTION
+   *  （下发模型 id，NAME 仅作展示名优先）
+   *  推导）：别名（default/sonnet/opus/haiku/fable/custom）→ 自定义模型显示名。 */
   modelLabels?: Record<string, string>;
   error?: string;
 }
@@ -754,6 +862,37 @@ export interface AgyActiveQuota {
   queriedAt: number;
 }
 
+/** omp (_omp/usage) 返回的单个时间窗 Claude 额度条目。 */
+export interface OmpQuotaWindow {
+  /** "5h" | "daily" | "weekly" | … (来自 limit.window.id) */
+  windowId: string;
+  /** 人类可读标签，如 "Daily" / "Weekly" */
+  windowLabel: string;
+  /** 剩余比例 0–1；undefined = 接口未返回 */
+  remainingFraction: number | undefined;
+  /** 重置时刻 (ms epoch)；undefined = 接口未给 */
+  resetsAt: number | undefined;
+  /** ok / warning / exhausted */
+  status: string;
+}
+
+/** omp 单个账号的 Claude 余量。 */
+export interface OmpAccountQuota {
+  /** 账号 email；undefined = 接口未返回 */
+  email?: string;
+  /** Claude backend counter 各时间窗余量（5h + 7d 各一条）。 */
+  windows: OmpQuotaWindow[];
+}
+
+/** omp via `omp usage --json` 查到的全部 Google 账号 Claude 余量。 */
+export interface OmpQuota {
+  ok: boolean;
+  error?: string;
+  /** 每个 google-antigravity 账号一条，顺序与 CLI 输出一致。 */
+  accounts: OmpAccountQuota[];
+  queriedAt: number;
+}
+
 export interface EngineConfigsSnapshot {
   kimi: KimiConfigSnapshot;
   codex: CodexConfigSnapshot;
@@ -794,6 +933,10 @@ export interface RaceRoleDefaultSetting {
 export interface RaceSettings {
   /** 默认启用第三选手（发起面板可临时开关；A/B 必选）。 */
   enableRacerC: boolean;
+  /** 发令面板 AI 初审模式的默认选项（off = 纯人工）。 */
+  defaultPreJudgeMode: RacePreJudgeMode;
+  /** designate 模式下的默认采纳策略（发令面板预填）。 */
+  defaultDesignateStrategy?: RaceAdoptStrategy;
   roles: Record<string, RaceRoleDefaultSetting>;
 }
 
@@ -886,6 +1029,24 @@ export interface AppSettings {
    *  可填完整路径（cli.js/.cmd/.exe）或 PATH 上的命令名（如 cc）；
    *  不支持 shell 别名（Set-Alias/alias 非可执行文件，spawn 无法解析）。 */
   claudeCliPath?: string;
+  /** Browser use 全局开关（默认关）：受管 Chrome（独立 user-data-dir）+
+   *  浏览器工具以 MCP server 形式喂给各引擎；UI 入口按此开关显隐。 */
+  browserUse: boolean;
+  /** Computer use 全局开关（默认关）。Phase 3 独立排期交付，当前仅占位 ——
+   *  desktop 写动作默认逐次审批、不暴露为 MCP 工具的安全边界由该模块自带。 */
+  computerUse: boolean;
+  /** navigate 域名白名单（小写主机名，支持 `*.example.com` 后缀匹配）：
+   *  名单内导航按当前 PermissionMode 放行，名单外强制审批。 */
+  browserNavWhitelist: string[];
+  /** 每引擎新会话默认（模型/思考深度）。空字段 = 跟随引擎自身配置默认；
+   *  只影响新建会话 —— 历史对话继续使用会话里已选过的配置。 */
+  engineDefaults?: Partial<Record<EngineId, EngineDefaults>>;
+}
+
+/** 引擎级新会话默认：模型 + 思考深度（本程序设置，不写各 CLI 配置文件）。 */
+export interface EngineDefaults {
+  modelId?: string;
+  effort?: string;
 }
 
 // ------------------------------------------------------------ cron tasks

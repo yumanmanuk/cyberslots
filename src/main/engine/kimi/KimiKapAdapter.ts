@@ -148,6 +148,8 @@ export class KimiKapAdapter implements EngineAdapter {
   private lastReassertAt = 0;
 
   private active: ActivePrompt | undefined;
+  /** 停止点落在 prompt id 未返回的空窗：记账，id 一到立即补发 prompt 级 abort。 */
+  private cancelRequested = false;
   /** 最近一次 goal.updated 的状态 — bgTurn 收尾判「引擎是否还会自起下一轮」用。 */
   private lastGoalStatus: string | undefined;
   /** 引擎自发回合（goal continuation / 压缩 / cron）— 不经 prompt() 发起，
@@ -320,6 +322,9 @@ export class KimiKapAdapter implements EngineAdapter {
       }
     }
     const localTurn = ++this.turnId;
+    // 新回合重置空窗记账：上一回合 submit 失败/被 abort 后若残留 true，
+    // 会让下一个正常回合的 prompt id 一到就被误 abort。
+    this.cancelRequested = false;
     this.stats = { input: 0, output: 0, cached: 0, calls: 0 };
     this.emit({ type: 'turn.started', turnId: localTurn });
     this.emit({ type: 'session.status', status: 'running' });
@@ -340,6 +345,7 @@ export class KimiKapAdapter implements EngineAdapter {
       if (effort) body.thinking = effort;
       const submitted = await this.api<Json>('POST', `/sessions/${this.sessionId}/prompts`, body);
       if (this.active?.localTurn === localTurn) this.active.promptId = String(submitted.prompt_id ?? '');
+      this.flushPendingCancel();
 
       const reason = await done;
 
@@ -369,6 +375,9 @@ export class KimiKapAdapter implements EngineAdapter {
   }
 
   async cancel(): Promise<void> {
+    // 先取消挂起的审批 — abort 只停回合，不撤销 pending approval 的话，
+    // 引擎可能继续等审批、回合迟迟不收尾（实测「停止无效」的主要形态之一）。
+    for (const requestId of [...this.pendingApprovals]) this.answerPermission(requestId);
     if (this.active) {
       // skill 激活回合无 prompt id — 用会话级 abort；40903 = 已结束（幂等）静默。
       if (this.active.promptId && !this.active.promptId.startsWith('skill:')) {
@@ -376,6 +385,8 @@ export class KimiKapAdapter implements EngineAdapter {
           () => undefined,
         );
       } else {
+        // prompt id 尚未返回（提交请求在途）：记账补发 + 先用会话级 abort 兜底。
+        this.cancelRequested = true;
         await this.api('POST', `/sessions/${this.sessionId}:abort`, {}).catch(() => undefined);
       }
       return;
@@ -383,6 +394,15 @@ export class KimiKapAdapter implements EngineAdapter {
     if (this.bgTurn || this.compactTurn !== undefined) {
       await this.api('POST', `/sessions/${this.sessionId}:abort`, {}).catch(() => undefined);
     }
+  }
+
+  /** prompt id 迟到时补发空窗期记账的中止；失败显性化（无调用方可接异常）。 */
+  private flushPendingCancel(): void {
+    if (!this.cancelRequested || !this.active?.promptId) return;
+    this.cancelRequested = false;
+    void this.cancel().catch((err) => {
+      this.emit({ type: 'error', source: 'engine', message: `${L('中止失败：', 'Cancel failed: ')}${errorMessage(err)}` });
+    });
   }
 
   async setModel(modelId: string): Promise<void> {
@@ -452,17 +472,25 @@ export class KimiKapAdapter implements EngineAdapter {
   }
 
   /** Native mid-turn steer：排队 prompt + prompts:steer 并入活跃回合。 */
-  async steer(text: string): Promise<boolean> {
+  async steer(text: string, attachments?: string[]): Promise<boolean> {
     if (!this.active && !this.bgTurn) return false;
     const submitted = await this.api<Json>('POST', `/sessions/${this.sessionId}/prompts`, {
-      content: [{ type: 'text', text }],
+      // 与 prompt 共用附件装配：图片 base64 内联、文件上传拿 file_id，
+      // 失败退化路径附注——steer 注入不丢附件。
+      content: await this.buildContent(text, attachments),
     });
     const promptId = String(submitted.prompt_id ?? '');
+    // promptId 缺失属于异常响应：prompt 已入队、会自成一回合，消息不丢，
+    // 不能再拼 [''] 调 steer（服务端必 400）。
     if (String(submitted.status ?? '') === 'queued') {
       // 回合刚结束的竞态：steer 失败时排队项会自成一回合 — 消息未丢，仍算送达。
-      await this.api('POST', `/sessions/${this.sessionId}/prompts:steer`, { prompt_ids: [promptId] }).catch((err) =>
-        compatAudit.record('kimi', 'rejected-method', 'kap prompts:steer', errorMessage(err)),
-      );
+      if (promptId) {
+        await this.api('POST', `/sessions/${this.sessionId}/prompts:steer`, { prompt_ids: [promptId] }).catch((err) => {
+          const detail = errorMessage(err);
+          log.warn('engine.kimi', 'kap prompts:steer failed', { sessionId: this.sessionId, promptId, detail });
+          compatAudit.record('kimi', 'rejected-method', 'kap prompts:steer', detail);
+        });
+      }
     }
     return true;
   }

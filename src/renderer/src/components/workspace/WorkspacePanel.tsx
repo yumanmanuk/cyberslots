@@ -7,7 +7,7 @@
  * 统一标签栏（与终端/sidechat 并列），本组件只渲染内容区。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, RotateCcw } from 'lucide-react';
 
 import type { UnifiedMessage } from '@shared/types';
@@ -25,24 +25,37 @@ interface Props {
   roots: string[];
   /** Controlled tab — owned by RightDock's unified tab bar. */
   tab: PanelTab;
-  /** 文件树列宽 — 由 RightDock 统一管理（dock 左缘把手拖拽）。 */
+  /** 文件树列宽 — 由 RightDock 统一管理。 */
   treeWidth: number;
+  /** 文件预览 / diff 对照面板宽度 — 由 RightDock 统一管理（dock 左缘把手拖拽）。 */
+  previewWidth: number;
   changes: SessionChangeEntry[];
   changesLoading: boolean;
   changesNonce: number;
   /** 接受/回退后触发变更清单重取（nonce+1，由 RightDock 持有）。 */
   onRefreshChanges: () => void;
+  /** 拖拽调整文件树宽度（内部把手）。 */
+  onTreeWidthChange: (w: number) => void;
+  /** 通知 RightDock 当前是否有预览面板打开。 */
+  onPreviewOpen: (open: boolean) => void;
 }
 
 export type PanelTab = 'files' | 'changes';
 
 // 变更清单改由主进程台账（ChangeTracker）驱动，条目类型 = SessionChangeEntry。
 
-export default function WorkspacePanel({ sessionId, roots, tab, treeWidth, changes, changesLoading, changesNonce, onRefreshChanges }: Props): JSX.Element {
+export default function WorkspacePanel({ sessionId, roots, tab, treeWidth, previewWidth, changes, changesLoading, changesNonce, onRefreshChanges, onTreeWidthChange, onPreviewOpen }: Props): JSX.Element {
   const [openFile, setOpenFile] = useState<string | null>(null);
   // external = 编辑工具卡点击打开的 diff：文件可能尚未进变更清单（拉取延迟），
   // 不参与「从清单消失即自动关闭」——其关闭走 DiffView 自身的回退/关闭按钮。
   const [openDiff, setOpenDiff] = useState<{ path: string; external: boolean; accepted?: boolean } | null>(null);
+
+  // 预览与树之间的拖拽把手 — 控制文件树宽度。
+  const treeDrag = useRef<{ startX: number; startW: number } | null>(null);
+
+  // 通知 RightDock 当前是否有预览面板打开（影响左缘把手行为）。
+  const hasPreview = !!(openDiff || openFile);
+  useEffect(() => { onPreviewOpen(hasPreview); }, [hasPreview, onPreviewOpen]);
 
   // AI 正文文件 chip 点击信号：打开该文件预览并消费清除（ChatView 只负责
   // 开 files tab 不清除 — 保证点击时 dock 未挂载也能在挂载后落地）。
@@ -79,36 +92,57 @@ export default function WorkspacePanel({ sessionId, roots, tab, treeWidth, chang
     const st = s.sessions.find((x) => x.id === sessionId)?.status ?? '';
     return `${n}|${st}`;
   });
+  // 树中常驻高亮当前打开的文件（预览 / diff 对照均算）。
+  const activePath = openFile ?? openDiff?.path ?? null;
 
   return (
     <>
       {/* 左侧详情面板：变更行 → diff 对照；文件树 → 只读预览（树保持可见） */}
       {(openDiff || openFile) && (
-        <aside className="flex w-[440px] shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-r border-line bg-bg-panel/30">
-          {openDiff ? (
-            <DiffView
-              sessionId={sessionId}
-              path={openDiff.path}
-              nonce={changesNonce}
-              canRevert={!openDiff.accepted}
-              onClose={() => setOpenDiff(null)}
-              onRevert={() =>
-                void window.cyberslots.sessionChangesRevert(sessionId, openDiff.path).then(() => {
-                  onRefreshChanges();
-                  setOpenDiff(null);
-                })
-              }
-            />
-          ) : (
-            <FilePreview path={openFile!} root={ownerRoot(openFile!, roots)} sessionId={sessionId} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
-          )}
-        </aside>
+        <>
+          <aside className="flex min-h-0 shrink-0 animate-[sheet-in_.15s_ease-out] flex-col border-r border-line bg-bg-panel/30" style={{ width: previewWidth }}>
+            {openDiff ? (
+              <DiffView
+                sessionId={sessionId}
+                path={openDiff.path}
+                nonce={changesNonce}
+                canRevert={!openDiff.accepted}
+                onClose={() => setOpenDiff(null)}
+                onRevert={() =>
+                  void window.cyberslots.sessionChangesRevert(sessionId, openDiff.path).then(() => {
+                    onRefreshChanges();
+                    setOpenDiff(null);
+                  })
+                }
+              />
+            ) : (
+              <FilePreview path={openFile!} root={ownerRoot(openFile!, roots)} sessionId={sessionId} reloadKey={`${previewReloadKey}|${changesNonce}`} onClose={() => setOpenFile(null)} />
+            )}
+          </aside>
+          {/* 预览与树之间的拖拽把手 — 控制文件树宽度 */}
+          <div
+            onPointerDown={(e) => {
+              treeDrag.current = { startX: e.clientX, startW: treeWidth };
+              (e.target as HTMLElement).setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              const d = treeDrag.current;
+              if (!d) return;
+              // 向右拖 → 树变窄；向左拖 → 树变宽
+              onTreeWidthChange(d.startW + (d.startX - e.clientX));
+            }}
+            onPointerUp={() => {
+              treeDrag.current = null;
+            }}
+            className="w-1 shrink-0 cursor-col-resize touch-none transition-colors duration-150 hover:bg-accent/40 active:bg-accent/60"
+          />
+        </>
       )}
 
-      <aside className="flex shrink-0 flex-col bg-bg-panel/60" style={{ width: treeWidth }}>
+      <aside className="flex min-h-0 shrink-0 flex-col bg-bg-panel/60" style={{ width: treeWidth }}>
         <div className="min-h-0 flex-1">
           {tab === 'files' ? (
-            <FileTree roots={roots} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
+            <FileTree roots={roots} activePath={activePath} onOpenFile={(p) => { setOpenDiff(null); setOpenFile(p); }} />
           ) : (
             <ChangesList
               changes={changes}
@@ -239,7 +273,7 @@ function ChangesList({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2 text-ui">
+      <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2 text-ui">
         <span className="font-medium">
           {pendingCount === 0
             ? t('wsAllAccepted', { n: changes.length })
@@ -270,19 +304,19 @@ function ChangesList({
           </div>
         )}
       </div>
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {changes.map((c) => (
-          <div key={c.path} className="group flex items-center gap-2 px-3 py-1.5 text-[12.5px] hover:bg-bg-hover">
-            <button onClick={() => onOpen(c.path, c.status === 'accepted')} title={c.path} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-              <span className={`w-3 shrink-0 text-center font-mono text-[10px] ${STATUS_BADGE[c.status].cls}`}>{STATUS_BADGE[c.status].label}</span>
+          <div key={c.path} className="group flex items-baseline gap-2 px-3 py-1.5 text-[12.5px] hover:bg-bg-hover">
+            <button onClick={() => onOpen(c.path, c.status === 'accepted')} title={c.path} className="flex min-w-0 flex-1 items-baseline gap-2 text-left">
+              <span className={`w-3 shrink-0 self-center text-center font-mono text-[10px] ${STATUS_BADGE[c.status].cls}`}>{STATUS_BADGE[c.status].label}</span>
               <span className="min-w-0 flex-1 truncate">{c.name}</span>
               {c.status === 'accepted' && (
-                <span className="shrink-0 rounded bg-ok/10 px-1 text-[10px] text-ok">{t('wsAcceptedFile')}</span>
+                <span className="shrink-0 self-center rounded bg-ok/10 px-1 text-[10px] text-ok">{t('wsAcceptedFile')}</span>
               )}
               {c.sessions > 1 && (
                 <span
                   title={t('wsMultiSessionTitle', { n: c.sessions })}
-                  className="shrink-0 rounded bg-warn/15 px-1 text-[10px] text-warn"
+                  className="shrink-0 self-center rounded bg-warn/15 px-1 text-[10px] text-warn"
                 >
                   {t('wsSessionsBadge', { n: c.sessions })}
                 </span>
@@ -291,7 +325,7 @@ function ChangesList({
               <span className="font-mono text-[11px] text-err">-{c.dels}</span>
             </button>
             {c.status === 'accepted' ? (
-              <span title={t('wsAcceptedFile')} className="shrink-0 text-ok">
+              <span title={t('wsAcceptedFile')} className="shrink-0 self-center text-ok">
                 <Check size={13} />
               </span>
             ) : (
@@ -299,7 +333,7 @@ function ChangesList({
                 <button
                   title={t('wsAcceptFile')}
                   onClick={() => accept(c.path)}
-                  className="shrink-0 rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ok group-hover:opacity-100"
+                  className="shrink-0 self-center rounded-md p-1 text-ink-faint opacity-0 transition hover:bg-bg-active hover:text-ok group-hover:opacity-100"
                 >
                   <Check size={13} />
                 </button>
@@ -313,7 +347,7 @@ function ChangesList({
                     setConfirmPath(null);
                     revert(c.path);
                   }}
-                  className={`shrink-0 rounded-md p-1 transition hover:bg-bg-active hover:text-err ${confirmPath === c.path ? 'text-err opacity-100' : 'text-ink-faint opacity-0 group-hover:opacity-100'
+                  className={`shrink-0 self-center rounded-md p-1 transition hover:bg-bg-active hover:text-err ${confirmPath === c.path ? 'text-err opacity-100' : 'text-ink-faint opacity-0 group-hover:opacity-100'
                     }`}
                 >
                   <RotateCcw size={13} />

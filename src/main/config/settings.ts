@@ -9,7 +9,7 @@ import { app } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { AppSettings, ContextFallbackRule, EngineId } from '@shared/types';
+import type { AppSettings, ContextFallbackRule, EngineDefaults, EngineId } from '@shared/types';
 import { log } from '../log/logger';
 
 const ENGINE_IDS: EngineId[] = ['codex', 'opencode', 'kimi', 'omp', 'antigravity', 'claude'];
@@ -21,6 +21,23 @@ function sanitizeEngineOrder(raw: unknown): EngineId[] {
     ? raw.filter((x): x is EngineId => ENGINE_IDS.includes(x as EngineId))
     : [];
   return [...new Set([...stored, ...ENGINE_IDS])];
+}
+
+/** 每引擎新会话默认消毒：只留合法引擎与非空字段，空对象不落盘。 */
+function sanitizeEngineDefaults(raw: unknown): Partial<Record<EngineId, EngineDefaults>> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const src = raw as Record<string, unknown>;
+  const out: Partial<Record<EngineId, EngineDefaults>> = {};
+  for (const id of ENGINE_IDS) {
+    const e = src[id];
+    if (!e || typeof e !== 'object') continue;
+    const entry = e as Record<string, unknown>;
+    const d: EngineDefaults = {};
+    if (typeof entry.modelId === 'string' && entry.modelId.trim()) d.modelId = entry.modelId.trim();
+    if (typeof entry.effort === 'string' && entry.effort.trim()) d.effort = entry.effort.trim();
+    if (d.modelId || d.effort) out[id] = d;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 const DEFAULTS: AppSettings = {
@@ -43,8 +60,12 @@ const DEFAULTS: AppSettings = {
   antigravityQuotaThreshold7d: 5,
   engineOrder: [...ENGINE_IDS],
   kimiPreferKap: true,
+  browserUse: false,
+  computerUse: false,
+  browserNavWhitelist: [],
   race: {
     enableRacerC: false,
+    defaultPreJudgeMode: 'off',
     roles: {
       racerA: { engine: 'codex', modelId: '', effort: '' },
       racerB: { engine: 'kimi', modelId: '', effort: '' },
@@ -52,6 +73,7 @@ const DEFAULTS: AppSettings = {
       judge: { engine: 'codex', modelId: '', effort: '' },
       builder: { engine: 'codex', modelId: '', effort: '' },
       auditor: { engine: 'codex', modelId: '', effort: '' },
+      preJudge: { engine: 'codex', modelId: '', effort: '' },
     },
   },
 };
@@ -111,10 +133,18 @@ function migrate(stored: Record<string, unknown>): AppSettings {
     claudeMcpConfig: typeof s.claudeMcpConfig === 'string' ? s.claudeMcpConfig : DEFAULTS.claudeMcpConfig,
     claudeCliPath: typeof s.claudeCliPath === 'string' ? s.claudeCliPath : DEFAULTS.claudeCliPath,
     kimiPreferKap: typeof s.kimiPreferKap === 'boolean' ? s.kimiPreferKap : DEFAULTS.kimiPreferKap,
+    browserUse: typeof s.browserUse === 'boolean' ? s.browserUse : DEFAULTS.browserUse,
+    computerUse: typeof s.computerUse === 'boolean' ? s.computerUse : DEFAULTS.computerUse,
+    browserNavWhitelist: Array.isArray(s.browserNavWhitelist)
+      ? s.browserNavWhitelist.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim().toLowerCase())
+      : [],
     race: {
       enableRacerC: s.race?.enableRacerC ?? DEFAULTS.race.enableRacerC,
+      defaultPreJudgeMode: s.race?.defaultPreJudgeMode ?? DEFAULTS.race.defaultPreJudgeMode,
+      defaultDesignateStrategy: s.race?.defaultDesignateStrategy,
       roles: { ...DEFAULTS.race.roles, ...(s.race?.roles ?? {}) },
     },
+    engineDefaults: sanitizeEngineDefaults(s.engineDefaults),
   };
 }
 

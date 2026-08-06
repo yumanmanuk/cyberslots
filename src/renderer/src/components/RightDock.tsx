@@ -10,8 +10,8 @@
  * dock 左缘拖拽把手调整当前激活面板的宽度（按面板类型分别记忆）。
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, FileDiff, FolderTree, MessagesSquare, NotebookText, Plus, SquareTerminal, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronDown, FileDiff, FolderTree, Globe, MessagesSquare, NotebookText, Plus, SquareTerminal, X } from 'lucide-react';
 
 import type { SessionMeta } from '@shared/types';
 import { useChatStore, type TerminalTab } from '../store/chatStore';
@@ -20,6 +20,7 @@ import WorkspacePanel, { useChangedFiles, type ChangedFilesResult, type PanelTab
 import SideChatPanel from './SideChatPanel';
 import TerminalPanel from './TerminalPanel';
 import PlanDocPanel from './PlanDocPanel';
+import BrowserPanel from './BrowserPanel';
 import { BrandHero, BrandSpinner } from './brand';
 
 /** tab id 约定：固定 tab 用字面量；动态 tab 用 `term:<id>` / `side:<会话id>`。 */
@@ -29,12 +30,23 @@ export const SIDE_PREFIX = 'side:';
 export const SIDE_PENDING = `${SIDE_PREFIX}pending`;
 
 /** 面板宽度按 tab 类型分别记忆（localStorage）；左缘把手拖拽调整。 */
-type PanelKind = 'ws' | 'term' | 'side' | 'plan';
+type PanelKind = 'ws' | 'term' | 'side' | 'plan' | 'browser';
 const WIDTH_SPEC: Record<PanelKind, { key: string; def: number; min: number; max: number }> = {
   ws: { key: 'cs.wsTreeWidth', def: 300, min: 220, max: 520 },
   term: { key: 'cs.termWidth', def: 440, min: 300, max: 800 },
   side: { key: 'cs.sidechatWidth', def: 380, min: 300, max: 720 },
   plan: { key: 'cs.planWidth', def: 420, min: 320, max: 720 },
+  browser: { key: 'cs.browserWidth', def: 380, min: 300, max: 720 },
+};
+
+/** 预览面板（文件预览 / diff 对照）宽度配置 — 与树宽独立管理。 */
+const PREVIEW_LS_KEY = 'cs.previewWidth';
+const PREVIEW_MIN = 280;
+const PREVIEW_MAX = 720;
+const PREVIEW_DEF = 440;
+const readPreviewWidth = (): number => {
+  const saved = Number(localStorage.getItem(PREVIEW_LS_KEY));
+  return Number.isFinite(saved) && saved >= PREVIEW_MIN && saved <= PREVIEW_MAX ? saved : PREVIEW_DEF;
 };
 const readWidth = (kind: PanelKind): number => {
   const s = WIDTH_SPEC[kind];
@@ -93,6 +105,8 @@ export default function RightDock({
   // "+"菜单的终端目录候选 / 文件树多根：workspace 全部根目录，普通项目仅 cwd。
   // cwd 强制置首（primary）— 防 workspace 编辑后 folders 顺序与会话 cwd 脱钩。
   const workspace = useChatStore((s) => s.settings?.workspaces.find((w) => w.id === meta.workspaceId));
+  // browser use 开关：关时浏览器 tab 不进入 tab 栏（UI 入口按开关显隐）。
+  const browserUse = useChatStore((s) => s.settings?.browserUse ?? false);
   const termFolders = isWork
     ? [meta.cwd, ...(workspace?.folders ?? []).filter((f) => f !== meta.cwd)]
     : [];
@@ -122,15 +136,23 @@ export default function RightDock({
     term: readWidth('term'),
     side: readWidth('side'),
     plan: readWidth('plan'),
+    browser: readWidth('browser'),
   }));
+  // 预览面板宽度（文件预览 / diff 对照）独立管理 — 仅 ws 面板有此分栏。
+  const [previewWidth, setPreviewWidth] = useState(readPreviewWidth);
+  // WorkspacePanel 报告当前是否有预览面板打开 — 决定左缘把手控制对象。
+  const [wsHasPreview, setWsHasPreview] = useState(false);
+  const handlePreviewOpen = useCallback((open: boolean) => setWsHasPreview(open), []);
   const activeKind: PanelKind = activeTab.startsWith(TERM_PREFIX)
     ? 'term'
     : activeTab.startsWith(SIDE_PREFIX)
       ? 'side'
       : activeTab === 'plan'
         ? 'plan'
-        : 'ws';
-  const drag = useRef<{ kind: PanelKind; startX: number; startW: number } | null>(null);
+        : activeTab === 'browser'
+          ? 'browser'
+          : 'ws';
+  const drag = useRef<{ target: 'panel' | 'preview'; startX: number; startW: number } | null>(null);
 
   // tab 描述集中生成（顺序 = 展示顺序）。
   const tabs: TabDesc[] = [];
@@ -157,6 +179,9 @@ export default function RightDock({
   }
   if (planText !== undefined) {
     tabs.push({ id: 'plan', icon: <NotebookText size={13} />, label: t('planDocTitle'), closable: true });
+  }
+  if (browserUse) {
+    tabs.push({ id: 'browser', icon: <Globe size={13} />, label: t('tabBrowser') });
   }
 
   // tab 溢出检测：装不下时露出「全部标签页」下拉兜底；同时维护两端
@@ -187,25 +212,39 @@ export default function RightDock({
   }, [tabsKey]);
 
   return (
-    <div className="relative flex shrink-0 flex-col border-l border-line bg-bg-panel/60">
-      {/* 左缘拖拽把手 — 悬停/拖动时高亮成细线，调整当前激活面板宽度 */}
+    <div className="relative flex min-h-0 shrink-0 flex-col border-l border-line bg-bg-panel/60">
+      {/* 左缘拖拽把手 — ws+预览打开时控制预览宽度，否则控制当前面板宽度 */}
       <div
         onPointerDown={(e) => {
-          drag.current = { kind: activeKind, startX: e.clientX, startW: widths[activeKind] };
+          // ws 面板且有预览面板打开 → 拖拽控制预览宽度
+          if (activeKind === 'ws' && wsHasPreview) {
+            drag.current = { target: 'preview', startX: e.clientX, startW: previewWidth };
+          } else {
+            drag.current = { target: 'panel', startX: e.clientX, startW: widths[activeKind] };
+          }
           (e.target as HTMLElement).setPointerCapture(e.pointerId);
         }}
         onPointerMove={(e) => {
           const d = drag.current;
           if (!d) return;
-          const spec = WIDTH_SPEC[d.kind];
-          const w = Math.min(spec.max, Math.max(spec.min, d.startW + (d.startX - e.clientX)));
-          setWidths((prev) => (prev[d.kind] === w ? prev : { ...prev, [d.kind]: w }));
+          if (d.target === 'preview') {
+            const w = Math.min(PREVIEW_MAX, Math.max(PREVIEW_MIN, d.startW + (d.startX - e.clientX)));
+            setPreviewWidth(w);
+          } else {
+            const spec = WIDTH_SPEC[activeKind];
+            const w = Math.min(spec.max, Math.max(spec.min, d.startW + (d.startX - e.clientX)));
+            setWidths((prev) => (prev[activeKind] === w ? prev : { ...prev, [activeKind]: w }));
+          }
         }}
         onPointerUp={() => {
           const d = drag.current;
           if (!d) return;
           drag.current = null;
-          localStorage.setItem(WIDTH_SPEC[d.kind].key, String(widths[d.kind]));
+          if (d.target === 'preview') {
+            localStorage.setItem(PREVIEW_LS_KEY, String(previewWidth));
+          } else {
+            localStorage.setItem(WIDTH_SPEC[activeKind].key, String(widths[activeKind]));
+          }
         }}
         className="absolute inset-y-0 left-0 z-30 w-1 cursor-col-resize touch-none transition-colors duration-150 hover:bg-accent/40 active:bg-accent/60"
       />
@@ -342,14 +381,22 @@ export default function RightDock({
             roots={termFolders.length ? termFolders : [meta.cwd]}
             tab={activeTab as PanelTab}
             treeWidth={widths.ws}
+            previewWidth={previewWidth}
             changes={changes}
             changesLoading={changesLoading}
             changesNonce={changesNonce}
             onRefreshChanges={() => setChangesNonce((n) => n + 1)}
+            onTreeWidthChange={(w) => {
+              const spec = WIDTH_SPEC.ws;
+              const clamped = Math.min(spec.max, Math.max(spec.min, w));
+              setWidths((prev) => (prev.ws === clamped ? prev : { ...prev, ws: clamped }));
+              localStorage.setItem(spec.key, String(clamped));
+            }}
+            onPreviewOpen={handlePreviewOpen}
           />
         )}
         {terms.map((tm) => (
-          <TerminalPanel key={tm.id} termId={tm.id} cwd={tm.cwd} width={widths.term} hidden={activeTab !== `${TERM_PREFIX}${tm.id}`} />
+          <TerminalPanel key={tm.id} termId={tm.id} cwd={tm.cwd} width={widths.term} hidden={activeTab !== `${TERM_PREFIX}${tm.id}`} sessionId={sessionId} />
         ))}
         {activeTab.startsWith(SIDE_PREFIX) && sidechatIds.includes(activeTab.slice(SIDE_PREFIX.length)) && (
           <SideChatPanel sessionId={activeTab.slice(SIDE_PREFIX.length)} width={widths.side} />
@@ -364,6 +411,7 @@ export default function RightDock({
         {activeTab === 'plan' && planText !== undefined && (
           <PlanDocPanel sessionId={sessionId} text={planText} width={widths.plan} onClose={() => onCloseTab('plan')} />
         )}
+        {activeTab === 'browser' && browserUse && <BrowserPanel width={widths.browser} />}
       </div>
     </div>
   );

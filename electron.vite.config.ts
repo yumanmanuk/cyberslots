@@ -30,6 +30,8 @@ export default defineConfig({
   },
   renderer: {
     server: {
+      port: 7777,
+      strictPort: true,
       hmr: !hmrOff,
     },
     resolve: {

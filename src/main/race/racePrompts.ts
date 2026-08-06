@@ -4,7 +4,7 @@
  * wording is testable and tweakable in isolation. No engine/Electron deps.
  */
 
-import type { RaceAdoptStrategy, RaceRole } from '@shared/race';
+import type { RaceAdoptStrategy, RacePreJudgeRecommendation, RaceRole } from '@shared/race';
 import { L } from '../i18n';
 
 /**
@@ -102,6 +102,9 @@ export function judgeFusePrompt(
     '',
     '请输出三个部分（标题固定）：',
     '一、最终方案：分点、可执行，作为后续实施依据；正文保持干净，不要混入来源标注；',
+    '输出纪律：最终方案正文必须是一份完整、可执行的方案，包含目标、分点实施步骤与验收标准；',
+    '禁止只写「已完成」「已通过 xd://propose 审批」「待办清零」之类的状态声明，禁止以「见某文件」或外部审批代替方案正文；',
+    '即使你把方案写入了文件或发起了审批，仍必须把完整方案正文原样贴回「一、最终方案」。',
     '二、设计溯源（表格）：| 设计点 | 来源 | 说明 |',
     '   · 粒度为主要设计点（章节/步骤级），每个主要设计点都必须入表，不许遗漏；',
     `   · 来源只能是：选手 X ／ 共识（多位选手一致或互相吸纳）／ 裁判补充；`,
@@ -121,10 +124,28 @@ export function judgeRevisePrompt(currentPlan: string, annotation: string): stri
     '用户对你上一版最终方案提出了批注。请据此**修订最终方案**，保留仍然有效的部分，只改动批注涉及处，并简要说明改了什么。',
     '输出仍保持三段式（一、最终方案 / 二、设计溯源 / 三、取舍说明）：溯源表同步更新，',
     '因本次批注新增或改动的设计点，来源标为「用户批注」；未变动的设计点保留原来源。',
+    '修订后的最终方案正文仍需完整、可审计（含目标、分点步骤与验收标准），禁止只写状态声明或指向外部文件。',
     '',
     `【用户批注】\n${annotation}`,
     '',
     `【当前最终方案】\n${currentPlan}`,
+  ].join('\n');
+}
+
+/** 裁判产出的方案不可审计时，自动重出一次的纠正提示词。 */
+export function judgePlanFixPrompt(plan: string, problems: string[]): string {
+  return [
+    '你上一版产出的最终方案不可审计，原因如下：',
+    ...problems.map((p, i) => `${i + 1}. ${p}`),
+    '',
+    '请重新产出完整的最终方案正文（仍按三段式：一、最终方案 / 二、设计溯源 / 三、取舍说明），必须包含：',
+    '- 目标与任务范围；',
+    '- 分点、可执行的实施步骤（标注涉及文件/模块）；',
+    '- 验收标准或验证方法；',
+    '- 风险与回滚考量。',
+    '禁止只写状态声明（如「已完成」「已通过审批」「待办清零」），禁止以文件路径或外部审批代替正文。',
+    '',
+    `【你上一版的最终方案（仅供你回顾，不得把占位内容照抄回来）】\n${plan}`,
   ].join('\n');
 }
 
@@ -157,12 +178,33 @@ export function auditPrompt(finalPlan: string, diffDigest: string): string {
   ].join('\n');
 }
 
-/** ⑥ Repair: feed audit issues back to the builder for another pass. */
+/** ⑥ Repair: feed audit issues back to the builder for another pass. Builder
+ *  必须先表态：同意就修；不同意要说明理由。REJECT_ALL 时禁止改文件，
+ *  由编排器停止回合并交给用户人工介入，避免审计-修复无限拉扯。 */
 export function repairPrompt(issues: string[]): string {
   return [
-    '审计未通过。请针对下列问题**修复你上一步的实现**，仅改动相关处：',
+    '审计未通过。请先对下列问题逐条表态：同意就修复，不同意就说明技术理由。',
+    '',
+    '回合结束前，**最后一行必须输出且只输出以下裁决之一**（供程序解析）：',
+    '`REPAIR_DECISION: ACCEPT_ALL` —— 同意全部问题并已完成对应修复；',
+    '`REPAIR_DECISION: ACCEPT_PARTIAL` —— 至少同意一条并已修复对应处，其余不同意的在正文说明理由；',
+    '`REPAIR_DECISION: REJECT_ALL` —— 不同意全部问题，**不要改动文件**，只输出拒绝理由并结束回合。',
+    '',
     ...issues.map((s, i) => `${i + 1}. ${s}`),
   ].join('\n');
+}
+
+/** 解析执行者对审计意见的总体态度。旧执行者没输出裁决行时按“接受并继续
+ *  修复”处理，保证既有流程不回退；只有明确“全部不同意”才停下等人工。 */
+export function parseRepairDecision(transcript: string): { rejectedAll: boolean } {
+  const text = transcript.trim();
+  const m = /REPAIR_DECISION:\s*(ACCEPT_ALL|ACCEPT_PARTIAL|REJECT_ALL)/i.exec(text);
+  const decision = m?.[1]?.toUpperCase();
+  if (decision === 'REJECT_ALL') return { rejectedAll: true };
+  if (decision === 'ACCEPT_ALL' || decision === 'ACCEPT_PARTIAL') return { rejectedAll: false };
+  return {
+    rejectedAll: /全部不同意|拒绝执行|不同意全部|拒绝全部|reject\s*all|disagree\s*with\s*all/i.test(text),
+  };
 }
 
 /** 中断后的断点续接（agy 会话保留 conversation_id，模型带着原上下文接着
@@ -184,22 +226,89 @@ export function continueBuildPrompt(): string {
   );
 }
 
+/** 「必须修复的问题」小节标题（中英兼容，含任务卡/待办式标题）。 */
+const MUST_FIX_HEADER =
+  /^\s*(?:#{1,6}\s*)?(?:必须修复的问题|需要修复的问题|待修复问题|必改项|必须修复|需修复|Must[- ]fix(?:ed)?\s+(?:issues?|problems?|items?)|Issues? to fix|Required fixes?|Blocking issues?)\s*[:：]?\s*$/i;
+
+/** Markdown 章节标题行。 */
+const MD_HEADING = /^\s*#{1,6}\s/;
+
+/** 审计正文 → 可执行问题条目：
+ *  - afterHeaderOnly=true：只取「必须修复的问题」小节内的条目；
+ *  - afterHeaderOnly=false（兜底）：取全文的列表行（跳过表格行/标题行）。
+ *  去重后返回，单条最短 5 字符。 */
+function extractAuditIssues(text: string, afterHeaderOnly: boolean): string[] {
+  const issues: string[] = [];
+  let capturing = !afterHeaderOnly;
+  let seenHeader = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (/VERDICT:\s*(PASS|FAIL)/i.test(line)) break;
+    if (afterHeaderOnly) {
+      if (!seenHeader) {
+        if (MUST_FIX_HEADER.test(line)) {
+          seenHeader = true;
+          capturing = true;
+        }
+        continue;
+      }
+      // 进入下一章节（非必须修复的标题）即结束采集。
+      if (MD_HEADING.test(line)) break;
+    } else {
+      if (MD_HEADING.test(line)) continue;
+      // 兜底模式只收明确的列表条目，避免把正文段落当问题。
+      if (!/^\s*(?:[-*•·]|\d+[.)、])\s/.test(line)) continue;
+    }
+    if (!capturing) continue;
+    if (!line || line.startsWith('|')) continue; // 表格行不是问题条目
+    const item = line
+      .replace(/^\s*(?:[-*•·]|\d+[.)、])\s*/, '')
+      .replace(/^[-*•·]\s*/, '')
+      .trim();
+    if (!item || item.length <= 4) continue;
+    if (!issues.includes(item)) issues.push(item);
+  }
+  return issues;
+}
+
 /**
  * Parse the auditor's reply into a verdict. Looks for the machine-readable
  * `VERDICT: PASS/FAIL` line; falls back to keyword heuristics.
+ * 问题条目只从「必须修复的问题」小节提取（缺失时兜底取全文列表行），
+ * 不再把 markdown 表格/标题当成审计问题，避免挤掉真正可执行的条目。
  */
-export function parseAuditVerdict(transcript: string): { passed: boolean; issues: string[] } {
+export function parseAuditVerdict(transcript: string): { passed: boolean; issues: string[]; body: string } {
   const text = transcript.trim();
   const m = /VERDICT:\s*(PASS|FAIL)/i.exec(text);
   const passed = m ? m[1]!.toUpperCase() === 'PASS' : /审计通过|通过审计|no issues/i.test(text);
-  const issues: string[] = [];
-  if (!passed) {
-    for (const line of text.split('\n')) {
-      const item = line.replace(/^\s*(?:[-*·]|\d+[.)、])\s*/, '').trim();
-      if (item && !/VERDICT:/i.test(line) && item.length > 4) issues.push(item);
-    }
+  // Strip the machine-readable VERDICT line from the display body.
+  const body = text.replace(/^.*VERDICT:\s*(PASS|FAIL).*$/im, '').trim();
+  let issues = passed ? [] : extractAuditIssues(text, true);
+  // 有「必须修复的问题」标题但小节为空/未命中 → 兜底提取全文列表行。
+  if (!passed && issues.length === 0) issues = extractAuditIssues(text, false);
+  return { passed, issues: issues.slice(0, 20), body };
+}
+
+/** 最终方案最小完整性门槛：防裁判把「状态声明/占位符」当成方案交付。
+ *  返回不可审计原因列表；空数组 = 可审计。 */
+export function finalPlanProblems(plan: string | undefined): string[] {
+  const text = (plan ?? '').trim();
+  const problems: string[] = [];
+  if (!text) {
+    problems.push('最终方案为空');
+    return problems;
   }
-  return { passed, issues: issues.slice(0, 10) };
+  if (text.length < 200) {
+    problems.push(`最终方案过短（${text.length} 字），疑似状态声明或占位符，不包含可实施内容`);
+  }
+  const statusOnly = /^\s*(?:已完成|已交付|已通过|计划已通过|完成|done|delivered|completed|approved)[^#\n]{0,160}\s*$/i.test(text);
+  const hasStructure = /(?:^|\n)\s*(?:#{1,6}\s|[-*•]\s|\d+[.)、]\s)|步骤|实施|验收|目标|方案|Step|Approach|Implement|Verification|Acceptance|Goal|Plan/i.test(text);
+  if (statusOnly && !hasStructure) {
+    problems.push('最终方案只是一句完成状态声明（如「已完成/已交付/待办清零」），不含目标、步骤与验收标准');
+  } else if (!hasStructure) {
+    problems.push('最终方案缺少可执行结构：需要目标、分点实施步骤与验收标准（或 Markdown 章节/列表）');
+  }
+  return problems;
 }
 
 /** Title shown in the sidebar/session list for a race role session. */
@@ -212,6 +321,80 @@ export function roleSessionTitle(role: RaceRole, racePrompt: string): string {
     judge: L('⚖裁判', '⚖Judge'),
     builder: L('🔨执行', '🔨Build'),
     auditor: L('🛡审计', '🛡Audit'),
+    preJudge: L('🔍初审', '🔍PreJudge'),
   };
   return `${tag[role]} · ${head}`;
+}
+
+// ---------------------------------------------------------- AI 初审 (pre-judge)
+
+/**
+ * ★ AI 初审提示词 —— 在用户选策略前，由 AI 评审各方方案并给出推荐策略。
+ *  仅出"建议"不出"方案"——方案仍由裁判按用户决策产出（judgeFusePrompt）。
+ *  输入与 judgeFusePrompt 同源（任务 + 各选手方案 + 反驳/吸纳/辩护），
+ *  但输出为结构化 markdown（推荐策略 / 一句话结论 / 推荐理由 / 各选手点评），
+ *  供弹窗展开查看。纯函数，无副作用，可独立单测。
+ */
+export function preJudgePrompt(
+  task: string,
+  racers: JudgeRacerInput[],
+  eliminated?: string[],
+): string {
+  const sections = racers
+    .map((r) => `【选手 ${r.label} 方案】\n${r.plan}\n【选手 ${r.label} 的反驳/吸纳/辩护】\n${r.rebuttal}`)
+    .join('\n\n');
+  return [
+    '你是这场方案赛马的"初审评审员"。请阅读各方方案与反驳/吸纳/辩护，给出你推荐的采纳策略及理由。',
+    '',
+    '可选策略：',
+    '- adoptA / adoptB / adoptC：采纳某一方方案（仅做必要整理，不引入其他选手结构）',
+    '- preferA / preferB / preferC：以某方为主体框架，融合其余选手优点',
+    '',
+    '请在回复中严格按以下结构输出 markdown（标题固定，供程序解析）：',
+    '',
+    '## 推荐策略',
+    '（仅一行：adoptX 或 preferX，X 为 A/B/C）',
+    '',
+    '## 一句话结论',
+    '（≤60 字，概括推荐理由的核心）',
+    '',
+    '## 推荐理由',
+    '（分点列出 2-4 条关键理由，说明为什么推荐该策略）',
+    '',
+    '## 各选手点评',
+    '（按选手分节，每节 2-3 句点评其方案的优劣）',
+    '',
+    ...(eliminated?.length
+      ? [`（选手 ${eliminated.join('、')} 已被剔除：其方案不在输入中，不作为评审对象）`]
+      : []),
+    '',
+    `【任务】\n${task}`,
+    '',
+    sections,
+  ].join('\n');
+}
+
+/**
+ * 解析 AI 初审的 markdown 输出为结构化推荐结果。纯函数，可独立单测。
+ *  - strategy：从全文查找 adoptX / preferX（不限于"## 推荐策略"节，容错）
+ *  - summary：从"## 一句话结论"节提取首行
+ *  - detail：原始 markdown 全文（弹窗展示用）
+ *  解析失败（找不到合法策略）返回 null，由调用方降级为纯人工。
+ */
+export function parsePreJudgeRecommendation(transcript: string): RacePreJudgeRecommendation | null {
+  const text = transcript.trim();
+  // 查找首个 adoptX / preferX（容错：不限制在标题节内）
+  const m = /\b(adopt|prefer)([ABC])\b/i.exec(text);
+  if (!m) return null;
+  const strategy = `${m[1]!.toLowerCase()}${m[2]!.toUpperCase()}` as RaceAdoptStrategy;
+
+  // 提取"## 一句话结论"节的首行
+  const summaryMatch = /##\s*一句话结论\s*\n+([^\n]+)/i.exec(text);
+  const summary = summaryMatch?.[1]?.trim() ?? '';
+
+  return {
+    strategy,
+    summary: summary || strategy,
+    detail: text,
+  };
 }

@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { app, BrowserWindow, dialog, shell } from 'electron';
 
-import type { FileContent, FsNode, OpenerAvailability, OpenerId, OpenTarget } from '@shared/ipc';
+import type { FileContent, FsNode, GitBaseContent, OpenerAvailability, OpenerId, OpenTarget } from '@shared/ipc';
 import { L } from '../i18n';
 import { log } from '../log/logger';
 
@@ -164,6 +164,49 @@ export async function gitStatus(root: string): Promise<Record<string, string>> {
     return out;
   } catch {
     return {}; // not a git repo / git missing — silent
+  }
+}
+
+/** 单文件 git 基准：HEAD 版本内容 + 文件级变更状态，供编辑器逐行标记。
+ *  非 git 仓库 / HEAD 无该文件（新增、未跟踪）/ 二进制 → base 为 null，
+ *  渲染端按「相对 HEAD 全新增」或「无标记」处理；失败一律静默降级。 */
+export async function gitBaseContent(root: string, path: string): Promise<GitBaseContent> {
+  try {
+    const repo = await execFileAsync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    const repoRoot = repo.stdout.trim();
+    if (!repoRoot) return { base: null, status: '' };
+    const rel = relative(repoRoot, resolve(path)).split('\\').join('/');
+    let status = '';
+    try {
+      const st = await execFileAsync('git', ['-C', repoRoot, 'status', '--porcelain', '--', rel], {
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      });
+      const line = st.stdout.split('\n')[0] ?? '';
+      const code = line.slice(0, 2).trim();
+      status = code ? (code[0] === ' ' ? code[1]! : code[0]!) : '';
+      if (status === '?') status = 'U';
+    } catch {
+      /* 单文件状态查询失败 — 保持无状态 */
+    }
+    let base: string | null = null;
+    try {
+      const show = await execFileAsync('git', ['-C', repoRoot, 'show', `HEAD:${rel}`], {
+        windowsHide: true,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      // 二进制内容含 NUL，逐行 diff 无意义 → 视为无基准。
+      if (!show.stdout.includes('\0')) base = show.stdout;
+    } catch {
+      /* HEAD 无此文件 = 新增/未跟踪 */
+    }
+    return { base, status };
+  } catch {
+    // git 缺失 / 非仓库 — 静默降级为无标记
+    return { base: null, status: '' };
   }
 }
 

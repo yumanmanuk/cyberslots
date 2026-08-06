@@ -5,7 +5,7 @@
  * sidebar afterwards) and raises a system notification on completion.
  */
 
-import { app, Notification } from 'electron';
+import { app } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,6 +16,7 @@ import type { SettingsStore } from '../config/settings';
 import { cronMatches, validateCron } from './cronMatch';
 import { L } from '../i18n';
 import { log } from '../log/logger';
+import { notifyWithSession } from '../notify';
 
 const TICK_MS = 20_000;
 
@@ -107,7 +108,7 @@ export class CronService {
       task.lastResult = 'ok';
       log.info('cron', 'task completed', { taskId: task.id, name: task.name, sessionId: meta.id, ms: Date.now() - startTs });
       if (this.settings.get().notifications.taskComplete) {
-        this.notify(L(`定时任务完成：${task.name}`, `Scheduled task done: ${task.name}`), L('结果已写入会话，可在侧栏查看。', 'Result written to a session — see the sidebar.'));
+        this.notify(L(`定时任务完成：${task.name}`, `Scheduled task done: ${task.name}`), L('点击查看该会话结果。', 'Click to open the result session.'), meta.id);
       }
     } catch (err) {
       task.lastResult = 'error';
@@ -122,9 +123,8 @@ export class CronService {
     }
   }
 
-  private notify(title: string, body: string): void {
-    if (!Notification.isSupported()) return;
-    new Notification({ title, body }).show();
+  private notify(title: string, body: string, sessionId?: string): void {
+    notifyWithSession({ title, body, sessionId });
   }
 
   private get file(): string {

@@ -10,22 +10,28 @@
 
 import { create } from 'zustand';
 
-import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RaceRole, RaceRoleConfig, RaceRoleConfigs, RaceStage } from '@shared/race';
+import type { RaceAdoptStrategy, RaceEventEnvelope, RaceGroup, RacePreJudgeMode, RaceRole, RaceRoleConfig, RaceRoleConfigs, RaceStage } from '@shared/race';
 import { raceRoleKey, translate } from '../i18n';
 import { rlog } from '../log/logger';
-import { announceSystem, useChatStore } from './chatStore';
+import { announceSystem, autoTitleIfDefault, useChatStore } from './chatStore';
 
 interface RaceState {
   /** raceId → 最新快照（编排事件就地合并；缺失时整体拉取）。 */
   races: Record<string, RaceGroup>;
   /** 当前全屏打开的赛马视图；null = 不在赛马视图。 */
   activeRaceId: string | null;
+  /** 会话 → 该会话最近打开的赛马（切回该会话时恢复；纯内存，不落盘）。 */
+  raceViews: Record<string, string | undefined>;
   /** 发起面板（Composer 🏇 入口打开的配置对话框）。 */
   setupOpen: boolean;
   /** 选手配置调整弹窗（重试前改 A/B 引擎/模型/思考档）。 */
   tuneOpen: boolean;
   /** raceId → 最近一次编排错误（视图顶部横幅展示）。 */
   errors: Record<string, string | undefined>;
+  /** raceId → 整场赛马中止请求在途（顶栏中止按钮进行中态）。 */
+  cancelling: Record<string, boolean>;
+  /** raceId → AI 初审是否正在评审中（内存态，事件驱动；UI 据此显示"AI 评审中"等待态）。 */
+  preJudging: Record<string, boolean>;
   /** 阶段切换飘字：进入新环节时短暂提示，自动消失（RaceView 渲染）。 */
   stageFlash: { raceId: string; stage: RaceStage; seq: number } | null;
   init(): Promise<void>;
@@ -38,9 +44,14 @@ interface RaceState {
     roles: RaceRoleConfigs,
     parentSessionId?: string,
     contextSeed?: string,
+    preJudgeMode?: RacePreJudgeMode,
+    designateStrategy?: RaceAdoptStrategy,
+    designateComment?: string,
   ): Promise<void>;
   openRace(raceId: string): void;
   closeRace(): void;
+  /** 记录某会话当前关联的赛马视图（传 undefined 表示清除）。 */
+  setRaceView(sessionId: string, raceId: string | undefined): void;
   /** ④a 采纳决策（4 选 1 + 可选评语）。 */
   adopt(strategy: RaceAdoptStrategy, comment?: string): Promise<void>;
   /** ④a 反悔：撤回采纳决策（裁判尚未出方案时），回到选策略关口。 */
@@ -53,6 +64,8 @@ interface RaceState {
   finalize(): Promise<void>;
   /** 重启后继续被打断的赛马（重跑当前阶段）。 */
   resumeRace(): Promise<void>;
+  /** 审计未通过时由用户人工放行：接受当前实现并交付。 */
+  overrideAudit(): Promise<void>;
   openTune(): void;
   closeTune(): void;
   /** 手动关闭错误横幅（仅清本地展示态，不影响主进程编排；阶段重试
@@ -67,6 +80,10 @@ interface RaceState {
   /** 裁判选策略前回退：清空产物重跑双规划。 */
   restartPlanning(): Promise<void>;
   cancelRace(): Promise<void>;
+  /** 采纳 AI 初审的推荐策略。 */
+  acceptPreJudge(): Promise<void>;
+  /** 忽略 AI 初审推荐，回到纯人工 4 选 1。 */
+  dismissPreJudge(): Promise<void>;
 }
 
 type SetFn = (fn: (s: RaceState) => Partial<RaceState>) => void;
@@ -135,20 +152,52 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
         next.finalPlanVersion = event.version;
         break;
       case 'race.audit':
-        next.audit = { passed: event.passed, issues: event.issues };
+        next.audit = { passed: event.passed, issues: event.issues, body: event.body };
         next.repairRound = event.repairRound;
         break;
       case 'race.stats':
         next.stats = event.stats;
         break;
       case 'race.done': {
+        const parentSessionId = g.parentSessionId;
         if (g.stage !== 'done') entered = 'done';
         next.stage = 'done';
-        // 产出回流宿主对话：留下可回溯的收尾公告（寄生闭环）。
-        if (g.parentSessionId) {
+        next.delivered = event.delivered;
+        next.auditOverridden = event.overridden;
+        // 产出回流宿主对话：把最终方案 + 执行结果发给宿主对话的引擎，
+        // 使 AI 上下文包含赛马产物 —— 用户可直接就方案提问。
+        // UI 上渲染为赛马结果卡片（MessageItem 识别 raceResult 标记）。
+        if (parentSessionId && g.finalPlan) {
+          const sid = parentSessionId;
+          const plan = g.finalPlan;
+          void useChatStore.getState().sendRaceResult(sid, {
+            raceId: g.id,
+            prompt: g.prompt,
+            finalPlan: plan,
+            version: g.finalPlanVersion,
+            delivered: event.delivered,
+            overridden: event.overridden,
+            auditPassed: !!g.audit?.passed,
+            repairRound: g.repairRound,
+          }).catch((err) => {
+            rlog.error('race', 'sendRaceResult failed, fallback to announce', { raceId: g.id }, err);
+            // 降级：发不出去至少留一条公告，用户知道赛马完成了。
+            announceSystem(
+              sid,
+              event.overridden
+                ? translate('raceAnnounceDoneDeliveredOverride', { prompt: g.prompt.slice(0, 40), v: g.finalPlanVersion })
+                : event.delivered
+                ? translate('raceAnnounceDoneDelivered', { prompt: g.prompt.slice(0, 40), v: g.finalPlanVersion })
+                : translate('raceAnnounceDoneEnded', { prompt: g.prompt.slice(0, 40) }),
+            );
+          });
+        } else if (parentSessionId) {
+          // 无最终方案（中止/修复耗尽）→ 仍发公告告知用户。
           announceSystem(
-            g.parentSessionId,
-            event.delivered
+            parentSessionId,
+            event.overridden
+              ? translate('raceAnnounceDoneDeliveredOverride', { prompt: g.prompt.slice(0, 40), v: g.finalPlanVersion })
+              : event.delivered
               ? translate('raceAnnounceDoneDelivered', { prompt: g.prompt.slice(0, 40), v: g.finalPlanVersion })
               : translate('raceAnnounceDoneEnded', { prompt: g.prompt.slice(0, 40) }),
           );
@@ -160,6 +209,24 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
           races: { ...s.races, [raceId]: next },
           errors: { ...s.errors, [raceId]: event.message },
         };
+      // ---- AI 初审（pre-judge）事件 ----
+      case 'race.preJudgeReviewing':
+        return { preJudging: { ...s.preJudging, [raceId]: true } };
+      case 'race.preJudgeRecommendation':
+        next.preJudgeRecommendation = event.recommendation;
+        return { races: { ...s.races, [raceId]: next }, preJudging: { ...s.preJudging, [raceId]: false } };
+      case 'race.preJudgeAutoAdopted':
+        // auto 模式：AI 已自动采纳，乐观设置 adopt（权威快照随 finalPlan 事件到达）。
+        next.adopt = { strategy: event.strategy };
+        return { races: { ...s.races, [raceId]: next }, preJudging: { ...s.preJudging, [raceId]: false } };
+      case 'race.preJudgeUnavailable':
+        // 降级：清除推荐（若有），UI 回到纯人工 4 选 1。
+        next.preJudgeRecommendation = undefined;
+        return { races: { ...s.races, [raceId]: next }, preJudging: { ...s.preJudging, [raceId]: false } };
+      case 'race.autoFinalized':
+        // 全自动模式：裁判出方案后自动定稿。finalPlan 已在 race.finalPlan 中设置，
+        // stage 会在后续 race.stage 事件中变为 building。无需额外操作，事件仅供 UI 提示。
+        break;
     }
     return { races: { ...s.races, [raceId]: next } };
   });
@@ -169,9 +236,12 @@ function applyRaceEvent(set: SetFn, envelope: RaceEventEnvelope): void {
 export const useRaceStore = create<RaceState>((set, get) => ({
   races: {},
   activeRaceId: null,
+  raceViews: {},
   setupOpen: false,
   tuneOpen: false,
   errors: {},
+  cancelling: {},
+  preJudging: {},
   stageFlash: null,
 
   async init() {
@@ -189,31 +259,43 @@ export const useRaceStore = create<RaceState>((set, get) => ({
     set({ setupOpen: false });
   },
 
-  async startRace(prompt, cwd, roles, parentSessionId, contextSeed) {
-    rlog.info('race', 'race start requested', { cwd, promptChars: prompt.length, parentSessionId });
-    const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed }).catch((err) => {
+  async startRace(prompt, cwd, roles, parentSessionId, contextSeed, preJudgeMode, designateStrategy, designateComment) {
+    rlog.info('race', 'race start requested', { cwd, promptChars: prompt.length, parentSessionId, preJudgeMode });
+    const g = await window.cyberslots.raceCreate({ prompt, cwd, roles, parentSessionId, contextSeed, preJudgeMode, designateStrategy, designateComment }).catch((err) => {
       rlog.error('race', 'raceCreate ipc failed', { cwd }, err);
       throw err;
     });
-    // 发起痕迹回流宿主对话 —— 历史里能翻到“这里跑过一场赛马”。
+    // 发起痕迹回流宿主对话 —— 历史里能翻到"这里跑过一场赛马"。
     if (parentSessionId) {
       announceSystem(parentSessionId, translate('raceAnnounceStarted', { prompt: prompt.slice(0, 40) }));
+      // 无提问直发赛马：宿主对话仍是默认标题时，用赛马任务当首条消息命名。
+      autoTitleIfDefault(parentSessionId, prompt);
     }
     set((s) => ({
       races: { ...s.races, [g.id]: g },
       activeRaceId: g.id,
       setupOpen: false,
       errors: { ...s.errors, [g.id]: undefined },
+      ...(parentSessionId ? { raceViews: { ...s.raceViews, [parentSessionId]: g.id } } : {}),
     }));
   },
 
   openRace(raceId) {
-    set({ activeRaceId: raceId });
+    const activeSessionId = useChatStore.getState().activeSessionId;
+    set((s) => ({
+      activeRaceId: raceId,
+      ...(activeSessionId ? { raceViews: { ...s.raceViews, [activeSessionId]: raceId } } : {}),
+    }));
     refreshRace(set, raceId); // 后台跑的赛马重新打开时同步最新快照
   },
 
   closeRace() {
     set({ activeRaceId: null });
+  },
+
+  setRaceView(sessionId, raceId) {
+    if (!sessionId) return;
+    set((s) => ({ raceViews: { ...s.raceViews, [sessionId]: raceId } }));
   },
 
   async adopt(strategy, comment) {
@@ -261,6 +343,14 @@ export const useRaceStore = create<RaceState>((set, get) => ({
       };
     });
     await window.cyberslots.raceResume(raceId);
+    refreshRace(set, raceId);
+  },
+
+  async overrideAudit() {
+    const raceId = get().activeRaceId;
+    if (!raceId) return;
+    set((s) => ({ errors: { ...s.errors, [raceId]: undefined } }));
+    await window.cyberslots.raceOverrideAudit(raceId);
     refreshRace(set, raceId);
   },
 
@@ -326,9 +416,35 @@ export const useRaceStore = create<RaceState>((set, get) => ({
   async cancelRace() {
     const raceId = get().activeRaceId;
     if (!raceId) return;
-    await window.cyberslots.raceCancel(raceId).catch((err) => {
-      rlog.error('race', 'raceCancel ipc failed', { raceId }, err);
+    if (get().cancelling[raceId]) return;
+    set((s) => ({ cancelling: { ...s.cancelling, [raceId]: true } }));
+    try {
+      await window.cyberslots.raceCancel(raceId).catch((err) => {
+        rlog.error('race', 'raceCancel ipc failed', { raceId }, err);
+        throw err;
+      });
+    } finally {
+      set((s) => ({ cancelling: { ...s.cancelling, [raceId]: false } }));
+    }
+  },
+
+  async acceptPreJudge() {
+    const raceId = get().activeRaceId;
+    if (!raceId) return;
+    await window.cyberslots.raceAcceptPreJudge(raceId).catch((err) => {
+      rlog.error('race', 'raceAcceptPreJudge ipc failed', { raceId }, err);
       throw err;
     });
+  },
+
+  async dismissPreJudge() {
+    const raceId = get().activeRaceId;
+    if (!raceId) return;
+    // 乐观清除推荐，UI 立即回到纯人工 4 选 1
+    set((s) => {
+      const g = s.races[raceId];
+      return g ? { races: { ...s.races, [raceId]: { ...g, preJudgeRecommendation: undefined } } } : {};
+    });
+    await window.cyberslots.raceDismissPreJudge(raceId);
   },
 }));

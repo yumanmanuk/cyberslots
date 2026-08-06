@@ -3,7 +3,9 @@
 @tailwind utilities;
 
 /* ============ Theme tokens ============
-   单一 notion 主题 × 明暗模式（data-mode）；:root = 浅色，防首屏闪烁。
+   单一 notion 主题 × 明暗模式（data-mode）；:root = 浅色兜底，仅当主题
+   注入失败时使用（真实主题由 preload 在首帧前挂到 <html data-mode>，
+   深浅用户都不会再经历「先浅后深 / 先深后浅」的启动闪烁）。
    深浅两模式的 accent/warn 均对齐品牌黑金体系（brand.tsx）。 */
 
 :root {
@@ -31,6 +33,13 @@
   --brand-mid: #96721f;
   --brand-lo: #5f460f;
   --brand-star: #a9832d;
+  /* 代码 token 色（hljs 浅色 = GitHub Light 风格）— 编辑模式 CodeMirror 与
+     预览模式 .hljs 共用同一色板，避免两处高亮颜色漂移 */
+  --code-keyword: #a626a4;
+  --code-string: #2e9e63;
+  --code-number: #b76b01;
+  --code-title: #2f6feb;
+  --code-attr: #c5493f;
   /* Claude 品牌珊瑚橙（Anthropic #D97757）— 浅色奶油底上压深一档提对比。
      引擎图标专用，不随文字色，用于 EngineIcon 的 claude 分支。 */
   --claude-brand: #c2592f;
@@ -59,6 +68,12 @@
   --brand-mid: #c99d3f;
   --brand-lo: #8f681e;
   --brand-star: #cea54b;
+  /* 代码 token 色（hljs 深色 = Flexoki 风格） */
+  --code-keyword: #c586c0;
+  --code-string: #87a987;
+  --code-number: #d0a215;
+  --code-title: #66b3ff;
+  --code-attr: #d1837a;
   /* Claude 珊瑚橙暗色档：深底上提亮增暖，保证放射星芒醒目且不刺眼 */
   --claude-brand: #e0785a;
 }
@@ -351,6 +366,20 @@ input[type='number']::-webkit-inner-spin-button {
   padding: 0;
   font-size: 12.5px;
   line-height: 1.55;
+}
+
+/* Markdown 围栏代码块（MdCodeBlock.MdPre）— 头部语言标签 + 复制按钮；
+   pre 覆盖上方 .md-body pre 的圆角/外边距，去掉顶部边框与头部无缝衔接。 */
+.md-code-block {
+  margin: 0.6em 0;
+}
+
+.md-code-block pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  padding: 10px 12px;
 }
 
 .md-body blockquote {
@@ -864,3 +893,37 @@ input[type='number']::-webkit-inner-spin-button {
 
 /* 注意：品牌 loading 动效是运行状态语义（区分进行中/停止），非装饰，
    故不随 prefers-reduced-motion 降级，否则系统开启减动效时无法分辨任务是否在跑 */
+
+/* ============ Git 行级变更标记 ============
+   编辑模式（CodeMirror）：行号 gutter 色条 + 行淡色背景；
+   源码预览（NumberedSource）：行号列同款色条（pv- 前缀）。
+   用 inset box-shadow 画色条，不占布局宽度，不会挤动行号/代码。 */
+.cm-diff-gutter-add,
+.pv-diff-gutter-add {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--ok) 90%, transparent);
+}
+.cm-diff-gutter-mod,
+.pv-diff-gutter-mod {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warn) 90%, transparent);
+}
+.cm-diff-gutter-del,
+.pv-diff-gutter-del {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--err) 90%, transparent);
+}
+.cm-diff-line-add {
+  background-color: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+.cm-diff-line-mod {
+  background-color: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+/* ============ Search flash highlight ============
+   搜索结果点击跳转后，目标消息闪烁高亮 2 秒引导视线。 */
+@keyframes search-flash-pulse {
+  0%, 100% { background-color: transparent; }
+  25%, 75% { background-color: var(--accent-soft); }
+}
+.search-flash {
+  animation: search-flash-pulse 2s ease-out;
+  border-radius: 0.5rem;
+}

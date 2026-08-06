@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { CircleGauge, Clock } from 'lucide-react';
 
-import type { AgyActiveQuota, ProviderQuotaInfo, QuotaProviderId, UsageStatsResult } from '@shared/types';
+import type { AgyActiveQuota, OmpQuota, ProviderQuotaInfo, QuotaProviderId, UsageStatsResult } from '@shared/types';
 import { useChatStore } from '../store/chatStore';
 import { BrandSpinner } from './brand';
 import { agyWindowLabel, useT } from '../i18n';
@@ -123,6 +123,155 @@ export function useActiveAgyQuota(active: boolean): {
     if (active) refresh();
   }, [active, refresh]);
   return { quota, refreshing, refresh };
+}
+
+/** omp 全部 Google 账号的 Claude 系列余量（`omp usage --json`）。
+ *  undefined = 加载中；accounts=[] = 无 omp 凭据或无 Claude quota。 */
+export function useOmpQuota(active: boolean): {
+  quota: OmpQuota | undefined;
+  refreshing: boolean;
+  refresh: (force?: boolean) => void;
+} {
+  const [quota, setQuota] = useState<OmpQuota | undefined>(undefined);
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = useCallback((force = false): void => {
+    setRefreshing(true);
+    const { promise: minSpin, resolve: spinDone } = Promise.withResolvers<void>();
+    setTimeout(spinDone, 600);
+    const query = window.cyberslots
+      .ompQuota(force)
+      .then(setQuota)
+      .catch(() => setQuota({ ok: false, accounts: [], queriedAt: Date.now() }));
+    void Promise.all([query, minSpin]).finally(() => setRefreshing(false));
+  }, []);
+  useEffect(() => {
+    if (active) refresh();
+  }, [active, refresh]);
+  return { quota, refreshing, refresh };
+}
+/** omp Claude 余量行：全量列出所有已登录 Google 账号，每账号 email + 时间窗余量。
+ *  JSX 与 AgyQuotaRow 完全同构（供应商名列宽 / 窗口标签 / 百分比 / 倒计时成列对齐）。 */
+export function OmpQuotaRow({ data, roomy }: { data: OmpQuota; roomy?: boolean }): JSX.Element {
+  const t = useT();
+  return (
+    <div className={`flex items-center ${roomy ? 'gap-5 text-ui leading-7' : 'gap-2 text-[11.5px] leading-5'}`}>
+      <span className={`shrink-0 font-medium text-ink-soft ${roomy ? 'w-24' : 'w-[68px]'}`}>Oh My Pi</span>
+      <div className="min-w-0 flex-1">
+        {!data.ok ? (
+          <div className="truncate text-ink-faint">{t('quotaFailed')}</div>
+        ) : data.accounts.length > 0 ? (
+          <div className="flex flex-col gap-1">
+            {data.accounts.map((account, ai) => (
+              <div key={account.email ?? ai} className="flex min-w-0 flex-col">
+                {account.email && (
+                  <div className="truncate text-ink-faint" title={account.email}>{account.email}</div>
+                )}
+                <div className={`flex min-w-0 ${roomy ? 'flex-wrap items-center gap-x-8 gap-y-0.5' : 'flex-col gap-1'}`}>
+                  {account.windows.map((w) => {
+                    const remain = Math.max(0, Math.round((w.remainingFraction ?? 0) * 100));
+                    const cd = countdown(w.resetsAt);
+                    const id = w.windowId.toLowerCase();
+                    const label = id === 'daily' || id === '5h' || id === '5hour' ? t('quota5h')
+                      : id === 'weekly' || id === '7d' || id === '7day' ? t('quota7d')
+                      : w.windowId;
+                    return roomy ? (
+                      <span key={w.windowId} className="flex w-52 items-center whitespace-nowrap">
+                        <span className="w-12 text-ink-faint">{label}</span>
+                        <span className={`w-12 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
+                          <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
+                          {remain}%
+                        </span>
+                        {cd && <span className="ml-2 flex items-center gap-0.5 text-ink-faint"><Clock size={12} />{cd}</span>}
+                      </span>
+                    ) : (
+                      <span key={w.windowId} className="flex items-center whitespace-nowrap">
+                        <span className="w-11 text-ink-faint">{label}</span>
+                        <span className={`w-11 text-right font-semibold tabular-nums ${remainColor(remain)}`}>
+                          <span className="text-[0.85em] font-normal text-ink-faint">{t('quotaLeft')}</span>
+                          {remain}%
+                        </span>
+                        {cd && <span className="ml-1.5 flex items-center gap-0.5 text-ink-faint"><Clock size={10} />{cd}</span>}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-ink-faint">—</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** omp 账号卡片网格（大窗专用）：每个账号一张卡，风格与设置页 Antigravity 账号卡片完全一致。
+ *  有余量账号 border-accent/50，耗尽账号 border-line。resetsAt → countdown 字符串。 */
+export function OmpAccountsGrid({ data }: { data: OmpQuota }): JSX.Element {
+  const t = useT();
+  if (!data.ok) {
+    return <div className="text-[12px] text-ink-faint">{t('quotaFailed')}</div>;
+  }
+  if (data.accounts.length === 0) {
+    return <div className="text-[12px] text-ink-faint">—</div>;
+  }
+  return (
+    <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
+      {data.accounts.map((account, i) => {
+        const hasRemain = account.windows.some((w) => (w.remainingFraction ?? 0) > 0);
+        return (
+          <div
+            key={account.email ?? i}
+            className={`flex flex-col rounded-xl border p-2.5 ${hasRemain ? 'border-accent/50 bg-accent/5' : 'border-line bg-bg-input'}`}
+          >
+            <div className="mb-1.5 min-w-0 truncate text-[12px] font-semibold" title={account.email}>
+              {account.email ?? '—'}
+            </div>
+            <div className="flex-1 rounded-lg bg-bg-panel/60 px-2.5 py-2">
+              {account.windows.length > 0 ? (
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                  {account.windows.map((w) => {
+                    const remain = w.remainingFraction !== undefined
+                      ? Math.max(0, Math.round(w.remainingFraction * 100))
+                      : undefined;
+                    const color = remain === undefined ? 'text-ink-faint'
+                      : remain > 30 ? 'text-ok' : remain > 10 ? 'text-warn' : 'text-err';
+                    const bar = remain === undefined ? 'bg-ink-faint/20'
+                      : remain > 30 ? 'bg-ok' : remain > 10 ? 'bg-warn' : 'bg-err';
+                    const id = w.windowId.toLowerCase();
+                    const label = id === 'daily' || id === '5h' || id === '5hour' ? t('quota5h')
+                      : id === 'weekly' || id === '7d' || id === '7day' ? t('quota7d')
+                      : w.windowId;
+                    const cd = countdown(w.resetsAt);
+                    return (
+                      <div key={w.windowId} className="min-w-0">
+                        <div className="flex items-baseline justify-between gap-1">
+                          <span className="min-w-0 truncate text-[11px] font-medium text-ink-soft">{label}</span>
+                          <span className={`shrink-0 font-mono text-[11px] ${color}`}>
+                            {remain !== undefined ? `${remain}%` : '—'}
+                          </span>
+                        </div>
+                        <div className="relative mt-1 h-1.5 overflow-hidden rounded-full bg-bg-active/60">
+                          <span
+                            className={`absolute inset-y-0 left-0 rounded-full ${bar} transition-[width] duration-500`}
+                            style={{ width: `${remain ?? 0}%` }}
+                          />
+                        </div>
+                        {cd && <div className="mt-0.5 truncate text-[10px] text-ink-faint">{cd}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-[11px] text-ink-faint">—</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // ------------------------------------------------------------ quota row
@@ -269,7 +418,9 @@ export function UsageQuickButton(): JSX.Element {
   const timer = useRef(0);
   const [today, setToday] = useState<UsageStatsResult | null>(null);
   const { quotas } = useProviderQuotas(open);
-  const { quota: agyQuota } = useActiveAgyQuota(open);
+  // Antigravity 余量已暂隐藏：不再拉取当前活动账号额度（恢复时取消注释并加回显示条件/行）
+  // const { quota: agyQuota } = useActiveAgyQuota(open);
+  const { quota: ompQuota } = useOmpQuota(open);
 
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
@@ -326,7 +477,7 @@ export function UsageQuickButton(): JSX.Element {
             <div className="mt-2.5 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11px] text-ink-faint">
               <BrandSpinner size={11} /> {t('quotaLoading')}
             </div>
-          ) : quotas.length > 0 || agyQuota?.email ? (
+          ) : quotas.length > 0 || (ompQuota?.ok && ompQuota.accounts.length > 0) ? (
             <div className="mt-2.5 flex flex-col gap-2 border-t border-line pt-2.5">
               {/* 排序：时间窗额度类（kimi/minimax）→ Antigravity → 余额类（deepseek）垫底 */}
               {quotas
@@ -334,8 +485,10 @@ export function UsageQuickButton(): JSX.Element {
                 .map((q) => (
                   <QuotaRow key={q.provider} q={q} />
                 ))}
-              {/* 当前活动 agy 账号 + Claude 组 5小时/7天剩余量（Gemini 组源头已过滤；无活动账号则不显） */}
-              {agyQuota?.email && <AgyQuotaRow data={agyQuota} />}
+              {/* Antigravity 余量行（暂隐藏）：当前活动 agy 账号 + Claude 组 5小时/7天剩余量
+                  {agyQuota?.email && <AgyQuotaRow data={agyQuota} />} */}
+              {/* omp Claude 余量：有活跃 omp 会话且拿到数据时显示 */}
+              {ompQuota?.ok && ompQuota.accounts.length > 0 && <OmpQuotaRow data={ompQuota} />}
               {quotas
                 .filter((q) => q.provider === 'deepseek')
                 .map((q) => (

@@ -2,6 +2,7 @@
 
 CyberSlots（赛博老虎机）— Electron 多引擎 AI 赛马桌面客户端（codex / kimi / opencode / omp）。
 主进程 `src/main`，渲染层 `src/renderer/src`（React + Tailwind + zustand），共享类型 `src/shared`。
+`src/main/browser/` 是 browser use 工具服务层（受管 Chrome + playwright-core CDP + MCP server 喂给各引擎，`settings.browserUse` 全局开关默认关）；computer use（`src/main/computer/`）Phase 3 独立排期，未交付。
 
 ## 常用命令
 
@@ -18,6 +19,7 @@ CyberSlots（赛博老虎机）— Electron 多引擎 AI 赛马桌面客户端�
 - 落盘：`userData/logs/main|renderer-YYYY-MM-DD.jsonl`（JSONL 按天切分，保留 14 天）；`compat-audit.jsonl` 是独立的协议审计通道，不混用。
 - **禁止** `console.log/warn/error` 直接表达程序行为（logger 内部镜像除外）；新增模块必须接 logger。
 - 引擎 CLI 自己的日志/stdout 正文不进本日志；只记本程序侧：生命周期、spawn 命令行摘要（脱敏）、exit code、意外退出时的 stderr 尾部、协议异常摘要。
+- browser/computer 工具服务层用 scope `browser` / `browser.host`（将来 `computer`）：只记动作摘要（动作类型/目标选择器或坐标/耗时/成功否）；截图、页面 DOM、页面正文、输入文本内容**绝不落盘**。
 - `data` 只放摘要（id/计数/耗时/路径），禁止正文/payload/消息流（`text.delta` 等事件流绝不入日志）；敏感字段名自动打码，但密钥本身永不入参。
 - IPC handler 抛错由 `src/main/ipc.ts` 的统一 `handle()` 包装自动记 error，handler 内不要重复记同一个错。
 
@@ -99,3 +101,15 @@ CyberSlots（赛博老虎机）— Electron 多引擎 AI 赛马桌面客户端�
 - 定位平移必须放外层 `<g transform="translate(…)">`，动画类只挂内层元素——CSS 动画的 transform 会整体覆盖元素自身的 SVG transform 属性，同层会让图形飞回原点。
 
 > 本节与 `.qoder/rules/brand-loading.md` 内容一致（后者供 Qoder 自动注入）。修改任意一份时必须同步另一份。
+
+## 行内混排对齐规范（强制）
+
+单行内混排「图标/刻度/spinner + 不同字号、不同字体（sans/mono）的文字」时（工具行、状态行、卡片头、队列行等），一律按此配方，已全量实测（基线 delta = 0，图标/文本中心差 ≤1px）：
+
+1. 行容器用 `items-baseline`；**非文本项**（图标、刻度条、BrandSpinner、徽章 chip、按钮）一律加 `self-center`。
+2. 当行内最高项不是文字（图标按钮 19/20px、或定高行）时，**主文本 span 的行高必须设为行内容高**（如 20px 行用 `leading-[20px]`，GoalBar 用 `leading-[19px]`）让文本盒填满行——否则 baseline 文本组顶格打包、图标却居中，二者错位（竖线与 Ran 错位、loading 与 Exploring 错位都是这个病）。
+3. 文本天然是最高项的行（`text-ui` 13/20、卡片标题行）直接 `items-baseline` 即可，无需改行高。
+4. **禁止用 `leading-none` 修混字号对齐**——em 盒居中 ≠ 基线对齐，sans/mono ascent 比例不同，实测反而更糟（-1.5px → -1.75px）。
+5. svg 直子的图标按钮一律 `flex items-center justify-center`（inline 按钮里 svg 按基线排版会偏高 ~2px）。
+6. 输入框胶囊（`.oc-file-chip`）：外对齐 `vertical-align: text-top`（不能用 baseline——首 flex 项有无基线三种胶囊各不相同）；内部小字（`</>`、行号）`line-height: 1`。
+7. BrandSpinner 全实例相位已由 `animationstart` 监听把 `startTime` 钉零全局同步——不要在实例上用 `Date.now()` 之类重算 `animation-delay`（重渲染会重定时导致漂移）。

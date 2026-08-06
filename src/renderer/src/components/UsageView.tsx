@@ -28,7 +28,7 @@ import { useChatStore } from '../store/chatStore';
 import { BrandHero, BrandSpinner } from './brand';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS } from './EngineIcon';
-import { AgyQuotaRow, fmtInt, fmtShort, QuotaRow, useActiveAgyQuota, useProviderQuotas } from './UsageQuota';
+import { fmtInt, fmtShort, OmpAccountsGrid, QuotaRow, useOmpQuota, useProviderQuotas } from './UsageQuota';
 
 // kimi 不参与用量统计（无可靠的真实 token 上报），筛选器列其余引擎
 // （omp 走 pi-ai 的真实 usage 上报，antigravity 走 agy result.usage，
@@ -129,8 +129,9 @@ export default function UsageView(): JSX.Element | null {
   const [data, setData] = useState<UsageStatsResult | null>(null);
   // 已配 key 供应商的套餐余量/余额（kimi/minimax/deepseek）
   const { quotas, refreshing: quotaRefreshing, refresh: refreshQuotas } = useProviderQuotas(open);
-  // 当前活动 Antigravity 账号额度（只 1 次往返；无活动账号时 email 空，据此隐藏）
-  const { quota: agyActive, refreshing: agyRefreshing, refresh: refreshAgy } = useActiveAgyQuota(open);
+  // Antigravity 余量已暂隐藏：不再拉取/展示当前活动账号额度（恢复时取消下面注释并加回 AgyQuotaRow）
+  // const { quota: agyActive, refreshing: agyRefreshing, refresh: refreshAgy } = useActiveAgyQuota(open);
+  const { quota: ompActive, refreshing: ompRefreshing, refresh: refreshOmp } = useOmpQuota(open);
 
   const load = useCallback(async (): Promise<void> => {
     const { start, end } = resolveRange(range);
@@ -250,8 +251,8 @@ export default function UsageView(): JSX.Element | null {
             </div>
           </div>
 
-          {/* 套餐余量 — 本地探到 kimi/minimax/deepseek key 或有活动 Antigravity 账号时展示 */}
-          {((quotas && quotas.length > 0) || agyActive?.email) && (
+          {/* 套餐余量 — kimi/minimax/deepseek key 时展示（Antigravity 余量暂隐藏；恢复时条件加回 `|| agyActive?.email`） */}
+          {(quotas && quotas.length > 0) && (
             <div className="mt-4 rounded-2xl border border-line bg-bg-panel p-5">
               <div className="mb-2.5 flex items-center justify-between">
                 <h2 className="flex items-center gap-2 text-[15px] font-semibold text-ink">
@@ -259,31 +260,40 @@ export default function UsageView(): JSX.Element | null {
                 </h2>
                 <button
                   title={t('quotaRefresh')}
-                  onClick={() => {
-                    refreshQuotas(true);
-                    refreshAgy(true);
-                  }}
-                  disabled={quotaRefreshing || agyRefreshing}
+                  onClick={() => refreshQuotas(true)}
+                  disabled={quotaRefreshing}
                   className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:pointer-events-none"
                 >
-                  {/* 刷新期间品牌星芒轮闪，完成即恢复 — 点击有确实执行的可见反馈 */}
-                  {quotaRefreshing || agyRefreshing ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
+                  {quotaRefreshing ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
                 </button>
               </div>
               <div className="flex flex-col gap-2.5">
-                {/* 排序：时间窗额度类（kimi/minimax）→ Antigravity → 余额类（deepseek）垫底 */}
-                {quotas
-                  ?.filter((q) => q.provider !== 'deepseek')
-                  .map((q) => (
-                    <QuotaRow key={q.provider} q={q} roomy />
-                  ))}
-                {agyActive?.email && <AgyQuotaRow data={agyActive} roomy />}
-                {quotas
-                  ?.filter((q) => q.provider === 'deepseek')
-                  .map((q) => (
-                    <QuotaRow key={q.provider} q={q} roomy />
-                  ))}
+                {quotas?.filter((q) => q.provider !== 'deepseek').map((q) => (
+                  <QuotaRow key={q.provider} q={q} roomy />
+                ))}
+                {/* Antigravity 余量行（暂隐藏）：{agyActive?.email && <AgyQuotaRow data={agyActive} roomy />} */}
+                {quotas?.filter((q) => q.provider === 'deepseek').map((q) => (
+                  <QuotaRow key={q.provider} q={q} roomy />
+                ))}
               </div>
+            </div>
+          )}
+
+          {/* Oh My Pi 账号额度卡片网格 */}
+          {ompActive?.ok && ompActive.accounts.length > 0 && (
+            <div className="mt-4 rounded-2xl border border-line bg-bg-panel p-5">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-[15px] font-semibold text-ink">Oh My Pi</h2>
+                <button
+                  title={t('quotaRefresh')}
+                  onClick={() => refreshOmp(true)}
+                  disabled={ompRefreshing}
+                  className="rounded-md p-1.5 text-ink-faint transition hover:bg-bg-hover hover:text-ink disabled:pointer-events-none"
+                >
+                  {ompRefreshing ? <BrandSpinner size={13} /> : <RefreshCw size={13} />}
+                </button>
+              </div>
+              <OmpAccountsGrid data={ompActive} />
             </div>
           )}
 

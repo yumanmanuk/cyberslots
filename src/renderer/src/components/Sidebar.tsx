@@ -25,6 +25,7 @@ import {
   Moon,
   Pencil,
   Plus,
+  Search,
   Settings,
   Trash2,
 } from 'lucide-react';
@@ -40,8 +41,11 @@ import { EngineIcon, ENGINE_LABELS, PseudoWorkspaceBadge, useEngineOrder } from 
 import { UsageQuickButton } from './UsageQuota';
 import { BrandMark, BrandSpinner } from './brand';
 import DotMenu from './DotMenu';
+import SearchPanel from './SearchPanel';
 
 const EMPTY_WORKSPACES: WorkspaceInfo[] = [];
+/** 分组内默认可见的会话上限，超出后折叠并显示"展开更多"按钮。 */
+const GROUP_VISIBLE_LIMIT = 10;
 
 /** 归档拦截：会话正在跑，或名下有进行中的赛马（被打断的不算）。
  *  非响应式取快照 — 批量归档与点击时兜底用；行内按钮的反应式
@@ -105,6 +109,8 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectSession = useChatStore((s) => s.selectSession);
   const [wsDialog, setWsDialog] = useState<{ open: boolean; editing: WorkspaceInfo | null }>({ open: false, editing: null });
+  const searchOpen = useChatStore((s) => s.sidebarSearchOpen);
+  const setSearchOpen = (v: boolean): void => useChatStore.setState({ sidebarSearchOpen: v });
 
   // 赛马角色会话（raceId 标记）不入侧栏 —— 赛马寄生于宿主对话，
   // 只能从宿主对话的 🏇 入口进赛马视图查看。
@@ -125,6 +131,10 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
   // 分组头“+”快捷创建 — 先选引擎再建会话，避免进会话后切引擎产生分支
   const createSession = useChatStore((s) => s.createSession);
   const listFade = useEdgeFade();
+  // 三大分组（Workspaces / Projects / Chats）的顶层折叠状态。
+  const [wsCollapsed, setWsCollapsed] = useState(false);
+  const [projCollapsed, setProjCollapsed] = useState(false);
+  const [chatCollapsed, setChatCollapsed] = useState(false);
   const quickNewChat = (engine: EngineId): void => void createSession({ engine, cwd: '' });
   const quickNewProject = async (engine: EngineId): Promise<void> => {
     const dir = await window.cyberslots.dialogPickFolder();
@@ -141,7 +151,10 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
         <button
           onClick={() => {
             // 新建对话落地页也是导航 —— 退出赛马全屏视图（赛马后台继续）。
-            useRaceStore.getState().closeRace();
+            const raceStore = useRaceStore.getState();
+            const prevSessionId = useChatStore.getState().activeSessionId;
+            if (raceStore.activeRaceId && prevSessionId) raceStore.setRaceView(prevSessionId, raceStore.activeRaceId);
+            raceStore.closeRace();
             useChatStore.setState({ activeSessionId: null, dashboardOpen: false });
           }}
           className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-line bg-bg-panel px-3 py-2 text-ui text-ink-soft transition hover:bg-bg-hover hover:text-ink"
@@ -163,38 +176,61 @@ export default function Sidebar({ overlay }: { overlay?: boolean }): JSX.Element
           )}
         </button>
       </div>
+      {/* SESSIONS 标题行 + 搜索/筛选 */}
       <div className="flex items-center justify-between px-4 pb-1 pt-2.5">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Sessions</span>
-        <FilterMenu />
+        <div className="flex items-center gap-0.5">
+          <button
+            title={`${t('search')} (Ctrl+F)`}
+            onClick={() => setSearchOpen(!searchOpen)}
+            className={`rounded-md p-1 transition hover:bg-bg-hover ${searchOpen ? 'text-accent' : 'text-ink-faint hover:text-ink'}`}
+          >
+            <Search size={14} />
+          </button>
+          <FilterMenu />
+        </div>
       </div>
 
       {/* 分组滚动区 — 上下边缘按滚动位置渐隐，与底部功能区淡出衔接而非硬切 */}
-      <nav ref={listFade.ref} className={`scroll-quiet flex-1 overflow-y-auto px-2 pb-2 ${listFade.cls}`}>
-        <GroupHeader label={t('workspaces')} addTitle={t('newWorkspace')} onAdd={() => setWsDialog({ open: true, editing: null })} />
-        {groups.workspaces.length === 0 && <EmptyHint />}
-        {groups.workspaces.map(({ workspace, sessions: list }) => (
-          <WorkspaceGroup
-            key={workspace.id}
-            workspace={workspace}
-            sessions={list}
-            activeSessionId={activeSessionId}
-            onSelect={selectSession}
-            onEdit={() => setWsDialog({ open: true, editing: workspace })}
-          />
-        ))}
+      {searchOpen ? (
+        <SearchPanel onClose={() => setSearchOpen(false)} />
+      ) : (
+        <>
+          {/* 分组滚动区 — 上下边缘按滚动位置渐隐，与底部功能区淡出衔接而非硬切 */}
+          <nav ref={listFade.ref} className={`scroll-quiet flex-1 overflow-y-auto px-2 pb-2 ${listFade.cls}`}>
+            <GroupHeader label={t('workspaces')} addTitle={t('newWorkspace')} onAdd={() => setWsDialog({ open: true, editing: null })} collapsed={wsCollapsed} onToggle={() => setWsCollapsed(!wsCollapsed)} />
+            {!wsCollapsed && (groups.workspaces.length === 0
+              ? <EmptyHint />
+              : groups.workspaces.map(({ workspace, sessions: list }) => (
+                <WorkspaceGroup
+                  key={workspace.id}
+                  workspace={workspace}
+                  sessions={list}
+                  activeSessionId={activeSessionId}
+                  onSelect={selectSession}
+                  onEdit={() => setWsDialog({ open: true, editing: workspace })}
+                />
+              ))
+            )}
 
-        <GroupHeader label={t('projects')} addTitle={t('newProject')} onAddEngine={(engine) => void quickNewProject(engine)} />
-        {groups.projects.length === 0 && <EmptyHint />}
-        {groups.projects.map(({ cwd, name, sessions: list }) => (
-          <ProjectGroup key={cwd} cwd={cwd} name={name} sessions={list} activeSessionId={activeSessionId} onSelect={selectSession} />
-        ))}
+            <GroupHeader label={t('projects')} addTitle={t('newProject')} onAddEngine={(engine) => void quickNewProject(engine)} collapsed={projCollapsed} onToggle={() => setProjCollapsed(!projCollapsed)} />
+            {!projCollapsed && (groups.projects.length === 0
+              ? <EmptyHint />
+              : groups.projects.map(({ cwd, name, sessions: list }) => (
+                <ProjectGroup key={cwd} cwd={cwd} name={name} sessions={list} activeSessionId={activeSessionId} onSelect={selectSession} />
+              ))
+            )}
 
-        <GroupHeader label={t('chats')} addTitle={t('newChat')} onAddEngine={quickNewChat} />
-        {groups.chats.length === 0 && <EmptyHint />}
-        {arrange(groups.chats).map(({ meta, depth, chain }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth} chain={chain} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
-        ))}
-      </nav>
+            <GroupHeader label={t('chats')} addTitle={t('newChat')} onAddEngine={quickNewChat} collapsed={chatCollapsed} onToggle={() => setChatCollapsed(!chatCollapsed)} />
+            {!chatCollapsed && (groups.chats.length === 0
+              ? <EmptyHint />
+              : arrange(groups.chats).map(({ meta, depth, chain }) => (
+                <SessionRow key={meta.id} meta={meta} depth={depth} chain={chain} active={meta.id === activeSessionId} onClick={() => selectSession(meta.id)} />
+              ))
+            )}
+          </nav>
+        </>
+      )}
 
       {/* 左下角功能入口区 — 靠留白分隔，不用分隔线 */}
       <div className="px-2 pb-2 pt-2">
@@ -361,33 +397,47 @@ function GroupHeader({
   addTitle,
   onAdd,
   onAddEngine,
+  collapsed,
+  onToggle,
 }: {
   label: string;
   addTitle?: string;
   onAdd?: () => void;
   onAddEngine?: (engine: EngineId) => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }): JSX.Element {
   return (
     <div className="group/head flex min-h-[34px] items-center justify-between px-2 pb-1 pt-3">
       <span className="text-[11px] font-semibold text-ink-faint">{label}</span>
-      {onAddEngine ? (
-        <EnginePick
-          title={addTitle}
-          onPick={onAddEngine}
-          btnClass="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
-          iconSize={13}
-        />
-      ) : (
-        onAdd && (
+      <div className="flex items-center">
+        {onToggle && (
           <button
-            title={addTitle}
-            onClick={onAdd}
+            onClick={onToggle}
             className="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
           >
-            <Plus size={13} />
+            <ChevronRight size={13} className={`transition-transform ${collapsed ? '' : 'rotate-90'}`} />
           </button>
-        )
-      )}
+        )}
+        {onAddEngine ? (
+          <EnginePick
+            title={addTitle}
+            onPick={onAddEngine}
+            btnClass="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
+            iconSize={13}
+          />
+        ) : (
+          onAdd && (
+            <button
+              title={addTitle}
+              onClick={onAdd}
+              className="rounded-md p-1.5 text-ink-faint opacity-0 transition hover:bg-bg-hover hover:text-ink group-hover/head:opacity-100"
+            >
+              <Plus size={13} />
+            </button>
+          )
+        )}
+      </div>
     </div>
   );
 }
@@ -503,6 +553,7 @@ function WorkspaceGroup({
   // 组内还有对话时禁止移除（查全量列表，不受侧栏筛选器影响；已归档的不算）。
   const hasSessions = useChatStore((s) => s.sessions.some((x) => x.workspaceId === workspace.id && !x.archived));
   const [expanded, setExpanded] = useState(true);
+  const [visibleCount, setVisibleCount] = useState(GROUP_VISIBLE_LIMIT);
 
   /** 归档本工作区全部未归档会话（取全量列表，不受侧栏筛选影响；
    *  进行中的跳过）。 */
@@ -560,10 +611,36 @@ function WorkspaceGroup({
           multiRootBadge={workspace.folders.length > 1}
         />
       </div>
-      {expanded &&
-        arrange(sessions).map(({ meta, depth, chain }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
-        ))}
+      {expanded && (() => {
+        const rows = arrange(sessions);
+        const hasMore = rows.length > visibleCount;
+        const visibleRows = hasMore ? rows.slice(0, visibleCount) : rows;
+        const hiddenCount = rows.length - visibleCount;
+        return (
+          <>
+            {visibleRows.map(({ meta, depth, chain }) => (
+              <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
+            ))}
+            {hasMore ? (
+              <button
+                onClick={() => setVisibleCount((c) => c + GROUP_VISIBLE_LIMIT)}
+                className="flex w-full items-center rounded-md py-0.5 pr-2 text-[11px] text-ink-faint transition hover:bg-bg-hover hover:text-ink-soft"
+                style={{ paddingLeft: 22 }}
+              >
+                {t('sidebarShowMore', { n: hiddenCount })}
+              </button>
+            ) : rows.length > GROUP_VISIBLE_LIMIT && (
+              <button
+                onClick={() => setVisibleCount(GROUP_VISIBLE_LIMIT)}
+                className="flex w-full items-center rounded-md py-0.5 pr-2 text-[11px] text-ink-faint transition hover:bg-bg-hover hover:text-ink-soft"
+                style={{ paddingLeft: 22 }}
+              >
+                {t('sidebarShowLess')}
+              </button>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -596,6 +673,7 @@ function ProjectGroup({
     );
   });
   const [expanded, setExpanded] = useState(true);
+  const [visibleCount, setVisibleCount] = useState(GROUP_VISIBLE_LIMIT);
 
   /** 归档本项目全部未归档会话 — 谓词与 groupSessions 的分组规则一致，
    *  取全量列表避免遭侧栏筛选器遮蔽；进行中的跳过。 */
@@ -679,10 +757,36 @@ function ProjectGroup({
           iconSize={14}
         />
       </div>
-      {expanded &&
-        arrange(sessions).map(({ meta, depth, chain }) => (
-          <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
-        ))}
+      {expanded && (() => {
+        const rows = arrange(sessions);
+        const hasMore = rows.length > visibleCount;
+        const visibleRows = hasMore ? rows.slice(0, visibleCount) : rows;
+        const hiddenCount = rows.length - visibleCount;
+        return (
+          <>
+            {visibleRows.map(({ meta, depth, chain }) => (
+              <SessionRow key={meta.id} meta={meta} depth={depth + 1} chain={chain} active={meta.id === activeSessionId} onClick={() => onSelect(meta.id)} />
+            ))}
+            {hasMore ? (
+              <button
+                onClick={() => setVisibleCount((c) => c + GROUP_VISIBLE_LIMIT)}
+                className="flex w-full items-center rounded-md py-0.5 pr-2 text-[11px] text-ink-faint transition hover:bg-bg-hover hover:text-ink-soft"
+                style={{ paddingLeft: 22 }}
+              >
+                {t('sidebarShowMore', { n: hiddenCount })}
+              </button>
+            ) : rows.length > GROUP_VISIBLE_LIMIT && (
+              <button
+                onClick={() => setVisibleCount(GROUP_VISIBLE_LIMIT)}
+                className="flex w-full items-center rounded-md py-0.5 pr-2 text-[11px] text-ink-faint transition hover:bg-bg-hover hover:text-ink-soft"
+                style={{ paddingLeft: 22 }}
+              >
+                {t('sidebarShowLess')}
+              </button>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -694,8 +798,14 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   // 引擎切换链展开态：折叠的祖先分支（切换前的原生上下文，可点回无损续聊）。
   const [chainOpen, setChainOpen] = useState(false);
-  // 另：当前活动会话是本行的隐藏祖先时自动展开，否则高亮无处落脚。
+  // 另：当前活动会话是本行的隐藏祖先时默认自动展开，否则高亮无处落脚；
+  // 但用户可手动折叠（链徽标保持高亮作锚点），离开链内会话后折叠态复位。
   const ancestorActive = !!chain?.some((a) => a.id === activeSessionId);
+  const [chainClosed, setChainClosed] = useState(false);
+  const chainShown = ancestorActive ? !chainClosed : chainOpen;
+  useEffect(() => {
+    if (!ancestorActive && chainClosed) setChainClosed(false);
+  }, [ancestorActive, chainClosed]);
   // 反应式拦截态：会话在跑 / 名下有进行中赛马（选择器返回布尔，不产生新引用）。
   const raceBusy = useRaceStore((s) => Object.values(s.races).some((g) => g.parentSessionId === meta.id && isRaceActive(g)));
   const blocked = meta.status === 'running' || meta.status === 'starting' || raceBusy;
@@ -740,12 +850,13 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
         {/* 引擎切换链入口：常驻小徽标（分支数），点开展示被折叠的历史引擎分支。 */}
         {chain && chain.length > 0 && (
           <button
-            title={chainOpen || ancestorActive ? t('chainCollapse') : t('chainExpand')}
+            title={chainShown ? t('chainCollapse') : t('chainExpand')}
             onClick={(e) => {
               e.stopPropagation();
-              setChainOpen(!chainOpen);
+              if (ancestorActive) setChainClosed((v) => !v);
+              else setChainOpen((v) => !v);
             }}
-            className={`flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] tabular-nums transition ${chainOpen || ancestorActive ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-active hover:text-ink'
+            className={`flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-[10px] tabular-nums transition ${chainShown || ancestorActive ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-active hover:text-ink'
               }`}
           >
             <GitBranch size={11} />
@@ -778,22 +889,73 @@ function SessionRow({ meta, depth, active, onClick, chain }: { meta: SessionMeta
       </div>
       {/* 展开的历史引擎分支（近 → 远）：每行 = 切换前的原生会话，点击回到
           该引擎的完整原生上下文无损续聊。 */}
-      {chain && (chainOpen || ancestorActive) &&
+      {chain && chainShown &&
         chain.map((a) => (
-          <div
+          <ChainBranchRow
             key={a.id}
-            onClick={() => selectSession(a.id)}
-            style={{ paddingLeft: `${8 + (depth + 1) * 14}px` }}
-            title={t('chainBranchHint')}
-            className={`flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2 text-[11.5px] ${a.id === activeSessionId ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
-              }`}
-          >
-            <EngineIcon engine={a.engine} size={12} />
-            <span className="min-w-0 flex-1 truncate">{ENGINE_LABELS[a.engine]}</span>
-            <span className="shrink-0 text-[10px] tabular-nums">{timeAgo(a.updatedAt)}</span>
-          </div>
+            meta={a}
+            depth={depth + 1}
+            active={a.id === activeSessionId}
+            onSelect={() => selectSession(a.id)}
+          />
         ))}
     </>
+  );
+}
+
+/** 引擎切换链里的祖先分支行：点击可回到该引擎的原生上下文，也支持归档。
+ *  归档走与主行相同的二段确认；祖先归档后从链中消失，叶子自动顶上。 */
+function ChainBranchRow({ meta, depth, active, onSelect }: { meta: SessionMeta; depth: number; active: boolean; onSelect: () => void }): JSX.Element {
+  const t = useT();
+  const archiveSession = useChatStore((s) => s.archiveSession);
+  const raceBusy = useRaceStore((s) =>
+    Object.values(s.races).some((g) => g.parentSessionId === meta.id && isRaceActive(g))
+  );
+  const blocked = meta.status === 'running' || meta.status === 'starting' || raceBusy;
+  const [confirming, setConfirming] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+
+  const onArchive = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (blocked) return;
+    if (!confirming) {
+      setConfirming(true);
+      timer.current = setTimeout(() => setConfirming(false), 3000);
+      return;
+    }
+    clearTimeout(timer.current);
+    void archiveSession(meta.id, true);
+  };
+
+  return (
+    <div
+      onClick={onSelect}
+      style={{ paddingLeft: `${8 + depth * 14}px` }}
+      title={t('chainBranchHint')}
+      onMouseLeave={() => {
+        clearTimeout(timer.current);
+        setConfirming(false);
+      }}
+      className={`group flex cursor-pointer items-center gap-2 rounded-md py-1 pr-2 text-[11.5px] ${active ? 'bg-bg-active text-ink' : 'text-ink-faint hover:bg-bg-hover hover:text-ink'
+        }`}
+    >
+      <EngineIcon engine={meta.engine} size={12} />
+      <span className="min-w-0 flex-1 truncate">{ENGINE_LABELS[meta.engine]}</span>
+      <span className="shrink-0 text-[10px] tabular-nums group-hover:hidden">{timeAgo(meta.updatedAt)}</span>
+      <button
+        title={blocked ? t('archiveBlockedBusy') : confirming ? t('confirmArchive') : t('archive')}
+        onClick={onArchive}
+        disabled={blocked}
+        className={`hidden shrink-0 rounded-md p-0.5 transition group-hover:block ${blocked
+            ? 'cursor-not-allowed text-ink-faint opacity-40'
+            : confirming
+              ? 'block bg-warn/15 text-warn'
+              : 'text-ink-faint hover:text-ink'
+          }`}
+      >
+        {confirming ? <Check size={12} /> : <Archive size={12} />}
+      </button>
+    </div>
   );
 }
 
@@ -849,7 +1011,7 @@ function FilterMenu(): JSX.Element {
   ];
 
   return (
-    <div className="relative">
+    <div className="relative flex">
       <button
         title={t('filter')}
         onClick={() => setOpen(!open)}

@@ -7,20 +7,20 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Bell, Box, ChevronRight, Eye, EyeOff, FileLock2, GripVertical, Info, Plus, RefreshCw, Search, Settings2, Upload, X } from 'lucide-react';
+import { ArrowLeft, Bell, Box, ChevronRight, Eye, EyeOff, FileLock2, GripVertical, Info, Keyboard, Plus, RefreshCw, Search, Settings2, Upload, X } from 'lucide-react';
 
 import type { AgyAccountsSnapshot, AgyImportCandidate, AgyQuotaInfo, AppSettings, ClaudeConfigSnapshot, CodexConfigSnapshot, CompatAuditKind, CompatAuditSnapshot, ContextFallbackRule, EngineConfigsSnapshot, EngineId, KimiConfigSnapshot, NotificationSettings, OmpCatalog, OmpConfigSnapshot, OpencodeCatalog, OpencodeConfigSnapshot, RaceRoleDefaultSetting, RouteSupport, TitleGenSettings } from '@shared/types';
-import { isRaceActive, RACE_ROLES } from '@shared/race';
+import { isRaceActive, RACE_ROLES, type RaceAdoptStrategy, type RacePreJudgeMode } from '@shared/race';
 import { announceSystem, drainRaceRescue, useChatStore } from '../store/chatStore';
 import { useRaceStore } from '../store/raceStore';
-import { agyWindowLabel, engineHintKey, raceRoleKey, translate, useT, type MsgKey } from '../i18n';
+import { adoptStrategyLabel, agyWindowLabel, engineHintKey, raceRoleKey, translate, useT, type MsgKey } from '../i18n';
 import { ENGINE_LABELS, EngineIcon, useEngineOrder } from './EngineIcon';
 import { RaceHorse } from './RaceHorse';
 import { BrandHero, BrandMark, BrandSpinner } from './brand';
 import { effortLabel, useRoleCatalogs } from './race/modelCatalogs';
 import { ANTIGRAVITY_LABELS } from './race/modelCatalogs';
 
-type MainCategory = 'general' | 'race' | 'notifications' | 'about';
+type MainCategory = 'general' | 'race' | 'notifications' | 'shortcuts' | 'about';
 /** 导航分类：固定页 + 引擎总览页（'engines'）+ 每引擎一个子页
  *  （「引擎」分组下按 engineOrder 列出）。 */
 type Category = MainCategory | 'engines' | EngineId;
@@ -29,6 +29,7 @@ const CATEGORIES: Array<{ id: MainCategory; key: MsgKey; icon: React.ReactNode }
   { id: 'general', key: 'settingsGeneral', icon: <Settings2 size={15} /> },
   { id: 'race', key: 'settingsRace', icon: <RaceHorse size={16} /> },
   { id: 'notifications', key: 'settingsNotifications', icon: <Bell size={15} /> },
+  { id: 'shortcuts', key: 'settingsShortcuts', icon: <Keyboard size={15} /> },
   { id: 'about', key: 'settingsAbout', icon: <Info size={15} /> },
 ];
 
@@ -168,6 +169,7 @@ export default function SettingsView(): JSX.Element | null {
             {isEngine(category) && <EnginePane engine={category} />}
             {category === 'race' && <RacePane settings={settings} commit={commit} />}
             {category === 'notifications' && <NotificationsPane settings={settings} commit={commit} />}
+            {category === 'shortcuts' && <ShortcutsPane />}
             {category === 'about' && <AboutPane />}
           </div>
         </div>
@@ -189,6 +191,15 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
   const setRules = (contextFallbackRules: ContextFallbackRule[]): void => commit({ contextFallbackRules });
   const titleGen = settings.titleGen ?? { mode: 'program', baseUrl: '', apiKey: '', model: '' };
   const patchTitleGen = (p: Partial<TitleGenSettings>): void => commit({ titleGen: { ...titleGen, ...p } });
+  // navigate 白名单草稿：输入过程不落盘，blur/Enter 时 trim + 转小写后提交（同 claudeMcpConfig 模式）。
+  const navWhitelist = (settings.browserNavWhitelist ?? []).join(', ');
+  const [navDraft, setNavDraft] = useState(navWhitelist);
+  useEffect(() => setNavDraft(navWhitelist), [navWhitelist]);
+  const commitNavWhitelist = (): void => {
+    const next = navDraft.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (next.join(', ') === navWhitelist) return;
+    commit({ browserNavWhitelist: next });
+  };
   return (
     <div className="space-y-7">
       <Section title={t('language')}>
@@ -234,6 +245,37 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
           onChange={(defaultPermissionMode) => commit({ defaultPermissionMode: defaultPermissionMode as AppSettings['defaultPermissionMode'] })}
         />
         <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('defaultPermModeHint')}</p>
+      </Section>
+      <Section title={t('browserUseSection')}>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between rounded-xl border border-line px-4 py-3">
+            <div>
+              <div className="text-ui font-medium">{t('browserUseLabel')}</div>
+              <div className="mt-0.5 text-[11.5px] text-ink-faint">{t('browserUseHint')}</div>
+            </div>
+            <Toggle checked={settings.browserUse} onChange={(v) => commit({ browserUse: v })} />
+          </div>
+          <div className="rounded-xl border border-line px-4 py-3">
+            <div className="text-ui font-medium">{t('browserNavWhitelist')}</div>
+            <div className="mt-0.5 text-[11.5px] text-ink-faint">{t('browserNavWhitelistHint')}</div>
+            <input
+              value={navDraft}
+              placeholder={t('browserNavWhitelistPlaceholder')}
+              onChange={(e) => setNavDraft(e.target.value)}
+              onBlur={commitNavWhitelist}
+              onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+              className="mt-2 w-full max-w-md rounded-lg border border-line bg-bg-input px-2.5 py-1.5 font-mono text-ui outline-none placeholder:text-ink-faint"
+            />
+          </div>
+          {/* Phase 3 占位：开关禁用，仅让设置模型提前带上字段。 */}
+          <div className="flex items-center justify-between rounded-xl border border-line px-4 py-3">
+            <div>
+              <div className="text-ui font-medium">{t('computerUseLabel')}</div>
+              <div className="mt-0.5 text-[11.5px] text-ink-faint">{t('computerUseHint')}</div>
+            </div>
+            <Toggle checked={settings.computerUse} onChange={(v) => commit({ computerUse: v })} disabled />
+          </div>
+        </div>
       </Section>
       <Section title={t('titleGen')}>
         <Segmented
@@ -318,6 +360,64 @@ function GeneralPane({ settings, commit }: PaneProps): JSX.Element {
         </div>
         <p className="mt-2 text-[11px] leading-5 text-ink-faint">{t('contextFallbackHint')}</p>
       </Section>
+      <DataDirCard />
+    </div>
+  );
+}
+
+/** 数据目录卡 — 自定义 userData 落盘位置。指针文件写入后需重启生效；
+ *  目录不存在时主进程会在下次启动自动创建。 */
+function DataDirCard(): JSX.Element {
+  const t = useT();
+  const [current, setCurrent] = useState<string | null>(null);
+  const [pending, setPending] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void window.cyberslots.dataDirGet().then(setCurrent).catch(() => undefined);
+  }, []);
+  const apply = async (path: string): Promise<void> => {
+    setBusy(true);
+    try {
+      const res = await window.cyberslots.dataDirSet(path);
+      setCurrent(res.current);
+      setPending(res.pending);
+    } catch {
+      /* 主进程已记日志；保持原状即可 */
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changed = !!pending && pending !== current;
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
+      <div className="mb-1 flex items-center gap-3">
+        <span className="text-[13px] font-semibold">{t('dataDir')}</span>
+      </div>
+      <div className="mb-2 text-[11px] leading-5 text-ink-faint">{t('dataDirHint')}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-ink-faint" title={pending || current || ''}>
+          {pending || current || t('dataDirCurrent')}
+        </span>
+        <button
+          onClick={() => {
+            void window.cyberslots.dialogPickFolder().then((dir) => {
+              if (dir) void apply(dir);
+            });
+          }}
+          disabled={busy}
+          className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover disabled:opacity-50"
+        >
+          {busy ? <BrandSpinner size={12} /> : t('dataDirPick')}
+        </button>
+        <button
+          onClick={() => void apply('')}
+          disabled={busy || !pending}
+          className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-[11px] text-ink-soft transition hover:bg-bg-hover disabled:opacity-50"
+        >
+          {t('dataDirReset')}
+        </button>
+      </div>
+      {changed && <div className="mt-2 text-[11px] leading-5 text-warn">{t('dataDirRestart')}</div>}
     </div>
   );
 }
@@ -522,7 +622,8 @@ function EnginePane({ engine }: { engine: EngineId }): JSX.Element {
   // 改完 models.yml 点 ↻ 看不到新模型）；切页自动刷新不强拉，避免每次白跑 CLI。
   const reload = (forceCatalog?: boolean): void => {
     setReloadBusy(true);
-    const jobs: Promise<unknown>[] = [refreshEngineConfigs().then(setSnap)];
+    // 显式点击刷新 → force 跳过主进程短 TTL 缓存，确保改完配置立刻可见。
+    const jobs: Promise<unknown>[] = [refreshEngineConfigs(true).then(setSnap)];
     if (forceCatalog && engine === 'omp') jobs.push(loadOmpCatalog(true));
     if (forceCatalog && engine === 'opencode') jobs.push(loadOpencodeCatalog(true));
     void Promise.allSettled(jobs).then(() => setReloadBusy(false));
@@ -557,6 +658,10 @@ function EnginePane({ engine }: { engine: EngineId }): JSX.Element {
         </button>
       </div>
 
+      {/* 本程序侧每引擎新会话默认（模型/思考深度）— antigravity 分支已提前返回，
+       *  其默认模型在账号专页设置。 */}
+      <EngineDefaultsCard engine={engine} />
+
       {!snap ? (
         <div className="flex flex-col items-center gap-2 py-8 text-ui text-ink-faint">
           {/* 面板内容区级等待按规范用 BrandHero（原来只有一个纯文字…） */}
@@ -587,6 +692,66 @@ function EnginePane({ engine }: { engine: EngineId }): JSX.Element {
         </>
       )}
       <CompatAuditCard engine={engine} />
+    </div>
+  );
+}
+
+/** 每引擎新会话默认（模型 + 思考深度）— 只影响新建会话：
+ *  新会话优先用这里设置的配置，未设置的字段回落引擎自身配置默认；
+ *  历史对话不经过创建路径，继续使用会话里已选过的配置。 */
+function EngineDefaultsCard({ engine }: { engine: EngineId }): JSX.Element | null {
+  const t = useT();
+  const settings = useChatStore((s) => s.settings);
+  const saveSettings = useChatStore((s) => s.saveSettings);
+  const { modelOptions, effortOptions } = useRoleCatalogs(true);
+  const def = settings?.engineDefaults?.[engine] ?? {};
+  const models = modelOptions(engine);
+  const efforts = effortOptions(engine, def.modelId ?? '');
+  const patch = (p: Partial<{ modelId: string; effort: string }>): void => {
+    void saveSettings({
+      engineDefaults: { ...(settings?.engineDefaults ?? {}), [engine]: { ...def, ...p } },
+    });
+  };
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3">
+      <div className="mb-1 flex items-center gap-2">
+        <Settings2 size={14} className="shrink-0 text-ink-faint" />
+        <span className="text-[13px] font-semibold">{t('engineDefaultTitle')}</span>
+      </div>
+      <p className="mb-3 text-[11px] leading-5 text-ink-faint">{t('engineDefaultHint')}</p>
+      <div className="space-y-2.5">
+        <label className="flex items-center gap-2">
+          <span className="w-24 shrink-0 text-[12px] text-ink-soft">{t('model')}</span>
+          <select
+            value={def.modelId ?? ''}
+            onChange={(e) => patch({ modelId: e.target.value, effort: '' })}
+            className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent"
+          >
+            <option value="">{t('engineDefaultFollow')}</option>
+            {models.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="w-24 shrink-0 text-[12px] text-ink-soft">{t('effort')}</span>
+          <select
+            value={def.effort ?? ''}
+            onChange={(e) => patch({ effort: e.target.value })}
+            disabled={!efforts.length}
+            className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent disabled:cursor-default disabled:opacity-40"
+          >
+            <option value="">{t('engineDefaultFollow')}</option>
+            {efforts.map((e) => (
+              <option key={e} value={e}>
+                {effortLabel(e)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
     </div>
   );
 }
@@ -896,7 +1061,7 @@ function ClaudeConfigCard({ snap }: { snap: ClaudeConfigSnapshot }): JSX.Element
   const saveCliPath = (): void => {
     const next = cliDraft.trim();
     if (next === cliPath) return;
-    void saveSettings({ claudeCliPath: next }).then(() => void refreshEngineConfigs());
+    void saveSettings({ claudeCliPath: next }).then(() => void refreshEngineConfigs(true));
   };
   return (
     <div className="rounded-xl border border-line bg-bg-panel/50 px-4 py-3.5">
@@ -995,12 +1160,16 @@ function AntigravityAccountsCard(): JSX.Element {
   const [switchError, setSwitchError] = useState<string | null>(null);
   // agy 新会话默认模型（全局设置，与账号解耦）— 未在 composer 显式选模型时生效。
   const agyDefaultModel = useChatStore((s) => s.settings?.antigravityDefaultModel ?? '');
+  const agyEffortDef = useChatStore((s) => s.settings?.engineDefaults?.antigravity?.effort ?? '');
   const agyHiddenList = useChatStore((s) => s.settings?.antigravityHiddenModels);
   const agyAutoSwitch = useChatStore((s) => s.settings?.antigravityAutoSwitch ?? false);
   const agyThreshold5h = useChatStore((s) => s.settings?.antigravityQuotaThreshold5h ?? 15);
   const agyThreshold7d = useChatStore((s) => s.settings?.antigravityQuotaThreshold7d ?? 5);
   const saveSettings = useChatStore((s) => s.saveSettings);
+  const settings = useChatStore((s) => s.settings);
+  const { effortOptions } = useRoleCatalogs(true);
   const agyHidden = useMemo(() => new Set(agyHiddenList ?? []), [agyHiddenList]);
+  const agyEfforts = effortOptions('antigravity', agyDefaultModel);
   const toggleAgyHidden = (slug: string): void => {
     const next = new Set(agyHidden);
     if (next.has(slug)) next.delete(slug);
@@ -1163,7 +1332,31 @@ function AntigravityAccountsCard(): JSX.Element {
               <option key={slug} value={slug}>
                 {label}
               </option>
-            ))}
+          ))}
+        </select>
+      </div>
+      {/* agy 新会话默认思考深度（仅 claude 系模型有档位）— 与默认模型一起存 engineDefaults */}
+      <div className="mb-3 flex items-center gap-2">
+        <span className="shrink-0 text-[12px] text-ink-soft">{t('effort')}</span>
+        <select
+          value={agyEffortDef}
+          onChange={(e) =>
+            void saveSettings({
+              engineDefaults: {
+                ...(settings?.engineDefaults ?? {}),
+                antigravity: { modelId: agyDefaultModel, effort: e.target.value },
+              },
+            })
+          }
+          disabled={!agyEfforts.length}
+          className="min-w-0 flex-1 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent disabled:cursor-default disabled:opacity-40"
+        >
+          <option value="">{t('engineDefaultFollow')}</option>
+          {agyEfforts.map((e) => (
+            <option key={e} value={e}>
+              {effortLabel(e)}
+            </option>
+          ))}
         </select>
       </div>
       {/* 隐藏模型—只影响本程序内的模型选择器/赛马配置，不限制 agy 实际可用模型 */}
@@ -1777,6 +1970,16 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
   const engineOrder = useEngineOrder();
   const race = settings.race ?? { enableRacerC: false, roles: {} };
 
+  // AI 初审模式滑动胶囊
+  const preJudgeTabRefs = useRef<Partial<Record<RacePreJudgeMode, HTMLButtonElement | null>>>({});
+  const [preJudgePill, setPreJudgePill] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const currentMode = (race.defaultPreJudgeMode ?? 'off') as RacePreJudgeMode;
+  useLayoutEffect(() => {
+    const el = preJudgeTabRefs.current[currentMode];
+    if (!el) return;
+    setPreJudgePill({ left: el.offsetLeft, top: el.offsetTop, width: el.offsetWidth, height: el.offsetHeight });
+  }, [currentMode]);
+
   const patchRole = (role: string, patch: Partial<RaceRoleDefaultSetting>): void => {
     const cur: RaceRoleDefaultSetting = race.roles[role] ?? { engine: 'codex', modelId: '', effort: '' };
     const next = { ...cur, ...patch };
@@ -1797,6 +2000,109 @@ function RacePane({ settings, commit }: PaneProps): JSX.Element {
             onChange={(e) => commit({ race: { ...race, enableRacerC: e.target.checked } })}
           />
         </label>
+        <div className="mt-4">
+          <div className="text-body">{t('racePreJudgeDefaultMode')}</div>
+          <div className="mt-0.5 text-[12px] text-ink-faint">{t('racePreJudgeDefaultModeHint')}</div>
+          <div className="relative mt-2 flex items-center gap-1 rounded-xl border border-line bg-bg-panel p-1">
+            {preJudgePill && (
+              <div
+                className="pointer-events-none absolute rounded-lg bg-bg shadow-sm transition-all duration-300 ease-out"
+                style={{ left: preJudgePill.left, top: preJudgePill.top, width: preJudgePill.width, height: preJudgePill.height }}
+              />
+            )}
+            {(['off', 'suggest', 'designate', 'auto'] as const).map((mode) => (
+              <button
+                key={mode}
+                ref={(el) => { preJudgeTabRefs.current[mode] = el; }}
+                title={t(`racePreJudgeTooltip_${mode}`)}
+                onClick={() => commit({ race: { ...race, defaultPreJudgeMode: mode } })}
+                className={`relative flex-1 rounded-lg px-4 py-1.5 text-[12.5px] transition ${currentMode === mode
+                  ? 'font-medium text-ink'
+                  : 'text-ink-soft hover:text-ink'
+                  }`}
+              >
+                <span className="grid">
+                  <span aria-hidden className="invisible whitespace-nowrap font-medium [grid-area:1/1]">{t(`racePreJudgeMode_${mode}`)}</span>
+                  <span className="whitespace-nowrap [grid-area:1/1]">{t(`racePreJudgeMode_${mode}`)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          {/* suggest/auto 显示默认引擎配置 */}
+          {(currentMode === 'suggest' || currentMode === 'auto') && (() => {
+            const d: RaceRoleDefaultSetting = race.roles['preJudge'] ?? { engine: 'codex', modelId: '', effort: '' };
+            const mOpts = modelOptions(d.engine);
+            const effOpts = effortOptions(d.engine, d.modelId);
+            return (
+              <div className="mt-2 grid grid-cols-[88px_1fr_1.4fr_110px] items-center gap-2">
+                <span className="text-[12.5px] font-medium text-ink">{t(raceRoleKey('preJudge'))}</span>
+                <select
+                  value={d.engine}
+                  onChange={(e) => patchRole('preJudge', { engine: e.target.value as EngineId, modelId: '', effort: '' })}
+                  className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-soft outline-none transition focus:border-accent"
+                >
+                  {engineOrder.map((eng) => (
+                    <option key={eng} value={eng} disabled={raceAvailability ? !raceAvailability[eng] : false}>
+                      {ENGINE_LABELS[eng]}
+                      {raceAvailability && !raceAvailability[eng] ? t('raceNotInstalled') : ''}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={d.modelId}
+                  onChange={(e) => patchRole('preJudge', { modelId: e.target.value, effort: '' })}
+                  className="min-w-0 rounded-lg border border-line bg-bg-input px-2 py-1.5 font-mono text-[12px] text-ink-soft outline-none transition focus:border-accent"
+                >
+                  <option value="">{t('raceFollowEngineDefault')}</option>
+                  {d.modelId && !mOpts.some((o) => o.value === d.modelId) && <option value={d.modelId}>{d.modelId}</option>}
+                  {mOpts.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={d.effort ?? ''}
+                  onChange={(e) => patchRole('preJudge', { effort: e.target.value })}
+                  disabled={effOpts.length === 0}
+                  className="rounded-lg border border-line bg-bg-input px-2 py-1.5 text-[12px] text-ink-soft outline-none transition focus:border-accent disabled:opacity-60"
+                >
+                  <option value="">{t('raceEffortDefaultMax')}</option>
+                  {effOpts.map((ef) => (
+                    <option key={ef} value={ef}>
+                      {effortLabel(ef)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })()}
+          {/* designate 模式显示默认策略选择网格 */}
+          {currentMode === 'designate' && (() => {
+            const letters = ['A', 'B', ...(race.enableRacerC ? ['C'] : [])];
+            const strategies: RaceAdoptStrategy[] = [
+              ...letters.map(l => `adopt${l}` as RaceAdoptStrategy),
+              ...letters.map(l => `prefer${l}` as RaceAdoptStrategy),
+            ];
+            const selected = race.defaultDesignateStrategy;
+            return (
+              <div className="mt-2">
+                <div className="mb-1.5 text-[12px] font-medium text-ink-soft">{t('raceDesignateStrategyLabel')}</div>
+                <div className={`grid gap-2 ${race.enableRacerC ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                  {strategies.map(st => (
+                    <button key={st}
+                      onClick={() => commit({ race: { ...race, defaultDesignateStrategy: st } })}
+                      className={`rounded-xl border px-3 py-2 text-[12px] transition ${selected === st
+                        ? 'border-accent bg-accent-soft font-semibold text-accent'
+                        : 'border-line bg-bg-input text-ink-soft hover:bg-bg-hover hover:text-ink'}`}>
+                      {adoptStrategyLabel(t, st)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
       </Section>
 
       <Section title={t('raceRoleDefaults')}>
@@ -1903,6 +2209,74 @@ function AboutPane(): JSX.Element {
       </div>
       <div>{t('aboutText')}</div>
       <div className="font-mono text-[11.5px] text-ink-faint">v0.1.0</div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- shortcuts
+
+/** 快捷键说明清单 — 键位静态写死，说明文字走 i18n（key 为 MsgKey）。 */
+const SHORTCUT_GROUPS: Array<{ titleKey: MsgKey; items: Array<{ keys: string[]; key: MsgKey }> }> = [
+  {
+    titleKey: 'shortcutGroupComposer',
+    items: [
+      { keys: ['Ctrl+Tab', 'Shift+Tab'], key: 'shortcutModeToggle' },
+      { keys: ['Ctrl+M', 'Ctrl+Shift+M'], key: 'shortcutCycleModel' },
+      { keys: ['Ctrl+E', 'Ctrl+Shift+E'], key: 'shortcutCycleEffort' },
+      { keys: ['Ctrl+S'], key: 'shortcutNewSidechat' },
+      { keys: ['Enter', 'Ctrl+Enter'], key: 'shortcutSend' },
+    ],
+  },
+  {
+    titleKey: 'shortcutGroupInput',
+    items: [{ keys: ['Ctrl+V'], key: 'shortcutPasteImage' }],
+  },
+  {
+    titleKey: 'shortcutGroupGlobal',
+    items: [
+      { keys: ['Ctrl+D'], key: 'shortcutOpenDashboard' },
+      { keys: ['Ctrl+N'], key: 'shortcutNewSession' },
+      { keys: ['Ctrl+`'], key: 'shortcutToggleSidebar' },
+      { keys: ['Ctrl+,'], key: 'shortcutOpenSettings' },
+      { keys: ['Ctrl+F'], key: 'shortcutSearch' },
+      { keys: ['Ctrl+S'], key: 'shortcutSaveFile' },
+      { keys: ['Esc'], key: 'shortcutClose' },
+    ],
+  },
+  {
+    titleKey: 'shortcutGroupDashboard',
+    items: [{ keys: ['/', 'j/k', 'Enter'], key: 'shortcutDashboardNav' }],
+  },
+];
+
+function ShortcutsPane(): JSX.Element {
+  const t = useT();
+  return (
+    <div className="space-y-6">
+      {SHORTCUT_GROUPS.map((g) => (
+        <Section key={g.titleKey} title={t(g.titleKey)}>
+          <div className="overflow-hidden rounded-xl border border-line bg-bg-panel/50">
+            {g.items.map((it, i) => (
+              <div
+                key={it.key}
+                className={`flex items-center justify-between gap-4 px-3 py-2 ${i > 0 ? 'border-t border-line' : ''}`}
+              >
+                <span className="min-w-0 text-ui text-ink">{t(it.key)}</span>
+                <span className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                  {it.keys.map((k) => (
+                    <kbd
+                      key={k}
+                      className="rounded-md border border-line bg-bg px-1.5 py-0.5 font-mono text-[10.5px] text-ink-soft"
+                    >
+                      {k}
+                    </kbd>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ))}
     </div>
   );
 }

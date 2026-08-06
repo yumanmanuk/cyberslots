@@ -124,6 +124,14 @@ function foldFinishedTurns(items: StreamItem[], messages: UnifiedMessage[]): Ren
   items.forEach((it, i) => {
     if (isProcessItem(it)) lastProcessIdx.set(itemGenKey(it), i);
   });
+  // 各回合最后一个 text 段的位置 — 若该位置在最后一个过程块之后，则
+  // 存在真正的 trailing text（最终结论）；否则整段 text 都是中间陈述。
+  const lastTextIdx = new Map<string, number>();
+  items.forEach((it, i) => {
+    if (it.type === 'msg' && it.msg.kind === 'text' && !it.msg.planDoc) {
+      lastTextIdx.set(itemGenKey(it), i);
+    }
+  });
 
   const collapsed = (it: StreamItem, i: number): boolean => {
     const key = itemGenKey(it);
@@ -132,7 +140,14 @@ function foldFinishedTurns(items: StreamItem[], messages: UnifiedMessage[]): Ren
     const m = it.msg;
     if (m.kind === 'thinking' || m.kind === 'tool_call') return true;
     // 中间陈述 text（在末个过程块之前）收进折叠；trailing / planDoc 保持可见。
-    if (m.kind === 'text' && !m.planDoc) return i < (lastProcessIdx.get(key) ?? -1);
+    // 关键修正：仅当存在真正的 trailing text（最后一个 text 段位于最后一个
+    // 过程块之后）时，中间的 text 才折叠。若整段只有一个 text 段（无论前面
+    // 是否有工具调用），该 text 就是最终结论，必须保持可见——否则会出现
+    // 「Worked for 下面只剩 token 统计、正文全被吞」的过度折叠。
+    if (m.kind === 'text' && !m.planDoc) {
+      const hasTrailing = (lastTextIdx.get(key) ?? -1) > (lastProcessIdx.get(key) ?? -1);
+      return hasTrailing && i < (lastProcessIdx.get(key) ?? -1);
+    }
     return false; // user / plan / turn_end / system / error / ask_user … 均 pinned。
   };
 
@@ -292,9 +307,9 @@ function ActivityWindow({ gkind, entries }: { gkind: GroupKind; entries: GroupEn
     : undefined;
   return (
     <div className="text-ui">
-      <div className="flex items-center gap-2" style={{ height: 22 }}>
-        <BrandSpinner size={14} className="shrink-0 text-accent" />
-        <span className="shimmer-text text-[12.5px] font-medium leading-[16px]">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
+      <div className="flex items-baseline gap-2" style={{ height: 22 }}>
+        <BrandSpinner size={14} className="shrink-0 self-center text-accent" />
+        <span className="shimmer-text text-[12.5px] font-medium leading-[22px]">{gkind === 'shell' ? 'Running' : 'Exploring'}</span>
         <span className="ml-auto shrink-0 font-mono text-[11px] leading-none tabular-nums text-ink-faint">
           {steps > 0 ? `${steps} ${steps === 1 ? 'step' : 'steps'} · ` : ''}
           {fmtElapsed(now - start)}
@@ -346,16 +361,16 @@ function CompactRow({
     return (
       <button
         onClick={() => hasText && onToggle?.()}
-        className={`group flex w-full items-center gap-2 text-left ${hasText ? '' : 'cursor-default'}`}
+        className={`group flex w-full items-baseline gap-2 text-left ${hasText ? '' : 'cursor-default'}`}
         style={{ height: 20 }}
       >
-        <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${running ? 'bg-accent tool-tick-run' : 'bg-ink-faint/50'}`} />
-        <span className={`shrink-0 text-[12px] ${running ? 'shimmer-text font-medium' : 'text-ink-soft'}`}>Thinking</span>
+        <span className={`h-[11px] w-[3px] shrink-0 self-center rounded-full ${running ? 'bg-accent tool-tick-run' : 'bg-ink-faint/50'}`} />
+        <span className={`shrink-0 text-[12px] leading-[20px] ${running ? 'shimmer-text font-medium' : 'text-ink-soft'}`}>Thinking</span>
         {hasText &&
           (expanded ? (
-            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+            <ChevronDown size={12} className="shrink-0 self-center text-ink-faint" />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-ink-faint opacity-0 transition group-hover:opacity-100" />
+            <ChevronRight size={12} className="shrink-0 self-center text-ink-faint opacity-0 transition group-hover:opacity-100" />
           ))}
       </button>
     );
@@ -368,9 +383,9 @@ function CompactRow({
   const object = isShell ? entry.title : label.object;
   const matches = entry.content?.matches;
   return (
-    <div className="flex items-center gap-2" style={{ height: 20 }}>
-      <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${running ? 'bg-accent tool-tick-run' : failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
-      <span className={`shrink-0 text-[12px] leading-none ${running ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>{verb}</span>
+    <div className="flex items-baseline gap-2" style={{ height: 20 }}>
+      <span className={`h-[11px] w-[3px] shrink-0 self-center rounded-full ${running ? 'bg-accent tool-tick-run' : failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
+      <span className={`shrink-0 text-[12px] leading-[20px] ${running ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>{verb}</span>
       {object && object !== verb && (
         <span className="min-w-0 truncate font-mono text-[11.5px] leading-[1.2] text-ink-faint">{object}</span>
       )}
@@ -486,9 +501,9 @@ function hasVisibleActivity(messages: UnifiedMessage[]): boolean {
 
 function ActivityIndicator(): JSX.Element {
   return (
-    <div className="flex items-center gap-1.5 text-ui">
+    <div className="flex items-baseline gap-1.5 text-ui">
       {/* 全局进行态指示 — 规范要求品牌 spinner，不用 lucide 图标旋转 */}
-      <BrandSpinner size={14} />
+      <BrandSpinner size={14} className="self-center" />
       <span className="shimmer-text font-medium">Working…</span>
     </div>
   );

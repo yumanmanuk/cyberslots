@@ -11,6 +11,7 @@ import {
   ArrowDown,
   FileDiff,
   FolderTree,
+  Globe,
   MessagesSquare,
   PanelRightClose,
   PanelRightOpen,
@@ -43,10 +44,15 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   const pendingFilePreview = useChatStore((s) => s.pendingFilePreview[sessionId]);
   const pendingChangePreview = useChatStore((s) => s.pendingChangePreview[sessionId]);
   const openSidechat = useChatStore((s) => s.openSidechat);
+  const rightPanel = useChatStore((s) => s.rightPanels[sessionId]);
+  const setRightPanel = useChatStore((s) => s.setRightPanel);
   // Open in 的文件夹候选：cwd 置首（primary）+ workspace 其他根去重（同 RightDock termFolders）。
   const workspace = useChatStore((s) => s.settings?.workspaces.find((w) => w.id === meta?.workspaceId));
-  const [panelOpen, setPanelOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<string>('files');
+  // browser use 开关：关时浏览器 tab / rail 钮不显示；持久化的 activeTab='browser'
+  // 残留由下方 activeTab 合法性 effect 兜底回退到首个可用 tab。
+  const browserUse = useChatStore((s) => s.settings?.browserUse ?? false);
+  const panelOpen = rightPanel?.open ?? false;
+  const activeTab = rightPanel?.activeTab ?? 'files';
   const [sidechatOpening, setSidechatOpening] = useState(false);
   // 标题内联重命名（⋯ 菜单触发）：Enter/blur 提交，Esc 取消，空标题不提交。
   const [renaming, setRenaming] = useState(false);
@@ -65,11 +71,24 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       : [];
 
   // 切会话时复位贴底状态 — 组件实例跨会话复用，避免上个会话的离底状态泄漏到新会话。
+  // switchGuard 短暂屏蔽 onScroll 对 stickToBottom 的置 false：切会话后消息列表
+  // 重渲染期间 scrollHeight 分帧变化，程序化设 scrollTop 触发的 onScroll 可能在
+  // 中间帧误判 near=false，之后 ResizeObserver 不再贴底 → 最终停在中间位置。
+  const switchGuard = useRef(false);
   useEffect(() => {
     stickToBottom.current = true;
     setAtBottom(true);
+    switchGuard.current = true;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
+    const timer = setTimeout(() => {
+      switchGuard.current = false;
+      // 窗口结束时再贴一次底，兜住渲染延迟。
+      if (scrollRef.current && stickToBottom.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+    }, 500);
+    return () => clearTimeout(timer);
   }, [sessionId]);
 
   // Auto-follow the stream unless the user scrolled up.
@@ -80,7 +99,10 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
 
   // 折叠收起/展开是 200ms 高度动画（Collapsible），只在 messages 变化时
   // 贴底会在动画期间失去锚点导致跳变 — 用 ResizeObserver 追着内容高度
-  // 逐帧贴底，收起/增高都平滑跟随。
+  // 逐帧贴底，收起/增高都平滑跟随。同时监听滚动容器自身：Composer 高度
+  // 变化（TopRails 显隐、textarea 自适应）会缩放滚动视口，仅监听内容不够
+  // —— 视口缩小后 scrollTop 不自动跟进，末尾内容（如 Working… 指示器）
+  // 被裁剪到底缘以下。
   useEffect(() => {
     const el = scrollRef.current;
     const content = contentRef.current;
@@ -89,8 +111,26 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
       if (stickToBottom.current) el.scrollTop = el.scrollHeight;
     });
     ro.observe(content);
+    ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // 搜索高亮定位：searchHighlight 变化时滚动到目标消息并闪烁高亮。
+  const searchHighlight = useChatStore((s) => s.searchHighlight);
+  useEffect(() => {
+    if (!searchHighlight || searchHighlight.sessionId !== sessionId || !searchHighlight.messageId) return;
+    const { messageId } = searchHighlight;
+    // 延迟等水合完成后再滚动（切会话时消息可能尚未渲染）。
+    const timer = setTimeout(() => {
+      const el = scrollRef.current?.querySelector(`[data-msg-id="${messageId}"]`) as HTMLElement | null;
+      if (!el) return;
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      // 闪烁高亮
+      el.classList.add('search-flash');
+      setTimeout(() => el.classList.remove('search-flash'), 2000);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [searchHighlight, sessionId]);
 
   const planMsg = planPreviewId
     ? messages.find((m) => m.id === planPreviewId && m.kind === 'text')
@@ -104,33 +144,31 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     ...sidechatIds.map((id) => `${SIDE_PREFIX}${id}`),
     ...(sidechatOpening ? [SIDE_PENDING] : []), // fork 进行中的占位 tab
     ...(planText !== undefined ? ['plan'] : []),
+    ...(browserUse ? ['browser'] : []),
   ];
   const tabsKey = allTabs.join('|');
 
   // Plan 模式产出计划后自动弹出 plan tab（item 8）。
   useEffect(() => {
     if (planPreviewId) {
-      setActiveTab('plan');
-      setPanelOpen(true);
+      setRightPanel(sessionId, { activeTab: 'plan', open: true });
     }
-  }, [planPreviewId]);
+  }, [planPreviewId, sessionId, setRightPanel]);
 
   // AI 正文文件 chip 点击 → 开 files tab（信号不在这清除 — 由 WorkspacePanel
   // 挂载后消费并清除，保证点击时 dock 未开也能正确落地）。
   useEffect(() => {
     if (pendingFilePreview) {
-      setActiveTab('files');
-      setPanelOpen(true);
+      setRightPanel(sessionId, { activeTab: 'files', open: true });
     }
-  }, [pendingFilePreview]);
+  }, [pendingFilePreview, sessionId, setRightPanel]);
 
   // 编辑工具卡点击 → 开 changes tab（信号同上，由 WorkspacePanel 消费清除）。
   useEffect(() => {
     if (pendingChangePreview) {
-      setActiveTab('changes');
-      setPanelOpen(true);
+      setRightPanel(sessionId, { activeTab: 'changes', open: true });
     }
-  }, [pendingChangePreview]);
+  }, [pendingChangePreview, sessionId, setRightPanel]);
 
   // 切会话时退出重命名编辑态（组件实例跨会话复用）。
   useEffect(() => setRenaming(false), [sessionId]);
@@ -138,15 +176,18 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   // 切会话 / 关 tab 后校验 activeTab 合法性：失效则回退首个 tab 或收起。
   useEffect(() => {
     if (!panelOpen || allTabs.includes(activeTab)) return;
-    if (allTabs.length) setActiveTab(allTabs[0]!);
-    else setPanelOpen(false);
+    if (allTabs.length) setRightPanel(sessionId, { activeTab: allTabs[0]! });
+    else setRightPanel(sessionId, { open: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panelOpen, activeTab, tabsKey]);
+  }, [panelOpen, activeTab, tabsKey, sessionId, setRightPanel]);
 
   const onScroll = (): void => {
     const el = scrollRef.current;
     if (!el) return;
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    // switchGuard 期间只允许 near → true（贴底成功），不允许误判 false
+    // （切会话重渲染期间 scrollHeight 分帧膨胀，中间帧 near 可能 false）。
+    if (!near && switchGuard.current) return;
     stickToBottom.current = near;
     setAtBottom(near);
   };
@@ -161,14 +202,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
   };
 
   const openTab = (tab: string): void => {
-    setActiveTab(tab);
-    setPanelOpen(true);
-  };
-
-  /** rail 图标点击：已激活再点则收起（保留旧交互习惯）。 */
-  const toggleTab = (tab: string): void => {
-    if (panelOpen && activeTab === tab) setPanelOpen(false);
-    else openTab(tab);
+    setRightPanel(sessionId, { activeTab: tab, open: true });
   };
 
   /** 提交重命名：仅非空且有变化才落库（renameSession 已同步侧栏）。 */
@@ -191,20 +225,36 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     try {
       const id = await openSidechat(sessionId);
       // 用户中途没切走才跳到新分支；占位 tab 随 opening 结束自动消失。
-      setActiveTab((cur) => (cur === SIDE_PENDING ? `${SIDE_PREFIX}${id}` : cur));
+      if (useChatStore.getState().rightPanels[sessionId]?.activeTab === SIDE_PENDING) {
+        setRightPanel(sessionId, { activeTab: `${SIDE_PREFIX}${id}` });
+      }
     } finally {
       setSidechatOpening(false);
     }
   };
 
-  /** rail 终端钮：已在终端 tab → 收起；有终端 → 激活最近一个；
-   *  没有 → 多目录 workspace 先弹菜单选目录（返回 'menu' 交给钮内下拉），
-   *  单目录直接在 cwd 新开。 */
+  // Ctrl+S 新建当前对话的 sidechat（主 Composer 输入框聚焦时也可用）。
+  // 跳过终端（Ctrl+S 是 XOFF 流量控制）与 INPUT/TEXTAREA（文件编辑器里
+  // Ctrl+S 是保存、sidechat 输入框里无操作），让原处理优先。
+  const addSidechatTabRef = useRef(addSidechatTab);
+  addSidechatTabRef.current = addSidechatTab;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== 's') return;
+      const el = e.target as HTMLElement | null;
+      if (el?.closest?.('.xterm')) return;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+      e.preventDefault();
+      void addSidechatTabRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  /** rail 终端钮：只负责「打开/激活终端」；面板开合由顶部专用按钮负责。
+   *  有终端 → 激活最近一个；没有 → 多目录 workspace 先弹菜单选目录
+   *  （返回 'menu' 交给钮内下拉），单目录直接在 cwd 新开。 */
   const onRailTerminal = (): 'menu' | undefined => {
-    if (panelOpen && activeTab.startsWith(TERM_PREFIX)) {
-      setPanelOpen(false);
-      return;
-    }
     if (terms.length) openTab(`${TERM_PREFIX}${terms[terms.length - 1]!.id}`);
     else if (openFolders.length > 1) return 'menu';
     else if (meta) addTerminalTab(meta.cwd);
@@ -224,8 +274,9 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     else if (tab.startsWith(TERM_PREFIX)) useChatStore.getState().removeTerminal(sessionId, tab.slice(TERM_PREFIX.length));
     else if (tab.startsWith(SIDE_PREFIX)) void useChatStore.getState().closeSidechat(tab.slice(SIDE_PREFIX.length));
     if (activeTab === tab) {
-      if (remaining.length) setActiveTab(remaining[Math.min(Math.max(idx, 0), remaining.length - 1)]!);
-      else setPanelOpen(false);
+      const neighbor = remaining[Math.min(Math.max(idx, 0), remaining.length - 1)];
+      if (neighbor) setRightPanel(sessionId, { activeTab: neighbor });
+      else setRightPanel(sessionId, { open: false });
     }
   };
 
@@ -234,12 +285,12 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
     if (panelOpen) {
       // 折叠时若停在 plan tab，清掉预览标记，否则上面的 effect 会立刻重新弹出。
       if (activeTab === 'plan') useChatStore.getState().setPlanPreview(sessionId, undefined);
-      setPanelOpen(false);
+      setRightPanel(sessionId, { open: false });
       return;
     }
     if (allTabs.length) {
-      if (!allTabs.includes(activeTab)) setActiveTab(allTabs[0]!);
-      setPanelOpen(true);
+      const nextTab = allTabs.includes(activeTab) ? activeTab : allTabs[0]!;
+      setRightPanel(sessionId, { activeTab: nextTab, open: true });
       return;
     }
     // chat 会话且没有任何 tab → 直接开一个 sidechat 分支。
@@ -260,14 +311,14 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           <RailButton
             title={t('railFiles')}
             active={panelOpen && activeTab === 'files'}
-            onClick={() => toggleTab('files')}
+            onClick={() => openTab('files')}
           >
             <FolderTree size={16} />
           </RailButton>
           <RailButton
             title={t('railChanges')}
             active={panelOpen && activeTab === 'changes'}
-            onClick={() => toggleTab('changes')}
+            onClick={() => openTab('changes')}
           >
             <FileDiff size={16} />
           </RailButton>
@@ -292,6 +343,15 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
           onHover={() => void window.cyberslots.sessionWarmUp(sessionId)} // 悬停预热父引擎，fork 免等唤醒
         >
           {sidechatOpening ? <BrandSpinner size={16} className="text-accent" /> : <MessagesSquare size={16} />}
+        </RailButton>
+      )}
+      {browserUse && (
+        <RailButton
+          title={t('railBrowser')}
+          active={panelOpen && activeTab === 'browser'}
+          onClick={() => openTab('browser')}
+        >
+          <Globe size={16} />
         </RailButton>
       )}
     </>
@@ -394,7 +454,7 @@ export default function ChatView({ sessionId }: { sessionId: string }): JSX.Elem
             pendingSidechat={sidechatOpening}
             planText={planText}
             creating={creating || sidechatOpening}
-            onSelectTab={setActiveTab}
+            onSelectTab={(tab) => setRightPanel(sessionId, { activeTab: tab })}
             onCloseTab={closeTab}
             onAddTerminal={addTerminalTab}
             onAddSidechat={() => void addSidechatTab()}
@@ -517,11 +577,17 @@ function DockReveal({ open, children }: { open: boolean; children: React.ReactNo
   return (
     <div
       // min-w-0（非 shrink-0）：窗口不够宽时由 dock 被裁剪收缩，中间列保住保底宽度
-      className="grid min-h-0 min-w-0"
+      className="grid h-full min-h-0 min-w-0"
       // minmax(0, …fr)：裸 1fr 的隐式最小宽度是内容宽（minmax(auto,1fr)），
       // 窄窗口下轨道拒绝收缩会把 dock 整体顶出屏外；锁死最小 0 才能
-      // 落地「裁剪而非溢出」的设计（dock 贴右缘露出可用部分）
-      style={{ gridTemplateColumns: expanded ? 'minmax(0, 1fr)' : 'minmax(0, 0fr)', transition: 'grid-template-columns 220ms ease-out' }}
+      // 落地「裁剪而非溢出」的设计（dock 贴右缘露出可用部分）。
+      // 行高同样必须 minmax(0,1fr)：auto 行高按内容撑高，面板内部
+      // 的 overflow-y-auto 永远等不到触发，超高内容会被外层直接裁剪。
+      style={{
+        gridTemplateColumns: expanded ? 'minmax(0, 1fr)' : 'minmax(0, 0fr)',
+        gridTemplateRows: 'minmax(0, 1fr)',
+        transition: 'grid-template-columns 220ms ease-out',
+      }}
       onTransitionEnd={(e) => {
         if (e.propertyName === 'grid-template-columns' && !open) setMounted(false);
       }}

@@ -49,6 +49,7 @@ export default function MissionControl(): JSX.Element {
   const t = useT();
   const sessions = useChatStore((s) => s.sessions);
   const sending = useChatStore((s) => s.sending);
+  const cancelling = useChatStore((s) => s.cancelling);
   const lastActivity = useChatStore((s) => s.lastActivity);
   const workspaces = useChatStore((s) => s.settings?.workspaces) ?? EMPTY_WORKSPACES;
   const races = useRaceStore((s) => s.races);
@@ -97,6 +98,11 @@ export default function MissionControl(): JSX.Element {
     done.sort(byUpdated);
     return { running, inbox, done: done.slice(0, 30) };
   }, [filtered, sending]);
+  // 任一 running 会话的中止请求在途 → 全部停止按钮进入进行中态。
+  const stopAllBusy = useMemo(
+    () => columns.running.some((s) => cancelling[s.id]),
+    [columns.running, cancelling],
+  );
 
   /** 等你决策的赛马（judging 且未选采纳策略）→ 进待办列头部。 */
   const decisionRaces = useMemo(
@@ -232,13 +238,14 @@ export default function MissionControl(): JSX.Element {
           headerExtra={
             columns.running.length > 1 ? (
               <button
-                title={t('mcStopAll')}
+                disabled={stopAllBusy}
+                title={stopAllBusy ? t('stopping') : t('mcStopAll')}
                 onClick={() => {
                   for (const s of columns.running) void useChatStore.getState().cancelSession(s.id);
                 }}
-                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-faint transition hover:bg-err/15 hover:text-err"
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-ink-faint transition hover:bg-err/15 hover:text-err disabled:opacity-40"
               >
-                <OctagonX size={11} />
+                {stopAllBusy ? <BrandSpinner size={11} /> : <OctagonX size={11} />}
                 {t('mcStopAll')}
               </button>
             ) : undefined

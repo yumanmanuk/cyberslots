@@ -42,6 +42,13 @@ export function readInlineImage(path: string): InlineImage | undefined {
   }
 }
 
+/** 读图片附件为可直接用于 <img src> 的 data URL；非图片或读取失败返回
+ *  undefined（渲染层据此退化为文件 chip，附件信息不丢）。 */
+export function inlineImageDataUrl(path: string): string | undefined {
+  const img = readInlineImage(path);
+  return img ? `data:${img.mediaType};base64,${img.data}` : undefined;
+}
+
 /** 文本类扩展名 — opencode file part 报 text/plain 时服务端走 Read
  *  工具把正文内联进上下文（bypassCwdCheck，工作区外可读），
  *  比「丢个路径让模型自己读」少一轮工具往返。 */

@@ -73,6 +73,12 @@ export class RaceManager implements RaceSessionHost {
     this.orchestrator.resume(raceId);
   }
 
+  /** 审计未通过时由用户人工放行：接受当前实现并交付。 */
+  overrideAudit(raceId: string): void {
+    log.info('race', 'override audit requested', { raceId });
+    this.orchestrator.overrideAudit(raceId);
+  }
+
   /** 重试前调整选手配置（仅 racerA/racerB）。 */
   updateRole(raceId: string, role: RaceRole, cfg: RaceRoleConfig): void {
     this.orchestrator.updateRole(raceId, role, cfg);
@@ -97,6 +103,18 @@ export class RaceManager implements RaceSessionHost {
   /** 让裁判按既定策略重新出方案（换裁判引擎后手动重跑）。 */
   rerunJudge(raceId: string): void {
     this.orchestrator.rerunJudge(raceId);
+  }
+
+  /** 采纳 AI 初审的推荐策略（等同于用推荐策略调 adopt）。 */
+  acceptPreJudge(raceId: string): void {
+    log.info('race', 'accept pre-judge requested', { raceId });
+    this.orchestrator.acceptPreJudge(raceId);
+  }
+
+  /** 忽略 AI 初审推荐，回到纯人工 4 选 1。 */
+  dismissPreJudge(raceId: string): void {
+    log.info('race', 'dismiss pre-judge requested', { raceId });
+    this.orchestrator.dismissPreJudge(raceId);
   }
 
   /** ✂ 剔除选手（标记式；约束与竞态处理在编排器）。 */

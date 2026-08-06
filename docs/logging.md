@@ -7,7 +7,7 @@
 
 ## 1. 存储结构
 
-日志根目录：`userData/logs/`（绿色版 = exe 同级 `data/logs/`）
+日志根目录：`userData/logs/`（默认 `%APPDATA%\CyberSlots/logs/`）
 
 | 文件 | 内容 | 写入方 |
 |---|---|---|
@@ -59,6 +59,7 @@
 | `session` | 会话创建/prompt 回合（含耗时）/分叉/关闭/删除、引擎事件错误、持久化 |
 | `engine.codex` / `engine.kimi` / `engine.omp` / `engine.claude` / `engine.antigravity` | 引擎进程 spawn（命令行摘要）/意外退出（含 stderr 尾部）/spawn 失败/KAP WS 重连 |
 | `host.opencode` / `host.kap` | 共享 server 进程 spawn/ready/exit |
+| `browser` / `browser.host` | browser use 工具服务：工具调用的摘要审计（动作类型/目标选择器或坐标/耗时/成功否——截图、页面 DOM、输入文本内容**绝不落盘**）、受管 Chrome spawn/就绪/退出、MCP 注册与降级 |
 | `proxy.codex` / `proxy.kimi` | 内置 ai-server 路由前端（本程序 utilityProcess 组件） |
 | `race` | 赛马创建/阶段流转/用户动作/阶段链失败 |
 | `cron` | 定时任务触发/完成/失败/持久化 |
@@ -103,6 +104,7 @@ rlog.error('chat', 'sessionPrompt ipc failed', { sessionId }, err);
 | 引擎 stdout 正文/协议消息流 | **不进本日志**（属引擎执行内容；事件流经 EngineEvent 进 UI） |
 | 引擎进程 spawn 命令行摘要（脱敏）、exit code、意外退出时的 stderr 尾部摘录 | 本日志 `engine.*`（排障现场） |
 | 未知协议事件/被拒方法/解析失败的原始报文样本 | `compat-audit.jsonl`（审计通道，非运行日志） |
+| browser/computer 工具的截图、页面 DOM、页面正文、输入文本内容 | **任何地方都不落盘**（截图仅存内存直供面板/审批卡；日志只记 `browser` scope 摘要；compat-audit 不混用） |
 | 密钥/token | 任何地方都不出现（`data` 递归打码 + env 注入不落日志） |
 
 ## 7. 查看方式

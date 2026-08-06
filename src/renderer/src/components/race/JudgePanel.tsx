@@ -5,7 +5,7 @@
  *   ④c 批注 → 裁判修订（v+1）→ 定稿交给 Builder。
  */
 
-import { Check, Maximize2, PenLine, Square } from 'lucide-react';
+import { Check, Maximize2, PenLine, Square, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,6 +15,7 @@ import { BrandHero, BrandSpinner } from '../brand';
 import type { RaceAdoptStrategy, RaceGroup, RacerRole } from '@shared/race';
 import { RACER_ROLES } from '@shared/race';
 import { adoptStrategyLabel, useT } from '../../i18n';
+import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS } from '../EngineIcon';
 import ArtifactZoom from './ArtifactZoom';
@@ -28,7 +29,7 @@ export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup
   const revokeAdopt = useRaceStore((s) => s.revokeAdopt);
   // 裁判回合可手动中止（中止后走错误横幅的「↻ 重试当前阶段」重跑）。
   const stopJudge = race.sessions.judge
-    ? (): void => void window.cyberslots.sessionCancel(race.sessions.judge!)
+    ? (): void => void useChatStore.getState().cancelSession(race.sessions.judge!)
     : undefined;
   // 回看态（从电路回点裁判节点）：裁判环节已完成，最终方案只读展示，
   // 不提供采纳/批注/定稿等任何可变操作。
@@ -45,29 +46,60 @@ export default function JudgePanel({ race, readOnly = false }: { race: RaceGroup
     return (
       <Working
         race={race}
-        label={t('raceJudgeWorking', { strategy: adoptStrategyLabel(t, race.adopt.strategy) })}
+        label={
+          race.preJudgeMode === 'auto' || race.preJudgeMode === 'designate'
+            ? t('racePreJudgeAutoWorking', { strategy: adoptStrategyLabel(t, race.adopt.strategy) })
+            : t('raceJudgeWorking', { strategy: adoptStrategyLabel(t, race.adopt.strategy) })
+        }
         onStop={stopJudge}
-        onRevoke={() => void revokeAdopt()}
+        onRevoke={race.preJudgeMode === 'auto' || race.preJudgeMode === 'designate' ? undefined : () => void revokeAdopt()}
       />
     );
   return <ReviewStep race={race} stopJudge={stopJudge} />;
 }
 
 /** ④a 采纳决策：先由你定方向；对各方方案不满意可回退重跑双规划。
- *  策略集按在场选手动态生成（剔除者退场：剔 B 后剩 A+C → 只列 A/C 策略）。 */
+ *  策略集按在场选手动态生成（剔除者退场：剔 B 后剩 A+C → 只列 A/C 策略）。
+ *  AI 初审模式（suggest/auto）下：进入时先显示"AI 评审中"等待态，
+ *  推荐产出后显示 banner（结论一行 + 展开/采纳/忽略），复用 ArtifactZoom 弹窗查看详情。 */
 function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
   const t = useT();
   const adopt = useRaceStore((s) => s.adopt);
+  const acceptPreJudge = useRaceStore((s) => s.acceptPreJudge);
+  const dismissPreJudge = useRaceStore((s) => s.dismissPreJudge);
   const openTune = useRaceStore((s) => s.openTune);
   const restartPlanning = useRaceStore((s) => s.restartPlanning);
+  const isPreJudging = useRaceStore((s) => !!s.preJudging[race.id]);
   const [strategy, setStrategy] = useState<RaceAdoptStrategy | null>(null);
   const [comment, setComment] = useState('');
+  const [zoomPreJudge, setZoomPreJudge] = useState(false);
+
+  const preJudge = race.preJudgeRecommendation;
+  const hasPreJudge = !!preJudge;
+  // AI 初审推荐到达时自动选中推荐策略（用户可改）。
+  useEffect(() => {
+    if (preJudge && !strategy) setStrategy(preJudge.strategy);
+  }, [preJudge, strategy]);
+
+  // AI 初审评审中：显示大场面等待态（不渲染策略网格，避免误导）。
+  const preJudgeActive = race.preJudgeMode && race.preJudgeMode !== 'off' && !hasPreJudge && !race.adopt;
+  if (preJudgeActive && isPreJudging) {
+    return (
+      <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-3 rounded-2xl border border-line bg-bg-panel/70 py-10">
+        <BrandHero size={48} />
+        <span className="text-[12.5px] text-ink-soft">{t('racePreJudgeReviewing')}</span>
+      </div>
+    );
+  }
+
   const letters = RACER_ROLES.filter((r) => !!race.roles[r] && !race.eliminated?.includes(r)).map((r) => LETTER[r]);
   const strategies: RaceAdoptStrategy[] = [
     ...letters.map((l) => `adopt${l}` as RaceAdoptStrategy),
     ...letters.map((l) => `prefer${l}` as RaceAdoptStrategy),
   ];
   const judge = race.roles.judge;
+  // auto 模式下 banner 为只读（不可采纳/忽略，AI 已自动采纳）。
+  const isAutoMode = race.preJudgeMode === 'auto';
   return (
     <div className="mx-auto min-h-0 w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-bg-panel/70 p-5">
       <div className="mb-1 flex items-baseline gap-2 text-[14px] font-semibold">
@@ -82,6 +114,52 @@ function AdoptStep({ race }: { race: RaceGroup }): JSX.Element {
       <div className="mb-4 text-[12px] text-ink-faint">
         {t('raceAdoptDesc')}
       </div>
+
+      {/* AI 初审 banner：结论一行 + 展开（弹窗详情）/ 采纳 / 忽略。
+          auto 模式下为只读过场（AI 已自动采纳，banner 仅展示推荐 + 查看理由）。 */}
+      {hasPreJudge && preJudge && (
+        <div className="mb-3 flex items-center gap-2 rounded-xl border border-accent/30 bg-accent-soft/50 px-3 py-2 text-[12px]">
+          <span className="shrink-0 text-[13px]">⚡</span>
+          <span className="min-w-0 flex-1 truncate text-ink-soft">
+            <span className="font-medium text-ink">{t('racePreJudgeRecommend')}：</span>
+            {adoptStrategyLabel(t, preJudge.strategy)}
+            {preJudge.summary && <span className="text-ink-faint"> · {preJudge.summary}</span>}
+          </span>
+          <button
+            onClick={() => setZoomPreJudge(true)}
+            title={t('racePreJudgeExpandTitle')}
+            className="shrink-0 rounded-lg border border-line bg-bg-input px-2 py-0.5 text-[11px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+          >
+            {t('racePreJudgeExpand')}
+          </button>
+          {!isAutoMode && (
+            <>
+              <button
+                onClick={() => void acceptPreJudge()}
+                className="shrink-0 rounded-lg bg-accent px-2.5 py-0.5 text-[11px] font-semibold text-white transition hover:opacity-90"
+              >
+                {t('racePreJudgeAccept')}
+              </button>
+              <button
+                onClick={() => void dismissPreJudge()}
+                title={t('racePreJudgeDismissTitle')}
+                className="shrink-0 rounded-lg p-0.5 text-ink-faint transition hover:text-ink"
+              >
+                <X size={12} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {zoomPreJudge && preJudge && (
+        <ArtifactZoom
+          title={t('racePreJudgeDetailTitle')}
+          text={preJudge.detail}
+          onClose={() => setZoomPreJudge(false)}
+        />
+      )}
+
       <div className={`mb-3 grid gap-2 ${letters.length > 2 ? 'grid-cols-3' : 'grid-cols-2'}`}>
         {strategies.map((st) => (
           <button
@@ -277,6 +355,7 @@ function Working({
 }): JSX.Element {
   const t = useT();
   const sessionId = race.sessions.judge;
+  const cancelling = useChatStore((s) => (sessionId ? !!s.cancelling[sessionId] : false));
   const cfg = race.roles.judge;
   const subtitle = cfg
     ? `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || t('raceDefaultModel')}${cfg.effort ? ` · ${cfg.effort}` : ''}`
@@ -297,11 +376,12 @@ function Working({
         )}
         {onStop && (
           <button
-            title={t('raceStopJudgeTitle')}
+            disabled={cancelling}
+            title={cancelling ? t('stopping') : t('raceStopJudgeTitle')}
             onClick={onStop}
-            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-faint transition hover:border-err hover:text-err"
+            className="flex items-center gap-1 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-faint transition hover:border-err hover:text-err disabled:opacity-40"
           >
-            <Square size={10} fill="currentColor" /> {t('raceCancel')}
+            {cancelling ? <BrandSpinner size={11} /> : <Square size={10} fill="currentColor" />} {t('raceCancel')}
           </button>
         )}
       </div>

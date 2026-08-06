@@ -1,13 +1,14 @@
 /**
  * UndoConfirmDialog — 「回退到某个提问」的确认弹窗（Claude Code 的
- * Confirm Undo 同款）：列出将被一并撤销的文件变更（+N -M / A·M·D /
- * 多会话共编警示）；无变更或无快照时给出降级说明。确认即执行回退。
+ * Confirm Undo 同款）：列出将被一并撤销的本会话文件变更（+N -M / A·M·D /
+ * 多会话共编警示）；空集但有未归属变更时给出数量提示；无快照时给出降级
+ * 说明。确认即执行回退。
  */
 
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 
-import type { SessionChangeEntry } from '@shared/ipc';
+import type { SessionChangeEntry, UndoPreview } from '@shared/ipc';
 import { useT } from '../i18n';
 import { BrandSpinner } from './brand';
 
@@ -23,8 +24,8 @@ export default function UndoConfirmDialog({
   onConfirm,
   onClose,
 }: {
-  /** undefined = 加载中；null = 该提问无快照；[] = 无文件变更。 */
-  preview: SessionChangeEntry[] | null | undefined;
+  /** undefined = 加载中；null = 该提问无快照；{files: []} = 无本会话文件变更。 */
+  preview: UndoPreview | null | undefined;
   onConfirm: () => Promise<void>;
   onClose: () => void;
 }): JSX.Element {
@@ -67,13 +68,18 @@ export default function UndoConfirmDialog({
           </div>
         ) : preview === null ? (
           <div className="text-ui leading-6 text-ink-soft">{t('undoConfirmNoSnapshot')}</div>
-        ) : preview.length === 0 ? (
-          <div className="text-ui leading-6 text-ink-soft">{t('undoConfirmNoFiles')}</div>
+        ) : preview.files.length === 0 ? (
+          <div className="text-ui leading-6 text-ink-soft">
+            {t('undoConfirmNoFiles')}
+            {/* 空集兜底：快照后有变更但不归属于本对话（用户手改/他会话/构建副作用），
+                不会被回退 —— 数量显式透出，避免文件残留却无任何信号。 */}
+            {preview.unattributed > 0 && <div className="mt-1 text-ink-faint">{t('undoConfirmUnattributed', { n: preview.unattributed })}</div>}
+          </div>
         ) : (
           <>
             <div className="text-ui leading-6 text-ink-soft">{t('undoConfirmFiles')}</div>
             <div className="mt-2 min-h-0 overflow-y-auto rounded-xl border border-line bg-bg-input py-1">
-              {preview.map((c) => (
+              {preview.files.map((c) => (
                 <div key={c.path} title={c.path} className="flex items-center gap-2 px-3 py-1.5 text-[12.5px]">
                   <span className={`w-3 shrink-0 text-center font-mono text-[10px] ${STATUS_BADGE[c.status].cls}`}>{STATUS_BADGE[c.status].label}</span>
                   <span className="min-w-0 flex-1 truncate">{c.name}</span>
@@ -90,6 +96,10 @@ export default function UndoConfirmDialog({
                 </div>
               ))}
             </div>
+            {/* 跨会话共编警示：共享 cwd 下磁盘物理共享，回退会一并还原并影响其他会话。 */}
+            {preview.files.some((c) => c.sessions > 1) && (
+              <div className="mt-2 text-[12px] leading-5 text-warn">{t('undoConfirmShared')}</div>
+            )}
           </>
         )}
 

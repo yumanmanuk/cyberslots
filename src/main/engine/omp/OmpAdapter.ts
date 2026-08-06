@@ -38,6 +38,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   type Client,
+  type McpServerStdio,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
@@ -136,6 +137,9 @@ export interface OmpAdapterOptions {
    *  multi-root：进路径白名单 + 系统提示词 <workspace-roots> 区块，
    *  并随会话 header 持久化、resume 后合并恢复）。 */
   extraDirs?: string[];
+  /** ACP newSession/resume/fork 的 MCP 服务器注册（browser use 工具服务；
+   *  缺省 = []。仅在 settings.browserUse 开时由 SessionManager 注入）。 */
+  mcpServers?: McpServerStdio[];
 }
 
 interface PendingPermission {
@@ -295,7 +299,7 @@ export class OmpAdapter implements EngineAdapter {
     const client = this.client!;
     if (this.resumeSessionId) {
       try {
-        const params = { sessionId: this.resumeSessionId, cwd: this.opts.cwd, mcpServers: [] };
+        const params = { sessionId: this.resumeSessionId, cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] };
         const res = await withTimeout(
           this.resumeCap ? client.resumeSession(params as never) : this.loadSessionSuppressed(params),
           INIT_TIMEOUT_MS,
@@ -316,7 +320,7 @@ export class OmpAdapter implements EngineAdapter {
       }
     }
     const sess = await withTimeout(
-      client.newSession({ cwd: this.opts.cwd, mcpServers: [] }),
+      client.newSession({ cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] }),
       INIT_TIMEOUT_MS,
       'ACP session/new',
     );
@@ -427,6 +431,8 @@ export class OmpAdapter implements EngineAdapter {
 
   async cancel(): Promise<void> {
     if (!this.promptActive) return;
+    // 同 kimi ACP：挂起权限一并取消，避免引擎停在等待授权上。
+    for (const requestId of [...this.pendingPermissions.keys()]) this.answerPermission(requestId);
     await this.requireClient().cancel({ sessionId: this.sessionId });
   }
 
@@ -540,7 +546,7 @@ export class OmpAdapter implements EngineAdapter {
     const client = this.requireClient();
     try {
       const res = await withTimeout(
-        client.unstable_forkSession({ sessionId: this.sessionId, cwd: this.opts.cwd, mcpServers: [] } as never),
+        client.unstable_forkSession({ sessionId: this.sessionId, cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] } as never),
         INIT_TIMEOUT_MS,
         'ACP session/fork',
       );
@@ -774,9 +780,14 @@ export class OmpAdapter implements EngineAdapter {
           current: this.uiMode(current),
           available: values as PermissionMode[],
         });
+      } else if (id === 'thinking') {
+        // omp ACP 的 thinking configOption 带完整精细档（off/auto + high/max 等）。
+        // 推给 renderer 让 effort 选择器展示全部档位。
+        this.emit({ type: 'thinking.update', current, available: values });
       }
     }
   }
+
 
   private requireClient(): ClientSideConnection {
     if (!this.client || this.disposed) throw new Error('omp session is not running');

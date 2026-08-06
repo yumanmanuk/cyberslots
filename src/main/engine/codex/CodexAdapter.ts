@@ -87,10 +87,16 @@ const SANDBOX_POLICY_TAG: Record<string, string> = {
 };
 
 export class CodexAdapter implements EngineAdapter {
+  /** steer 被 RPC 接受后，引擎会在真正消费该输入（drain pending input 并产出
+   *  userMessage item）时异步确认 —— SessionManager 据此延迟 user.echo。 */
+  readonly steerConfirmable = true;
+
   private child: ChildProcessWithoutNullStreams | undefined;
   private rpc: NdjsonRpc | undefined;
   private threadId = '';
   private activeCodexTurnId = '';
+  /** 已注入、等待引擎确认消费的 client_user_message_id 集合。 */
+  private readonly pendingSteerIds = new Set<string>();
   private turnId = 0;
   private disposed = false;
   private modelId: string;
@@ -289,6 +295,7 @@ export class CodexAdapter implements EngineAdapter {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.pendingSteerIds.clear();
     for (const [id, pending] of this.pendingApprovals) {
       pending.resolve('cancel');
       this.pendingApprovals.delete(id);
@@ -370,6 +377,10 @@ export class CodexAdapter implements EngineAdapter {
   }
 
   async cancel(): Promise<void> {
+    // 先取消挂起的审批：中断时若还挂着 approval，引擎可能停在等待授权上，
+    // turn/interrupt 也救不回（「停止没反应」的另一形态）。answerPermission(undefined)
+    // 走既有 cancel 决策 + permission.resolved 收尾。
+    for (const requestId of [...this.pendingApprovals.keys()]) this.answerPermission(requestId);
     if (!this.activeCodexTurnId) {
       // 回合在跑但 turn id 还没到（排队消息刚派发/自发回合刚起步）：
       // 记账等 id 到达后补发中断 — 此前直接 return，停止点了等于没点。
@@ -466,17 +477,36 @@ export class CodexAdapter implements EngineAdapter {
   }
 
   /** Native mid-turn steering (turn/steer). Review/compact turns reject it. */
-  async steer(text: string): Promise<boolean> {
+  async steer(text: string, attachments?: string[], messageId?: string): Promise<boolean> {
     if (!this.activeCodexTurnId) return false;
     try {
+      // 与 prompt 同一套输入装配：图片走 localImage 块，其余退化为路径附注，
+      // 保证 steer 注入时附件不再被静默丢弃。
+      const input: Json[] = [];
+      if (text.trim()) input.push({ type: 'text', text });
+      for (const path of attachments ?? []) {
+        if (/\.(png|jpe?g|gif|webp)$/i.test(path)) input.push({ type: 'localImage', path });
+        else input.push({ type: 'text', text: `[附件] ${path}` });
+      }
+      // 先登记再发请求：item/started 通知可能早于 turn/steer 响应到达，
+      // 晚登记会让确认锚点错过该通知（退化为 60s 超时兜底回显）。
+      if (messageId) this.pendingSteerIds.add(messageId);
       await this.requireRpc().request('turn/steer', {
         threadId: this.threadId,
-        turnId: this.activeCodexTurnId,
-        input: [{ type: 'text', text }],
+        expectedTurnId: this.activeCodexTurnId,
+        clientUserMessageId: messageId ?? null,
+        input,
       });
       return true;
-    } catch {
-      return false; // ActiveTurnNotSteerable etc. — caller re-queues
+    } catch (err) {
+      if (messageId) this.pendingSteerIds.delete(messageId);
+      // ActiveTurnNotSteerable（review/compact）等 — 调用方降级排队；留痕便于排查。
+      log.warn('engine.codex', 'turn/steer rejected', {
+        threadId: this.threadId,
+        turnId: this.activeCodexTurnId,
+        error: errorMessage(err),
+      });
+      return false;
     }
   }
 
@@ -659,6 +689,9 @@ export class CodexAdapter implements EngineAdapter {
       }
       case 'turn/completed': {
         const turn = params.turn as Json | undefined;
+        // 回合收尾：未消费的 steer 确认锚点作废（pending input 被中断清理 /
+        // 引擎吞掉），后续 item 不再匹配；回显由 SessionManager 超时兜底。
+        this.pendingSteerIds.clear();
         // 引擎自发回合（goal continuation / compact / review，非 prompt 发起）
         // 不产出统计行（usage 基线是 prompt 回合口径，算了也是错的），但必须
         // 收尾状态机 — 此前直接吞事件导致 UI 永远停在「执行中/等待授权」。
@@ -772,6 +805,16 @@ export class CodexAdapter implements EngineAdapter {
     if (!item) return;
     const id = String(item.id ?? '');
     switch (item.type) {
+      case 'userMessage': {
+        // steer 确认锚点：pending input 被引擎 drain 时会产出带
+        // client_user_message_id 的 userMessage item —— 此刻才真正发给 LLM，
+        // 此前 turn/steer 只是被接受。其余 userMessage 继续忽略（由 delta 覆盖）。
+        const clientId = String(item.clientId ?? '');
+        if (clientId && this.pendingSteerIds.delete(clientId)) {
+          this.emit({ type: 'steer.confirmed', turnId, messageId: clientId });
+        }
+        return;
+      }
       case 'commandExecution': {
         const status = mapItemStatus(String(item.status ?? 'inProgress'));
         this.emit({

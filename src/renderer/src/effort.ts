@@ -30,6 +30,10 @@ export interface EffectiveEffort {
   options: string[];
   /** value 在 options 中的下标。 */
   index: number;
+  /** 是否可显式下发：override 生效，或引擎/配置提供了可靠默认档。
+   *  false = 展示值仅作预览（opencode 目录无默认档字段且未显选），
+   *  发送时不下发，跟随引擎当前档。 */
+  explicit: boolean;
 }
 
 export interface EffortResolveContext {
@@ -44,11 +48,13 @@ export interface EffortResolveContext {
   codexDefaultEffort: string | undefined;
   opencodeCatalog: OpencodeCatalog | null | undefined;
   ompCatalog: OmpCatalog | null | undefined;
+  /** omp ACP 运行时推送的 thinking 配置选项值域（优先于静态目录）。 */
+  ompThinking?: { current: string; available: string[] };
 }
 
-function finalize(override: string | undefined, options: string[], fallback: string): EffectiveEffort {
+function finalize(override: string | undefined, options: string[], fallback: string, explicit = true): EffectiveEffort {
   const value = override && options.includes(override) ? override : fallback;
-  return { value, options, index: Math.max(0, options.indexOf(value)) };
+  return { value, options, index: Math.max(0, options.indexOf(value)), explicit };
 }
 
 export function resolveEffectiveEffort(ctx: EffortResolveContext): EffectiveEffort | undefined {
@@ -61,21 +67,33 @@ export function resolveEffectiveEffort(ctx: EffortResolveContext): EffectiveEffo
       return finalize(ctx.override, options, entry?.defaultEffort ?? options[options.length - 1]!);
     }
     case 'omp': {
-      // 目录懒加载未就绪 → 无显示值（控件占位 spinner），不下发。
+      // ACP 运行时推送的 thinking configOptions 优先（精细档 = off/auto/high/max 等）。
+      if (ctx.ompThinking?.available.length) {
+        const options = ctx.ompThinking.available;
+        return finalize(ctx.override, options, ctx.ompThinking.current || options[0]!);
+      }
+      // ACP 未推送时，回退到静态目录（omp models --json）。
       if (!ctx.ompCatalog) return undefined;
       const entry = ctx.ompCatalog.models.find((m) => m.slug === ctx.activeModel);
       if (entry && entry.reasoning === false) return undefined; // 非思考模型无档位面
       const options = entry?.efforts?.length ? [...OMP_BASE_EFFORTS, ...entry.efforts] : OMP_BASE_EFFORTS;
-      return finalize(ctx.override, options, options[0]!);
+      // 需求约定「默认取最大档」：目录兜底默认取末档（auto 或精细档最高档）。
+      return finalize(ctx.override, options, options[options.length - 1]!);
     }
     case 'claude':
-      // 固定五档；未显选时展示默认 high —— 下发即 /effort 显式设置。
-      return finalize(ctx.override, CLAUDE_EFFORTS, 'high');
+      // 固定五档；未显选时展示默认 max —— 下发即 /effort 显式设置。
+      return finalize(ctx.override, CLAUDE_EFFORTS, 'max');
     case 'opencode': {
       const entry = ctx.opencodeCatalog?.models.find((m) => m.slug === ctx.activeModel);
       const options = entry?.efforts ?? [];
       if (!options.length) return undefined; // 无 reasoning variants → 无档位面
-      return finalize(ctx.override, options, entry?.defaultEffort ?? options[0]!);
+      if (ctx.override && options.includes(ctx.override)) return finalize(ctx.override, options, ctx.override);
+      if (entry?.defaultEffort && options.includes(entry.defaultEffort)) {
+        return finalize(undefined, options, entry.defaultEffort);
+      }
+      // 目录没有默认档字段（/config/providers 未提供）：未显选时展示首个
+      // variant 仅作预览；explicit=false → 发送不下发，跟随服务端默认。
+      return finalize(undefined, options, options[0]!, false);
     }
     case 'codex': {
       // 与 codex 自身优先级一致：override → 配置 model_reasoning_effort →

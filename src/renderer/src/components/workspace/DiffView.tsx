@@ -10,10 +10,7 @@ import { RotateCcw, X } from 'lucide-react';
 import type { SessionChangeDiff } from '@shared/ipc';
 import { BrandHero } from '../brand';
 import { useT } from '../../i18n';
-
-type Row = { t: 'ctx' | 'add' | 'del'; text: string; oldN?: number; newN?: number };
-
-const MAX_LINES = 3000;
+import { buildRows, type Row } from './diffRows';
 
 export default function DiffView({
   sessionId,
@@ -49,7 +46,7 @@ export default function DiffView({
   const dels = rows?.reduce((n, r) => n + (r.t === 'del' ? 1 : 0), 0) ?? 0;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
         <span className="min-w-0 flex-1 truncate text-ui font-medium" title={path}>
           {name}
@@ -99,48 +96,3 @@ export default function DiffView({
   );
 }
 
-function splitLines(s: string | null): string[] {
-  if (s == null) return [];
-  return s.length ? s.split('\n') : [];
-}
-
-/** LCS 回溯出统一 diff 行序列；超大文件降级为「全删+全增」避免卡顿。 */
-function buildRows(before: string | null, after: string | null): Row[] {
-  const a = splitLines(before);
-  const b = splitLines(after);
-  if (a.length > MAX_LINES || b.length > MAX_LINES) {
-    const rows: Row[] = [];
-    a.forEach((t, i) => rows.push({ t: 'del', text: t, oldN: i + 1 }));
-    b.forEach((t, i) => rows.push({ t: 'add', text: t, newN: i + 1 }));
-    return rows;
-  }
-  const n = a.length;
-  const m = b.length;
-  // LCS 长度表
-  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i]![j] = a[i] === b[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
-    }
-  }
-  // 回溯生成行
-  const rows: Row[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      rows.push({ t: 'ctx', text: a[i]!, oldN: i + 1, newN: j + 1 });
-      i++;
-      j++;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      rows.push({ t: 'del', text: a[i]!, oldN: i + 1 });
-      i++;
-    } else {
-      rows.push({ t: 'add', text: b[j]!, newN: j + 1 });
-      j++;
-    }
-  }
-  while (i < n) rows.push({ t: 'del', text: a[i]!, oldN: ++i });
-  while (j < m) rows.push({ t: 'add', text: b[j]!, newN: ++j });
-  return rows;
-}

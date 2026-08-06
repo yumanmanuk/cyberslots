@@ -14,13 +14,18 @@ node_modules/
 # ==== Build outputs ====
 out/
 dist/
+dist2/
+dist-icon/
+dist-test/
+dist-test2/
 dist-electron/
 build/
 release/
 *.tsbuildinfo
 
-# ==== Runtime data (portable ./data lives next to exe) ====
+# ==== Runtime data (default %APPDATA%\CyberSlots; custom pointer via .data-path.json) ====
 data/
+.data-path.json
 logs/
 *.log
 

@@ -5,18 +5,20 @@
  */
 
 import { app } from 'electron';
-import { BrowserWindow, Notification } from 'electron';
+import { BrowserWindow } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { rename as renameAsync, writeFile as writeFileAsync } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { WebContents } from 'electron';
 
-import type { EngineEvent, EngineEventEnvelope, GoalControlAction, PermissionMode, PermissionOptionView, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
+import type { EngineEvent, EngineEventEnvelope, EngineId, GoalControlAction, PermissionMode, PermissionOptionView, SessionMeta, UnifiedMessage, UsageBucket, UsageStatsQuery, UsageStatsResult } from '@shared/types';
 import { ENGINE_LABELS } from '@shared/types';
-import type { SessionChangeDiff, SessionChangeEntry } from '@shared/ipc';
+import type { CancelSessionResult, SearchHit, SessionChangeDiff, SessionChangeEntry, SessionSearchRequest, UndoPreview } from '@shared/ipc';
 import type { SessionCreateRequest } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
+import type { McpServerStdio } from '@agentclientprotocol/sdk';
 import type { EngineAdapter } from './EngineAdapter';
 import { KimiAdapter } from './kimi/KimiAdapter';
 import { KimiKapAdapter } from './kimi/KimiKapAdapter';
@@ -41,6 +43,7 @@ import {
 } from '../config/engineConfigs';
 import type { SettingsStore } from '../config/settings';
 import { L } from '../i18n';
+import { notifyWithSession } from '../notify';
 import type { AiServerHost } from '../proxy/AiServerHost';
 import { routeSlashPrompt } from '../slash/slashService';
 
@@ -49,6 +52,23 @@ interface LiveSession {
   adapter: EngineAdapter | undefined;
   /** 后台启动中的 promise — prompt 等路径据此汇合，避免重复 spawn。 */
   starting?: Promise<void>;
+  /** 用户 setModel 在途的期望模型 — 引擎启动完成时回推的「启动时模型」
+   *  快照不得覆盖它，否则进入对话后快速改模型会被旧快照重置。 */
+  desiredModel?: string;
+}
+
+/** browser use 工具服务提供方契约（由 src/main/browser/BrowserService 实现，
+ *  settings.browserUse 开时经 setBrowserTools 注入；engine 侧只做纯新增接线，
+ *  flag 关闭即回到注入前的行为）。 */
+export interface BrowserToolProvider {
+  /** ACP（kimi/omp）每会话 MCP 注册（stdio，env 携带 sessionId 供审批路由）。 */
+  acpMcpServers(sessionId: string): McpServerStdio[];
+  /** claude --mcp-config 合并配置（与用户 claudeMcpConfig 叠加，按会话物化）。 */
+  claudeMcpConfigPath(sessionId: string): string;
+  /** codex `-c mcp_servers.*` 配置覆盖参数。 */
+  codexConfigArgs(sessionId: string): string[];
+  /** 无 MCP 接线面的引擎（opencode / antigravity / kimi-KAP）降级记录。 */
+  logDegraded(engine: EngineId): void;
 }
 
 /** 从消息文件抽取的单回合用量行（turn_end 折叠）。 */
@@ -91,6 +111,31 @@ export class SessionManager {
   private readonly turnIdBase = new Map<string, number>();
   /** 本进程已发出的最大会话全局回合号（重映射时同步推进，供续号取底）。 */
   private readonly maxSessionTurnId = new Map<string, number>();
+  /** codex 等「steer 可确认」引擎的待回显登记：RPC 已接受、引擎尚未真正
+   *  消费（drain pending input）的 steer。确认或超时后补发 user.echo。 */
+  private readonly pendingSteerEcho = new Map<string, Map<string, { text: string; attachments?: string[]; timer: ReturnType<typeof setTimeout> }>>();
+  /** steer 确认兜底：引擎接受后迟迟没有 userMessage item（回合中断/连接
+   *  异常）时按已送达回显，避免队列项和气泡永久卡在「引导中」。 */
+  private readonly STEER_CONFIRM_TIMEOUT_MS = 60_000;
+
+  /** 逐 token IPC 合批（P0）：每帧（16ms）最多一次 webContents.send，
+   *  多会话并发时把 IPC 唤醒从 N×token 频率降到 ~60 次/秒。 */
+  private batchQueue: EngineEventEnvelope[] = [];
+  private batchTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly BATCH_WINDOW_MS = 16;
+
+  /** 冷启动并发软限（P2）：同时 spawn+握手最多 2 个引擎（不限制已运行
+   *  总数，赛马等并行场景只是排队逐个拉起，避免 N 个 CLI 同时冷启动
+   *  抢 CPU/内存峰值）。 */
+  private readonly MAX_CONCURRENT_SPAWNS = 2;
+  private activeSpawns = 0;
+  private spawnQueue: Array<() => void> = [];
+
+  /** 消息文件异步写串行链（sessionId → promise）：保顺序、防并发覆盖。 */
+  private readonly messageWriteChains = new Map<string, Promise<void>>();
+  /** sessions.json 异步写串行链。 */
+  private metaWriteChain: Promise<void> = Promise.resolve();
+  private persistMetasTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly settings: SettingsStore,
@@ -105,6 +150,19 @@ export class SessionManager {
   /** Renderer webContents that receives engine events. */
   attach(target: WebContents): void {
     this.target = target;
+  }
+
+  /** browser use 工具服务提供方（可选；flag 开时由 index.ts 注入）。 */
+  private browserTools: BrowserToolProvider | undefined;
+  /** 工具服务层审批应答拦截器（requestId 前缀 `browser:` 路由，不进引擎）。 */
+  private permissionInterceptor: ((requestId: string, optionId?: string) => boolean) | undefined;
+
+  setBrowserTools(provider: BrowserToolProvider | undefined): void {
+    this.browserTools = provider;
+  }
+
+  setPermissionInterceptor(fn: ((requestId: string, optionId?: string) => boolean) | undefined): void {
+    this.permissionInterceptor = fn;
   }
 
   list(): SessionMeta[] {
@@ -135,7 +193,14 @@ export class SessionManager {
         workspace && workspace.folders.length > 1
           ? `本会话绑定多根工作区「${workspace.name}」，包含以下根目录（当前工作目录是第一个，其余目录也属于本项目范围，可用绝对路径访问）：\n${workspace.folders.join('\n')}`
           : undefined,
-      modelId: req.modelId ?? '',
+      // 新会话默认模型优先级：请求显式指定 → 本程序每引擎默认 → antigravity
+      // 旧字段回退 → 空（引擎自身配置默认）。历史会话不经过 create，不受影响。
+      modelId:
+        req.modelId ??
+        settings.engineDefaults?.[req.engine]?.modelId ??
+        (req.engine === 'antigravity' ? settings.antigravityDefaultModel : '') ??
+        '',
+      effort: req.effort || undefined,
       // antigravity headless 无法交互式审批 → 默认自动放行（否则工作区外读写/shell 均被软拒）。
       permissionMode: req.permissionMode ?? (req.engine === 'antigravity' ? 'auto' : settings.defaultPermissionMode),
       status: 'starting',
@@ -153,6 +218,7 @@ export class SessionManager {
       workspaceId: meta.workspaceId,
       raceId: meta.raceId,
       modelId: meta.modelId || undefined,
+      effort: meta.effort,
       permissionMode: meta.permissionMode,
     });
 
@@ -258,6 +324,20 @@ export class SessionManager {
   }
 
   private async startRuntime(s: LiveSession): Promise<void> {
+    // 冷启动并发软限：只约束 spawn+握手并发，不限制已运行引擎总数。
+    if (this.activeSpawns >= this.MAX_CONCURRENT_SPAWNS) {
+      await new Promise<void>((resolve) => this.spawnQueue.push(resolve));
+    }
+    this.activeSpawns += 1;
+    try {
+      await this.startRuntimeInner(s);
+    } finally {
+      this.activeSpawns -= 1;
+      this.spawnQueue.shift()?.();
+    }
+  }
+
+  private async startRuntimeInner(s: LiveSession): Promise<void> {
     const wasResume = !!s.meta.engineSessionId;
     const adapter = await this.buildAdapter(s.meta, s.meta.engineSessionId);
     s.adapter = adapter;
@@ -326,9 +406,10 @@ export class SessionManager {
     }
   }
 
-  async cancel(sessionId: string): Promise<void> {
+  async cancel(sessionId: string): Promise<CancelSessionResult> {
     log.info('session', 'turn cancel requested', { sessionId });
     const s = this.require(sessionId);
+    let goalPauseFailed = false;
     // 官方 codex 客户端行为（TUI pause_active_goal_for_interrupt）：中断时
     // 有活跃 goal 一并暂停 —— 否则 codex 回合中断后 idle 会立刻自动重启
     // goal 续跑，「停止」看起来无效。（kimi 引擎中断会自己 pauseOnInterrupt，
@@ -336,12 +417,24 @@ export class SessionManager {
     if (this.goalActive.get(sessionId) && s.adapter?.controlGoal) {
       // pause 失败/超时都不能拖住停止 —— 引擎卡死时停止按钮必须照样可用，
       // 3s 上限后照常 interrupt（暂停失败的最坏结果是续跑再起，再点一次即可）。
+      let pauseRejected = false;
       const pause = s.adapter.controlGoal('pause').catch((err) => {
+        pauseRejected = true;
         log.warn('session', 'goal pause on cancel failed', { sessionId, error: String(err) });
       });
-      await Promise.race([pause, new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
+      const settled = await Promise.race([
+        pause.then(
+          () => 'ok' as const,
+          () => 'err' as const,
+        ),
+        new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 3000)),
+      ]);
+      // 超时 = 未确认暂停成功（引擎卡在 goal 续跑里），照算软失败并回传 UI；
+      // reject 由 pauseRejected 捕获，同样不能静默。
+      goalPauseFailed = pauseRejected || settled === 'timeout';
     }
     await s.adapter?.cancel();
+    return { goalPauseFailed: goalPauseFailed || undefined };
   }
 
   /** 预热：选中会话时提前唤醒引擎（已在跑则无操作），
@@ -391,6 +484,7 @@ export class SessionManager {
       chatMode: src.meta.chatMode,
       workspaceId: src.meta.workspaceId,
       modelId: src.meta.modelId,
+      effort: src.meta.effort,
       permissionMode: src.meta.permissionMode,
       engineSessionId: claudeForkNewId ?? native?.engineSessionId, // undefined → fresh session on revive
       forkPendingFromId: claudeForkPending,
@@ -407,7 +501,7 @@ export class SessionManager {
     };
     this.sessions.set(id, { meta, adapter: undefined });
     this.persistMetas();
-    this.saveMessages(id, history);
+    await this.saveMessages(id, history);
     log.info('session', 'session forked', {
       sessionId: id,
       parentId: src.meta.id,
@@ -483,7 +577,7 @@ export class SessionManager {
       ),
       createdAt: Date.now(),
     };
-    this.saveMessages(id, [...history, divider]);
+    await this.saveMessages(id, [...history, divider]);
     log.info('session', 'session forked to engine', {
       sessionId: id,
       parentId: src.meta.id,
@@ -526,8 +620,8 @@ export class SessionManager {
     if (s) await this.changes.accept(sessionId, s.meta.cwd, path);
   }
 
-  /** 回退到某提问将撤销的文件清单；null = 该提问无快照（旧消息/cron 注入）。 */
-  undoPreview(sessionId: string, messageId: string): Promise<SessionChangeEntry[] | null> {
+  /** 回退到某提问将撤销的本会话文件清单 + 未归属变更计数；null = 该提问无快照（旧消息/cron 注入）。 */
+  undoPreview(sessionId: string, messageId: string): Promise<UndoPreview | null> {
     const s = this.sessions.get(sessionId);
     return s ? this.changes.undoPreview(sessionId, s.meta.cwd, messageId) : Promise.resolve(null);
   }
@@ -570,12 +664,92 @@ export class SessionManager {
   }
 
   /** Steer the running turn; false = not supported / not steerable (re-queue). */
-  async steer(sessionId: string, text: string): Promise<boolean> {
+  async steer(sessionId: string, text: string, attachments?: string[], messageId?: string): Promise<boolean> {
     const s = this.require(sessionId);
     if (!s.adapter?.steer) return false;
-    const ok = await s.adapter.steer(text);
-    if (ok) this.forward(sessionId, { type: 'user.echo', turnId: 0, text });
-    return ok;
+    const confirmable = !!s.adapter.steerConfirmable && !!messageId;
+    let ok = false;
+    if (confirmable) {
+      // 预登记：引擎的 userMessage item 通知可能早于 turn/steer 响应恢复
+      // 到达（同一 JSONL chunk 内先于 await 恢复被处理），晚登记会错过确认。
+      this.trackPendingSteerEcho(sessionId, messageId!, text, attachments);
+    }
+    try {
+      // 与普通提问同语义：注入前先拍「该提问发送前」的快照，作为回退还原点。
+      // 快照失败（引擎正在写盘/影子 git 不可用）不影响注入，undo 自动降级为
+      // 「无快照」消息级回退——最坏情况与旧行为一致，不会更糟。
+      if (messageId && s.meta.cwd) {
+        await this.changes.markPrompt(sessionId, s.meta.cwd, messageId).catch(() => undefined);
+      }
+      ok = await s.adapter.steer(text, attachments, messageId);
+    } finally {
+      // 注入失败/被拒（含抛错）时清理孤儿快照标记，避免台账堆积。
+      if (!ok && messageId) {
+        await this.changes.dropMark(sessionId, messageId).catch(() => undefined);
+        if (confirmable) this.cancelPendingSteerEcho(sessionId, messageId);
+      }
+    }
+    if (!ok) return false;
+    if (!confirmable) {
+      // kimi 等无确认能力的引擎：接受即视为已注入，立即回显（原行为）。
+      this.forward(sessionId, { type: 'user.echo', turnId: 0, text, attachments, messageId });
+    }
+    return true;
+  }
+
+  /** 登记待确认的 steer 回显；确认到达或超时后统一补发 user.echo。 */
+  private trackPendingSteerEcho(
+    sessionId: string,
+    messageId: string,
+    text: string,
+    attachments?: string[],
+  ): void {
+    this.cancelPendingSteerEcho(sessionId, messageId);
+    const timer = setTimeout(
+      () => this.flushPendingSteerEcho(sessionId, messageId),
+      this.STEER_CONFIRM_TIMEOUT_MS,
+    );
+    let byMessage = this.pendingSteerEcho.get(sessionId);
+    if (!byMessage) {
+      byMessage = new Map();
+      this.pendingSteerEcho.set(sessionId, byMessage);
+    }
+    byMessage.set(messageId, { text, attachments, timer });
+  }
+
+  /** 取消登记（注入被拒/会话关闭）：不回显、只清定时器。 */
+  private cancelPendingSteerEcho(sessionId: string, messageId: string): void {
+    const byMessage = this.pendingSteerEcho.get(sessionId);
+    const entry = byMessage?.get(messageId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    byMessage!.delete(messageId);
+    if (byMessage!.size === 0) this.pendingSteerEcho.delete(sessionId);
+  }
+
+  /** 确认/超时路径统一出口：补发 user.echo 并清理登记。 */
+  private flushPendingSteerEcho(sessionId: string, messageId: string, turnId = 0): void {
+    const byMessage = this.pendingSteerEcho.get(sessionId);
+    const entry = byMessage?.get(messageId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    byMessage!.delete(messageId);
+    if (byMessage!.size === 0) this.pendingSteerEcho.delete(sessionId);
+    if (!this.sessions.has(sessionId)) return; // 会话已关闭/删除：不再回显
+    this.forward(sessionId, {
+      type: 'user.echo',
+      turnId,
+      text: entry.text,
+      attachments: entry.attachments,
+      messageId,
+    });
+  }
+
+  private clearPendingSteerEcho(sessionId: string): void {
+    const byMessage = this.pendingSteerEcho.get(sessionId);
+    if (!byMessage) return;
+    for (const entry of byMessage.values()) clearTimeout(entry.timer);
+    this.pendingSteerEcho.delete(sessionId);
   }
 
   /** Engine-native goal (codex thread/goal 或 kimi KAP goal_objective)。
@@ -605,21 +779,46 @@ export class SessionManager {
 
   async setModel(sessionId: string, modelId: string): Promise<void> {
     const s = this.require(sessionId);
-    if (s.starting) await s.starting; // 后台启动中 — 等握手完再下发
-    await s.adapter?.setModel(modelId);
-    s.meta.modelId = modelId;
+    const prev = s.meta.modelId;
+    s.desiredModel = modelId; // 登记在等待之前 — 启动快照不得覆盖用户选择
+    try {
+      if (s.starting) await s.starting; // 后台启动中 — 等握手完再下发
+      await s.adapter?.setModel(modelId);
+      s.meta.modelId = modelId;
+    } catch (err) {
+      s.meta.modelId = prev; // 下发失败恢复原值（引擎实际状态未变）
+      throw err;
+    } finally {
+      if (s.desiredModel === modelId) s.desiredModel = undefined;
+    }
     this.touch(s.meta);
   }
 
-  async setMode(sessionId: string, mode: PermissionMode): Promise<void> {
+  /** 持久化会话级思考深度（渲染层 picker/新建默认写入；null = 清除，
+   *  回落到引擎默认解析链）。只改 meta，不碰引擎 —— 生效值由 renderer
+   *  在下一条 prompt 显式下发。 */
+  setEffort(sessionId: string, effort: string | null): void {
+    const s = this.require(sessionId);
+    const next = effort?.trim() ? effort : undefined;
+    if (s.meta.effort === next) return;
+    s.meta.effort = next;
+    this.forward(sessionId, { type: 'session.meta', patch: { effort: next } });
+    this.touch(s.meta);
+    log.info('session', 'session effort set', { sessionId, effort: next });
+  }
+
+  async setMode(sessionId: string, mode: PermissionMode): Promise<PermissionMode> {
     const s = this.require(sessionId);
     if (s.starting) await s.starting;
     await s.adapter?.setMode(mode);
     s.meta.permissionMode = mode;
     this.touch(s.meta);
+    return mode;
   }
 
   answerPermission(sessionId: string, requestId: string, optionId?: string): void {
+    // 工具服务层（browser use）审批应答按 requestId 前缀路由，不进引擎通道。
+    if (this.permissionInterceptor?.(requestId, optionId)) return;
     this.require(sessionId).adapter?.answerPermission(requestId, optionId);
   }
 
@@ -682,6 +881,7 @@ export class SessionManager {
   async close(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.clearPendingSteerEcho(sessionId);
     const hadAdapter = !!s.adapter;
     // Detach BEFORE dispose: an in-flight startRuntime checks this reference
     // after adapter.start() resolves and self-destructs instead of writing
@@ -707,6 +907,13 @@ export class SessionManager {
     this.turnIdBase.delete(sessionId);
     this.maxSessionTurnId.delete(sessionId);
     this.persistMetas();
+    // 等该会话在途的异步写完成再删文件，否则写链后置的 rename 会把
+    // 已删除的文件「复活」成孤儿（旧同步写不存在此窗口）。
+    const pendingWrite = this.messageWriteChains.get(sessionId);
+    if (pendingWrite) {
+      this.messageWriteChains.delete(sessionId);
+      await pendingWrite.catch(() => undefined);
+    }
     try {
       rmSync(this.messagesFile(sessionId), { force: true });
     } catch {
@@ -731,17 +938,97 @@ export class SessionManager {
     }
   }
 
-  saveMessages(sessionId: string, messages: UnifiedMessage[]): void {
-    try {
-      mkdirSync(join(app.getPath('userData'), 'messages'), { recursive: true });
-      writeFileSync(this.messagesFile(sessionId), JSON.stringify(messages), 'utf8');
-    } catch (err) {
-      log.error('session', 'save messages failed', { sessionId }, err);
-    }
+  /** 异步原子写（tmp → rename）+ 按会话串行化：不阻塞主进程事件循环，
+   *  且并发写不会乱序覆盖（旧实现 writeFileSync 全量阻塞主线程）。 */
+  saveMessages(sessionId: string, messages: UnifiedMessage[]): Promise<void> {
+    const file = this.messagesFile(sessionId);
+    const run = async (): Promise<void> => {
+      try {
+        mkdirSync(join(app.getPath('userData'), 'messages'), { recursive: true });
+        const tmp = `${file}.tmp`;
+        await writeFileAsync(tmp, JSON.stringify(messages), 'utf8');
+        await renameAsync(tmp, file);
+      } catch (err) {
+        log.error('session', 'save messages failed', { sessionId }, err);
+      }
+    };
+    const prev = this.messageWriteChains.get(sessionId) ?? Promise.resolve();
+    const next = prev.then(run, run);
+    this.messageWriteChains.set(sessionId, next);
+    // 链上错误已在 run 内记日志，这里吞掉防 unhandled rejection。
+    void next.catch(() => undefined);
+    return next;
   }
 
   private messagesFile(sessionId: string): string {
     return join(app.getPath('userData'), 'messages', `${sessionId}.json`);
+  }
+
+  // -------------------------------------------------------- global search
+
+  /** 跨会话全文搜索：先匹配标题，再按 updatedAt 降序扫描消息文件匹配内容。
+   *  纯 CPU 同步搜索（消息文件已在内存），结果上限 limit（默认 50）。 */
+  search(req: SessionSearchRequest): SearchHit[] {
+    const q = req.query.trim().toLowerCase();
+    if (!q) return [];
+    const limit = req.limit ?? 50;
+    const hits: SearchHit[] = [];
+
+    // 按 updatedAt 降序排列会话（最近的优先）
+    const sorted = [...this.sessions.values()]
+      .map((s) => s.meta)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
+    // 1. 标题匹配
+    for (const meta of sorted) {
+      if (hits.length >= limit) break;
+      if (meta.title && meta.title.toLowerCase().includes(q)) {
+        hits.push({ sessionId: meta.id, kind: 'title', snippet: meta.title });
+      }
+    }
+
+    // 2. 消息内容匹配
+    for (const meta of sorted) {
+      if (hits.length >= limit) break;
+      let messages: UnifiedMessage[];
+      try {
+        const f = this.messagesFile(meta.id);
+        if (!existsSync(f)) continue;
+        messages = JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
+      } catch { continue; }
+
+      for (const msg of messages) {
+        if (hits.length >= limit) break;
+        const text = this.extractSearchText(msg);
+        if (!text) continue;
+        const lower = text.toLowerCase();
+        const idx = lower.indexOf(q);
+        if (idx < 0) continue;
+        // 构造摘要：关键词前后各取 ~30 字
+        const start = Math.max(0, idx - 30);
+        const end = Math.min(text.length, idx + q.length + 30);
+        let snippet = '';
+        if (start > 0) snippet += '…';
+        snippet += text.slice(start, end);
+        if (end < text.length) snippet += '…';
+        hits.push({ sessionId: meta.id, messageId: msg.id, kind: 'content', snippet });
+      }
+    }
+    return hits;
+  }
+
+  /** 从 UnifiedMessage 提取可搜索文本。 */
+  private extractSearchText(msg: UnifiedMessage): string | undefined {
+    switch (msg.kind) {
+      case 'user': return msg.text;
+      case 'text': return msg.text;
+      case 'thinking': return msg.text;
+      case 'error': return msg.message;
+      case 'system': return msg.text;
+      case 'tool_call': return msg.title;
+      case 'ask_user': return msg.question;
+      default: return undefined;
+    }
   }
 
   // -------------------------------------------------------- usage stats
@@ -827,19 +1114,23 @@ export class SessionManager {
     let rows: UsageRow[] = [];
     try {
       const raw = JSON.parse(readFileSync(f, 'utf8')) as UnifiedMessage[];
-      rows = raw.flatMap((m) =>
-        m.kind === 'turn_end'
-          ? [
-              {
-                ts: m.createdAt,
-                calls: Math.max(1, m.usage?.apiCalls ?? 1),
-                input: m.usage?.inputTokens ?? 0,
-                output: m.usage?.outputTokens ?? 0,
-                cached: m.usage?.cachedInputTokens ?? 0,
-              },
-            ]
-          : [],
-      );
+      rows = raw.flatMap((m) => {
+        if (m.kind !== 'turn_end') return [];
+        const rawInput = m.usage?.inputTokens ?? 0;
+        const cached = m.usage?.cachedInputTokens ?? 0;
+        // 部分引擎（omp/antigravity）透传 API 原始值：inputTokens 不含缓存，
+        // cachedInputTokens 单列；归一成 codex 语义（input 含缓存、cached 为子集）。
+        const input = cached > rawInput ? rawInput + cached : rawInput;
+        return [
+          {
+            ts: m.createdAt,
+            calls: Math.max(1, m.usage?.apiCalls ?? 1),
+            input,
+            output: m.usage?.outputTokens ?? 0,
+            cached,
+          },
+        ];
+      });
     } catch {
       rows = [];
     }
@@ -847,19 +1138,31 @@ export class SessionManager {
     return rows;
   }
 
+
   /** Kill every child process — called on app quit (anti-orphan). */
   async disposeAll(): Promise<void> {
+    // 合批队列尾部事件直接冲刷；防抖元数据改为强制落盘。
+    this.flushBatch();
+    if (this.persistMetasTimer) {
+      clearTimeout(this.persistMetasTimer);
+      this.persistMetasTimer = null;
+    }
     const live = [...this.sessions.values()].filter((s) => s.adapter).length;
     log.info('session', 'disposeAll: killing engine processes', { live, total: this.sessions.size });
     const results = await Promise.allSettled([...this.sessions.values()].map((s) => s.adapter?.dispose()));
     const failed = results.filter((r) => r.status === 'rejected');
     if (failed.length) log.warn('session', 'disposeAll: some engines failed to dispose', { failed: failed.length });
+    // 等消息链与 sessions.json 全部写盘完成，避免退出丢尾部数据。
+    await Promise.allSettled([...this.messageWriteChains.values()]);
+    await this.persistMetasNow();
   }
 
   // ---------------------------------------------------------------- private
 
   private async buildAdapter(meta: SessionMeta, resumeSessionId?: string): Promise<EngineAdapter> {
     const settings = this.settings.get();
+    // browser use 工具服务：flag + provider 双门（flag 关掉后新会话即不注册 MCP）。
+    const browserTools = settings.browserUse ? this.browserTools : undefined;
     // 空会话（无客户端历史）恢复失败时静默降级 — 没发过消息的线程
     // 引擎侧常未落盘（no rollout），报错纯噪音。
     const quietResumeFallback = resumeSessionId ? this.getMessages(meta.id).length === 0 : undefined;
@@ -903,6 +1206,8 @@ export class SessionManager {
         try {
           await this.kapHost.ensure(kimiHome);
           meta.kimiChannel = 'kap';
+          // KAP 通道暂无 MCP 接线面（REST /sessions schema 未验证）→ 降级记录。
+          browserTools?.logDegraded('kimi');
           return new KimiKapAdapter({ ...kimiOpts, host: this.kapHost }, sink);
         } catch (err) {
           // KAP 起不来（未安装/版本不支持 web 子命令/端口被占且探测失败）
@@ -913,7 +1218,7 @@ export class SessionManager {
         }
       }
       meta.kimiChannel = 'acp';
-      return new KimiAdapter(kimiOpts, sink);
+      return new KimiAdapter({ ...kimiOpts, mcpServers: browserTools?.acpMcpServers(meta.id) }, sink);
     }
     if (meta.engine === 'codex') {
       // 路由开：纯 `-c` 命令行覆盖指向本地 responses 前端（零文件写入）；
@@ -949,7 +1254,7 @@ export class SessionManager {
           quietResumeFallback,
           // 赛马角色会话无人值守（对齐 claude unattended）。
           unattended: !!meta.raceId,
-          configOverrideArgs: overrideArgs,
+          configOverrideArgs: [...overrideArgs, ...(browserTools?.codexConfigArgs(meta.id) ?? [])],
           // 其余根目录并入 workspace-write 沙盒可写根（codex 是唯一有
           // OS 沙盒会硬拦写的引擎）。
           extraWritableRoots: extraRoots,
@@ -962,6 +1267,9 @@ export class SessionManager {
     if (meta.engine === 'opencode') {
       // 共享单例 serve（按 x-opencode-directory 头路由多目录）；
       // 模型/凭据完全委托 opencode 自身配置，无协议路由。
+      // opencode 为共享 server 进程：无 per-session MCP 注入面（全局配置只读
+      // 政策不改写）→ 浏览器工具对该引擎降级关闭。
+      browserTools?.logDegraded('opencode');
       return new OpencodeAdapter(
         {
           cwd: meta.cwd,
@@ -995,12 +1303,15 @@ export class SessionManager {
           unattended: !!meta.raceId,
           // 其余根目录走 omp 原生 multi-root（spawn 级 --add-dir）。
           extraDirs: extraRoots,
+          mcpServers: browserTools?.acpMcpServers(meta.id),
         },
         (event) => this.onEngineEvent(meta.id, event),
       );
     }
     if (meta.engine === 'antigravity') {
       // headless `agy -p --output-format stream-json`，每回合一个进程。
+      // agy 无已知 MCP 配置面（文档未捕获）→ 浏览器工具降级关闭。
+      browserTools?.logDegraded('antigravity');
       // 账号切换由 agyAccounts 覆写 keyring 完成，本适配器无需感知——
       // 下一个 prompt 进程自然以新账号启动（实时读 keyring）。
       return new AntigravityAdapter(
@@ -1036,8 +1347,9 @@ export class SessionManager {
           unattended: !!meta.raceId,
           // claude 原生分叉：首个 prompt 以 --fork-session 从此父 id 分支。
           forkFromSessionId: meta.forkPendingFromId,
-          // 额外 MCP 服务器配置（可选；~/.claude MCP 仍自动加载）。
-          mcpConfigPath: settings.claudeMcpConfig || undefined,
+          // 额外 MCP 服务器配置（可选；~/.claude MCP 仍自动加载）。browser use
+          // 开时改为注入「用户配置 + 受管浏览器 server」的合并文件（按会话物化）。
+          mcpConfigPath: browserTools ? browserTools.claudeMcpConfigPath(meta.id) : settings.claudeMcpConfig || undefined,
           // 自定义启动命令/路径（空 = 自动探测）— 支持完整路径或 PATH 命令名（如 cc）。
           cliEntry: settings.claudeCliPath || undefined,
         },
@@ -1101,7 +1413,14 @@ export class SessionManager {
         }
         this.persistMetas();
       } else if (event.type === 'models.update') {
-        s.meta.modelId = event.current;
+        if (s.desiredModel) {
+          // 用户 setModel 在途：启动/引擎侧回推的旧模型快照不能覆盖刚选的
+          // 目标。current 对外显示期望值，available 照常吸收（列表要就绪）。
+          s.meta.modelId = s.desiredModel;
+          event = { ...event, current: s.desiredModel };
+        } else {
+          s.meta.modelId = event.current;
+        }
       } else if (event.type === 'modes.update' && event.current) {
         s.meta.permissionMode = event.current;
       } else if (event.type === 'turn.ended') {
@@ -1120,6 +1439,11 @@ export class SessionManager {
         const wasActive = this.goalActive.get(sessionId) === true;
         this.goalActive.set(sessionId, !!event.goal && event.goal.status !== 'complete');
         if (event.goal?.status === 'complete' && wasActive) this.notifyGoalComplete(s.meta, event.goal.objective);
+      } else if (event.type === 'steer.confirmed') {
+        // 引擎确认已真正消费该 steer：此刻补发 user.echo（turnId 已映射为
+        // 会话全局号），确认事件本身不转发渲染层。
+        this.flushPendingSteerEcho(sessionId, event.messageId, event.turnId);
+        return;
       } else if (event.type === 'tool.upsert') {
         // 文件编辑事件 → 标记本会话编辑过该文件（供变更面板过滤）。
         const kind = event.toolKind ?? '';
@@ -1157,17 +1481,18 @@ export class SessionManager {
   /** Goal 完成桌面通知（仅窗口失焦时）— 调用方已判过「曾活跃」。 */
   private notifyGoalComplete(meta: SessionMeta, objective: string): void {
     const prefs = this.settings.get().notifications;
-    if (!prefs.taskComplete || BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
-    new Notification({
+    if (!prefs.taskComplete || BrowserWindow.getFocusedWindow()) return;
+    notifyWithSession({
       title: L(`Goal 执行完成：${meta.title}`, `Goal completed: ${meta.title}`),
       body: objective.slice(0, 100),
-    }).show();
+      sessionId: meta.id,
+    });
   }
 
   /** System notifications per user preference; only when the window is unfocused. */
   private maybeNotify(meta: SessionMeta, event: EngineEvent): void {
     const prefs = this.settings.get().notifications;
-    if (BrowserWindow.getFocusedWindow() || !Notification.isSupported()) return;
+    if (BrowserWindow.getFocusedWindow()) return;
     if (event.type === 'turn.ended' && prefs.taskComplete && !meta.title.startsWith('⏰')) {
       // 只在真正正常完成时提醒 — 出错/手动停止的回合不算「任务完成」，
       // 否则关了报错通知的用户还会收到伪装成完成的弹窗。引擎自发回合
@@ -1179,19 +1504,45 @@ export class SessionManager {
         event.stopReason === 'background'
       )
         return;
-      new Notification({ title: L(`任务完成：${meta.title}`, `Task done: ${meta.title}`), body: L('回到窗口查看结果', 'Return to the window to view the result') }).show();
+      notifyWithSession({
+        title: L(`任务完成：${meta.title}`, `Task done: ${meta.title}`),
+        body: L('点击查看结果', 'Click to view the result'),
+        sessionId: meta.id,
+      });
     } else if (event.type === 'permission.request' && prefs.question) {
-      new Notification({ title: L(`需要你的确认：${meta.title}`, `Needs your confirmation: ${meta.title}`), body: event.title }).show();
+      notifyWithSession({
+        title: L(`需要你的确认：${meta.title}`, `Needs your confirmation: ${meta.title}`),
+        body: event.title,
+        sessionId: meta.id,
+      });
     } else if (event.type === 'error' && prefs.error) {
-      new Notification({ title: L(`出错了：${meta.title}`, `Error: ${meta.title}`), body: event.message.slice(0, 120) }).show();
+      notifyWithSession({
+        title: L(`出错了：${meta.title}`, `Error: ${meta.title}`),
+        body: event.message.slice(0, 120),
+        sessionId: meta.id,
+      });
     }
   }
 
   private forward(sessionId: string, event: EngineEvent): void {
     const envelope: EngineEventEnvelope = { sessionId, event, ts: Date.now() };
-    if (this.target && !this.target.isDestroyed()) {
-      this.target.send(IPC.engineEvent, envelope);
+    this.batchQueue.push(envelope);
+    if (!this.batchTimer) {
+      this.batchTimer = setTimeout(() => this.flushBatch(), this.BATCH_WINDOW_MS);
     }
+  }
+
+  /** 合批窗口到点：一次性把积压事件发给渲染层；目标销毁/退出时清空。 */
+  private flushBatch(): void {
+    this.batchTimer = null;
+    if (!this.target || this.target.isDestroyed()) {
+      this.batchQueue = [];
+      return;
+    }
+    const batch = this.batchQueue;
+    this.batchQueue = [];
+    if (batch.length === 0) return;
+    this.target.send(IPC.engineEvent, batch);
   }
 
   /** 内部订阅某会话的引擎事件（返回取消函数）；赛马编排器据此观察
@@ -1279,12 +1630,18 @@ export class SessionManager {
   }
 
   /** 最新一个回合的助手正文（赛马角色间产物交接用）。优先「最后一段
-   *  连续正文」；回合止于工具而无收尾总结时回落到工具前暂存段 ——
-   *  有产出但无终稿 ≠ 未产出，回落也为空才真是空回合。 */
+   *  连续正文」；但当工具前暂存段显著更长时说明真正的产物在工具之前、
+   *  收尾只是一句总结（裁判调 xd://propose 提交方案的典型模式），此时
+   *  取暂存段。回合止于工具而无收尾正文时同样回落暂存段。 */
   transcript(sessionId: string): string {
     const final = (this.turnText.get(sessionId) ?? '').trim();
-    if (final) return final;
-    return (this.turnFallback.get(sessionId) ?? '').trim();
+    const fallback = (this.turnFallback.get(sessionId) ?? '').trim();
+    if (!final) return fallback;
+    if (!fallback) return final;
+    // 暂存段（工具前完整正文）比收尾段长 3 倍以上 → 收尾段只是一句
+    // 工具后总结（"已完成。…"），真正产物在工具之前。
+    if (fallback.length > final.length * 3) return fallback;
+    return final;
   }
 
   /** Builder 改动的文本摘要（供审计角色对照 diff）。 */
@@ -1317,12 +1674,30 @@ export class SessionManager {
     return join(app.getPath('userData'), 'sessions.json');
   }
 
+  /** sessions.json 防抖 + 异步原子写：状态变更频繁但无需每次同步阻塞
+   *  事件循环；退出时由 disposeAll 强制 flush。 */
   private persistMetas(): void {
-    try {
-      writeFileSync(this.metaFile, JSON.stringify(this.list(), null, 2), 'utf8');
-    } catch (err) {
-      log.error('session', 'persist sessions.json failed', { count: this.sessions.size }, err);
-    }
+    if (this.persistMetasTimer) return;
+    this.persistMetasTimer = setTimeout(() => {
+      this.persistMetasTimer = null;
+      void this.persistMetasNow();
+    }, 200);
+  }
+
+  private persistMetasNow(): Promise<void> {
+    const file = this.metaFile;
+    const run = async (): Promise<void> => {
+      try {
+        const tmp = `${file}.tmp`;
+        await writeFileAsync(tmp, JSON.stringify(this.list(), null, 2), 'utf8');
+        await renameAsync(tmp, file);
+      } catch (err) {
+        log.error('session', 'persist sessions.json failed', { count: this.sessions.size }, err);
+      }
+    };
+    const next = this.metaWriteChain.then(run, run);
+    this.metaWriteChain = next;
+    return next;
   }
 
   private loadPersistedMetas(): void {
@@ -1413,7 +1788,11 @@ function seedLine(m: UnifiedMessage, full: boolean, lastPlanId: string | undefin
       const extras: string[] = [];
       if (m.attachments?.length) extras.push(`附件: ${m.attachments.join(', ')}`);
       if (m.selections?.length)
-        extras.push(`引用: ${m.selections.map((s) => `${s.path}#L${s.startLine}-${s.endLine}`).join(', ')}`);
+        extras.push(
+          `引用: ${m.selections
+            .map((s) => ('termId' in s ? `${s.cwd}（终端 ${s.text.split('\n').length} 行）` : `${s.path}#L${s.startLine}-${s.endLine}`))
+            .join(', ')}`,
+        );
       return `【用户】${clip(m.text, full ? SEED_FULL_TEXT_CAP : SEED_OLD_TEXT_CAP)}${extras.length ? `\n（${extras.join('；')}）` : ''}`;
     }
     case 'text':

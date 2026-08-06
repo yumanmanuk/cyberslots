@@ -40,16 +40,24 @@ const ANTIGRAVITY_CLAUDE_EFFORTS = ['low', 'medium', 'high'];
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /** Claude Code 模型别名（`claude --model` 接受别名或全名；与
- *  ClaudeAdapter.CLAUDE_MODEL_SLUGS 对齐）。 */
+ *  ClaudeAdapter.CLAUDE_MODEL_SLUGS 对齐；custom 槽位由 env 配置后动态追加）。 */
 const CLAUDE_MODELS: ModelOption[] = [
   { value: 'default', label: 'Default（跟随登录）' },
   { value: 'sonnet', label: 'Claude Sonnet' },
   { value: 'opus', label: 'Claude Opus' },
   { value: 'haiku', label: 'Claude Haiku' },
+  { value: 'fable', label: 'Claude Fable' },
 ];
 
 /** Claude 别名短名（自定义模型覆盖时作后缀，标注实际映射的档位）。 */
-const CLAUDE_ALIAS_SHORT: Record<string, string> = { default: 'Default', sonnet: 'Sonnet', opus: 'Opus', haiku: 'Haiku' };
+const CLAUDE_ALIAS_SHORT: Record<string, string> = {
+  default: 'Default',
+  sonnet: 'Sonnet',
+  opus: 'Opus',
+  haiku: 'Haiku',
+  fable: 'Fable',
+  custom: 'Custom',
+};
 
 /** Claude 模型展示名：第三方网关 env 映射了自定义模型 → 「自定义名（别名）」，
  *  否则回落内置别名友好名（Composer 选择器与赛马配置共用）。 */
@@ -76,6 +84,8 @@ export const CLAUDE_LABELS: Record<string, string> = {
   sonnet: 'Claude Sonnet',
   opus: 'Claude Opus',
   haiku: 'Claude Haiku',
+  fable: 'Claude Fable',
+  custom: 'Custom',
 };
 
 /** 模型 slug → 展示名的统一解析链（Composer 选择器与回答信息 tooltip 共用）：
@@ -161,7 +171,10 @@ export function useRoleCatalogs(active: boolean): RoleCatalogs {
     }
     if (engine === 'claude') {
       const labels = snap?.claude.modelLabels;
-      return CLAUDE_MODELS.map((m) => ({ ...m, label: claudeModelLabel(m.value, labels?.[m.value], lang) }));
+      const opts = CLAUDE_MODELS.map((m) => ({ ...m, label: claudeModelLabel(m.value, labels?.[m.value], lang) }));
+      // custom 槽位仅在 settings.json/env 配置了 ANTHROPIC_CUSTOM_MODEL_OPTION 时出现。
+      if (labels?.custom) opts.push({ value: 'custom', label: claudeModelLabel('custom', labels.custom, lang) });
+      return opts;
     }
     return ocVisible.map((m) => ({ value: m.slug, label: m.displayName ?? m.slug }));
   };

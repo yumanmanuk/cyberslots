@@ -5,7 +5,7 @@
  * and a per-answer stats footer (上行/缓存/下行/tts/用时).
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -42,7 +42,7 @@ import {
 
 import { ENGINE_LABELS } from '@shared/types';
 import type { PlanEntry, ToolCallContent, UnifiedMessage } from '@shared/types';
-import type { SessionChangeEntry } from '@shared/ipc';
+import type { UndoPreview } from '@shared/ipc';
 import { useChatStore } from '../store/chatStore';
 import SelectionChip from './SelectionChip';
 import { useRaceStore } from '../store/raceStore';
@@ -51,12 +51,15 @@ import { useT } from '../i18n';
 import UndoConfirmDialog from './UndoConfirmDialog';
 import { BrandSpinner } from './brand';
 import MdLink, { looksLikeFilePath } from './MdLink';
+import MdPre from './MdCodeBlock';
 import { resolveEffectiveEffort } from '../effort';
 import { effortLabel, modelDisplayLabel } from './race/modelCatalogs';
 
-export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; sessionId: string }): JSX.Element | null {
+function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; sessionId: string }): JSX.Element | null {
   switch (msg.kind) {
     case 'user':
+      // 赛马结果汇报：渲染为可折叠卡片，而非普通用户气泡。
+      if (msg.raceResult) return <RaceResultCard msg={msg} sessionId={sessionId} />;
       return <UserBubble msg={msg} sessionId={sessionId} />;
 
     case 'text':
@@ -65,7 +68,11 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
         <div className="md-body max-w-none">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={{ code: (props) => <MdCode {...props} sessionId={sessionId} />, a: (props) => <MdLink {...props} sessionId={sessionId} /> }}
+            components={{
+              code: (props) => <MdCode {...props} sessionId={sessionId} />,
+              pre: MdPre,
+              a: (props) => <MdLink {...props} sessionId={sessionId} />,
+            }}
           >
             {msg.text}
           </ReactMarkdown>
@@ -119,6 +126,14 @@ export default function MessageItem({ msg, sessionId }: { msg: UnifiedMessage; s
   }
 }
 
+/** React.memo + 引用比较：流式更新时只有尾部消息对象引用变化，其余
+ *  MessageItem 直接跳过重渲染（热路径 P1，配合 foldMessage 尾替换）。 */
+const MessageItemMemo = memo(
+  MessageItem,
+  (prev, next) => prev.msg === next.msg && prev.sessionId === next.sessionId,
+);
+export default MessageItemMemo;
+
 // ------------------------------------------------------------- sub-blocks
 
 /** react-markdown v9 的 code 渲染分流：围栏块（带 language-…）保持默认；
@@ -157,6 +172,143 @@ function FileChip({ path, sessionId }: { path: string; sessionId: string }): JSX
   );
 }
 
+// ------------------------------------------------------ user attachments
+
+/** 与主进程 attachments.ts 的图片白名单一致：只有 provider 可内联的格式
+ *  才走缩略图，其余（含 bmp 等）一律显示为文件 chip。 */
+const ATTACHMENT_IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i;
+
+/** data URL 按路径缓存：同一附件在历史/回滚预览间复用，避免重复读盘。 */
+const attachmentDataUrlCache = new Map<string, string>();
+
+/** 用户消息图片附件缩略图：点击灯箱放大；文件缺失时退化为文件 chip。 */
+function AttachmentThumb({ path, onOpen }: { path: string; onOpen: (src: string) => void }): JSX.Element {
+  const t = useT();
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const cached = attachmentDataUrlCache.get(path);
+    if (cached) {
+      setSrc(cached);
+      return;
+    }
+    void window.cyberslots
+      .attachmentDataUrl(path)
+      .then((data) => {
+        if (!alive) return;
+        if (data) {
+          attachmentDataUrlCache.set(path, data);
+          setSrc(data);
+        } else {
+          setFailed(true);
+        }
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+  if (failed) return <AttachmentFileChip path={path} />;
+  return (
+    <button
+      type="button"
+      onClick={() => src && onOpen(src)}
+      disabled={!src}
+      title={name}
+      className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-line bg-bg-panel transition hover:border-accent/50 disabled:cursor-default"
+    >
+      {src ? (
+        <img src={src} alt={name} className="h-full w-full object-cover" />
+      ) : (
+        <BrandSpinner size={14} />
+      )}
+    </button>
+  );
+}
+
+/** 非图片附件 chip：点击在文件管理器中定位，不丢原始路径上下文。 */
+function AttachmentFileChip({ path }: { path: string }): JSX.Element {
+  const t = useT();
+  const name = path.split(/[\\/]/).pop() ?? path;
+  return (
+    <button
+      type="button"
+      title={`${path} — ${t('openInExplorer')}`}
+      onClick={() => void window.cyberslots.openIn('explorer', path)}
+      className="inline-flex max-w-52 items-center gap-1.5 rounded-lg border border-line bg-bg-panel px-2 py-1 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+    >
+      <FileTypeIcon name={name} size={12} />
+      <span className="truncate">{name}</span>
+    </button>
+  );
+}
+
+/** 用户消息附件区：仅图片缩略图（点击灯箱预览）。文件引用已由
+ *  UserBubble 内的 renderUserTextWithChips 行内渲染，不再独立显示。 */
+function UserAttachments({ attachments }: { attachments: string[] }): JSX.Element | null {
+  const [zoom, setZoom] = useState<string | null>(null);
+  const images = attachments.filter((p) => ATTACHMENT_IMAGE_RE.test(p));
+  if (!images.length) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {images.map((path) => (
+        <AttachmentThumb key={path} path={path} onOpen={setZoom} />
+      ))}
+      {zoom && (
+        <div
+          className="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/70"
+          onClick={() => setZoom(null)}
+        >
+          <img src={zoom} className="max-h-[88vh] max-w-[90vw] rounded-lg object-contain shadow-2xl" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 把用户气泡正文里的 `name(path)` 标记解析为行内 FileChip。
+ *  只有 attachments 里已知的非图片路径才会匹配，避免误解正常文本。 */
+function renderUserTextWithChips(
+  text: string,
+  attachments: string[] | undefined,
+  sessionId: string,
+): React.ReactNode {
+  if (!text) return text;
+  // 从 attachments 提取非图片文件路径，按出现顺序依次查找
+  const filePaths = (attachments ?? []).filter((p) => !ATTACHMENT_IMAGE_RE.test(p));
+  if (!filePaths.length) return text;
+
+  // 构建 markers：每个 path 对应 `name(path)` 字面量
+  const markers = filePaths.map((p) => {
+    const name = p.split(/[\\/]/).pop() ?? p;
+    return { marker: `${name}(${p})`, path: p };
+  });
+
+  // 贪心前向扫描，命中 marker 就切分
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+  // 循环找最靠近 cursor 的 marker
+  while (cursor < text.length) {
+    let best: { idx: number; m: (typeof markers)[number] } | null = null;
+    for (const m of markers) {
+      const idx = text.indexOf(m.marker, cursor);
+      if (idx >= 0 && (best === null || idx < best.idx)) best = { idx, m };
+    }
+    if (!best) break;
+    if (best.idx > cursor) parts.push(<span key={key++}>{text.slice(cursor, best.idx)}</span>);
+    parts.push(<FileChip key={`fc-${best.m.path}-${key++}`} path={best.m.path} sessionId={sessionId} />);
+    cursor = best.idx + best.m.marker.length;
+  }
+  if (cursor === 0) return text; // 无命中，返回原始字符串
+  if (cursor < text.length) parts.push(<span key={key++}>{text.slice(cursor)}</span>);
+  return <>{parts}</>;
+}
+
 /** 用户提问气泡 + hover 回退入口（Claude Code 的 Undo changes up to
  *  this point 同款）：确认弹窗列出将被一并撤销的文件变更；确认后
  *  还原文件、截断消息，并把提问回填输入框。另附 hover 复制提问按钮。 */
@@ -174,16 +326,17 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
     const el = textRef.current;
     if (el) setOverflowing(el.scrollHeight > USER_TEXT_CLAMP_PX + 2);
   }, [msg.text]);
-  // undefined = 预览加载中；null = 无快照；[] = 无文件变更。
-  const [preview, setPreview] = useState<SessionChangeEntry[] | null | undefined>(undefined);
+  // undefined = 预览加载中；null = 无快照；{files: []} = 无文件变更。
+  const [preview, setPreview] = useState<UndoPreview | null | undefined>(undefined);
   // 赛马角色会话：提问由编排器发出，回退会截断角色历史/还原文件，
   // 直接打断赛马状态机 —— 不提供「回退到此处」（泳道与主视图打开都隐藏）。
   const isRaceRole = useRaceStore((s) =>
     Object.values(s.races).some((g) => Object.values(g.sessions).includes(sessionId)),
   );
   const busy = status === 'running' || status === 'awaiting' || sending;
-  // steer（回合中插入）与 Goal 提交没有独立快照/回合边界，不提供回退。
-  const canUndo = !busy && !msg.steer && !msg.sentAsGoal && !isRaceRole;
+  // steer 注入前主进程已拍快照（changeTracker markPrompt），可完整回退；
+  // Goal 提交没有快照与回合边界，仍不提供回退。
+  const canUndo = !busy && !msg.sentAsGoal && !isRaceRole;
 
   const openUndo = (): void => {
     setPreview(undefined);
@@ -204,7 +357,7 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
       <div className="max-w-[80%]">
         <div className="whitespace-pre-wrap rounded-2xl bg-bg-active px-4 py-2.5 text-body">
           {msg.selections && msg.selections.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap justify-end gap-1.5">
+            <div className="mb-1.5 flex flex-wrap justify-start gap-1.5">
               {msg.selections.map((s) => (
                 <SelectionChip key={s.id} sel={s} />
               ))}
@@ -217,7 +370,7 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
               className="overflow-hidden"
               style={textExpanded || !overflowing ? undefined : { maxHeight: USER_TEXT_CLAMP_PX }}
             >
-              {msg.text}
+              {renderUserTextWithChips(msg.text, msg.attachments, sessionId)}
             </div>
             {overflowing && !textExpanded && (
               <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-bg-active to-transparent" />
@@ -232,9 +385,7 @@ function UserBubble({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: '
               {textExpanded ? t('collapse') : t('expand')}
             </button>
           )}
-          {msg.attachments && msg.attachments.length > 0 && (
-            <div className="mt-1 text-[12px] text-ink-soft">📎 {msg.attachments.join(', ')}</div>
-          )}
+          {msg.attachments && msg.attachments.length > 0 && <UserAttachments attachments={msg.attachments} />}
         </div>
         {msg.sentAsGoal && (
           <div className="mt-1 flex items-center justify-end gap-1 pr-1 text-[11px] text-ink-faint">
@@ -290,6 +441,7 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
   const codexDefaultEffort = useChatStore((s) => s.codexDefaultEffort);
   const opencodeCatalog = useChatStore((s) => s.opencodeCatalog);
   const ompCatalog = useChatStore((s) => s.ompCatalog);
+  const ompThinking = useChatStore((s) => s.ui[sessionId]?.thinking);
   const kimiModels = useChatStore((s) => s.kimiModels);
   const claudeLabels = useChatStore((s) => s.claudeModelLabels);
   const lang = useChatStore((s) => s.settings?.language ?? 'zh');
@@ -337,8 +489,10 @@ function TurnStats({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 't
     codexDefaultEffort,
     opencodeCatalog,
     ompCatalog,
-  })?.value;
-  const infoEffort = msg.effort ?? currentEffort;
+    ompThinking,
+  });
+  // explicit=false（opencode 未显选且目录无默认档）→ 不展示具体档，与发送侧一致。
+  const infoEffort = msg.effort ?? (currentEffort?.explicit ? currentEffort.value : undefined);
 
   const copyAnswer = (): void => {
     const msgs = useChatStore.getState().ui[sessionId]?.messages ?? [];
@@ -523,7 +677,12 @@ function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 
         {/* md 内容预览 — 限高截断 + 底部渐隐 */}
         <div className="relative max-h-64 overflow-hidden px-4 pb-3 pt-1">
           <div className="md-body max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <MdLink {...props} sessionId={sessionId} /> }}>{msg.text}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{ a: (props) => <MdLink {...props} sessionId={sessionId} />, pre: MdPre }}
+            >
+              {msg.text}
+            </ReactMarkdown>
           </div>
           <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-bg-panel to-transparent" />
         </div>
@@ -560,7 +719,7 @@ function PlanDocCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               <div className="md-body max-w-none pr-1 text-[13px]">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{msg.text}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink, pre: MdPre }}>{msg.text}</ReactMarkdown>
               </div>
             </div>
           </div>
@@ -629,10 +788,16 @@ export function ThinkingBlock({
   const open = userOpen ?? streaming;
 
   // 流式中新增内容自动滚到底部（overflow-hidden 仍可编程滚动）。
+  // 顶部渐隐遮罩仅在内容超出可视高度（顶部确有被吞的行）时启用——
+  // 刚输出第一行时无溢出，遮罩会把唯一的行也淡掉。
   const bodyRef = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
   useEffect(() => {
     const el = bodyRef.current;
-    if (streaming && open && el) el.scrollTop = el.scrollHeight;
+    if (streaming && open && el) {
+      el.scrollTop = el.scrollHeight;
+      setOverflowing(el.scrollHeight > el.clientHeight + 1);
+    }
   }, [text, streaming, open]);
 
   // 流式中每秒走表；结束后用 store 定格的 durationMs（历史消息可能没有）。
@@ -646,8 +811,8 @@ export function ThinkingBlock({
 
   return (
     <div>
-      <button onClick={() => setUserOpen(!open)} className="group flex items-center gap-1.5 text-ui">
-        <Brain size={13} className={`shrink-0 ${streaming ? 'text-accent' : 'text-ink-faint group-hover:text-ink-soft'}`} />
+      <button onClick={() => setUserOpen(!open)} className="group flex items-baseline gap-1.5 text-ui">
+        <Brain size={13} className={`shrink-0 self-center ${streaming ? 'text-accent' : 'text-ink-faint group-hover:text-ink-soft'}`} />
         {streaming ? (
           <span className="shimmer-text font-medium">Thinking</span>
         ) : (
@@ -657,16 +822,16 @@ export function ThinkingBlock({
         )}
         {!streaming &&
           (open ? (
-            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+            <ChevronDown size={12} className="shrink-0 self-center text-ink-faint" />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-ink-faint opacity-0 transition group-hover:opacity-100" />
+            <ChevronRight size={12} className="shrink-0 self-center text-ink-faint opacity-0 transition group-hover:opacity-100" />
           ))}
       </button>
       <Collapsible open={open && !!text}>
         <div
           ref={bodyRef}
           className={`ml-[5px] mt-1.5 whitespace-pre-wrap border-l-2 border-line pl-3.5 text-[12.5px] leading-6 text-ink-faint [overflow-wrap:anywhere] ${streaming
-            ? 'max-h-[192px] overflow-hidden [mask-image:linear-gradient(to_bottom,transparent,black_22px)]'
+            ? `max-h-[192px] overflow-hidden ${overflowing ? '[mask-image:linear-gradient(to_bottom,transparent,black_22px)]' : ''}`
             : 'max-h-72 overflow-y-auto'
             }`}
         >
@@ -685,8 +850,8 @@ export function ThinkingBlock({
 function DecisionRecord({ msg }: { msg: Extract<UnifiedMessage, { kind: 'permission' }> }): JSX.Element | null {
   if (msg.answeredOptionId !== undefined) return null;
   return (
-    <div className="flex items-center gap-2 text-ui" style={{ minHeight: 20 }}>
-      <BrandSpinner size={12} className="shrink-0 text-warn" />
+    <div className="flex items-baseline gap-2 text-ui" style={{ minHeight: 20 }}>
+      <BrandSpinner size={12} className="shrink-0 self-center text-warn" />
       <span className="shimmer-text shrink-0 text-[12px] font-medium">Waiting for approval</span>
       <span className="min-w-0 truncate font-mono text-[11.5px] text-ink-faint">{msg.title}</span>
     </div>
@@ -841,13 +1006,13 @@ export function ToolLine({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_c
     <div className="text-ui">
       <button
         onClick={() => detail && setOpen(!open)}
-        className={`group flex w-full items-center gap-2 text-left ${detail ? '' : 'cursor-default'}`}
+        className={`group flex w-full items-baseline gap-2 text-left ${detail ? '' : 'cursor-default'}`}
         style={{ minHeight: 20 }}
       >
         {active ? (
-          <BrandSpinner size={12} className="shrink-0 text-accent" />
+          <BrandSpinner size={12} className="shrink-0 self-center text-accent" />
         ) : (
-          <span className={`h-[11px] w-[3px] shrink-0 rounded-full ${failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
+          <span className={`h-[11px] w-[3px] shrink-0 self-center rounded-full ${failed ? 'bg-err' : 'bg-ink-faint/50'}`} />
         )}
         <span className={`shrink-0 text-[12px] ${active ? 'shimmer-text font-medium' : failed ? 'text-err' : 'text-ink-soft'}`}>
           {verb}
@@ -862,9 +1027,9 @@ export function ToolLine({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_c
         {msg.status === 'canceled' && <span className="shrink-0 text-[10.5px] text-ink-faint">canceled</span>}
         {detail &&
           (open ? (
-            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+            <ChevronDown size={12} className="shrink-0 self-center text-ink-faint" />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-ink-faint opacity-0 transition group-hover:opacity-100" />
+            <ChevronRight size={12} className="shrink-0 self-center text-ink-faint opacity-0 transition group-hover:opacity-100" />
           ))}
       </button>
       <Collapsible open={open && !!detail}>
@@ -893,10 +1058,10 @@ function TaskCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_call' }>
     <div className={`overflow-hidden rounded-lg border transition ${active ? 'border-accent/35' : msg.status === 'failed' ? 'border-err/30' : 'border-line'}`}>
       <button
         onClick={() => hasDetail && setOpen(!open)}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'
+        className={`flex w-full items-baseline gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${hasDetail ? 'hover:bg-bg-hover' : 'cursor-default'
           }`}
       >
-        <Bot size={13} className={`shrink-0 ${active ? 'text-accent' : msg.status === 'failed' ? 'text-err' : 'text-ink-faint'}`} />
+        <Bot size={13} className={`shrink-0 self-center ${active ? 'text-accent' : msg.status === 'failed' ? 'text-err' : 'text-ink-faint'}`} />
         <span className="min-w-0 flex-1 truncate text-ui text-ink">{msg.title || t('subagentTask')}</span>
         {/* 免审批标：仅引擎真为 headless 子代理强制 yolo（omp）时显 —— 弱化为中性小字，
             不与标题争焦（此前警示色对全引擎误显且刺眼）。 */}
@@ -996,7 +1161,7 @@ export function FileTypeIcon({ name, size = 13 }: { name: string; size?: number 
   return (
     <Icon
       size={size}
-      className={hit?.color ? 'shrink-0' : 'shrink-0 text-ink-faint'}
+      className={hit?.color ? 'shrink-0 self-center' : 'shrink-0 self-center text-ink-faint'}
       style={hit?.color ? { color: hit.color } : undefined}
     />
   );
@@ -1038,7 +1203,7 @@ function EditCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'to
           else if (hasDetail) setOpen(!open);
         }}
         title={canOpenPanel ? `${panelPath} — ${t('openFileInPanel')}` : fullPath}
-        className={`flex w-full items-center gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${clickable ? 'hover:bg-bg-hover' : 'cursor-default'
+        className={`flex w-full items-baseline gap-2 px-3 py-2 text-left ${active ? 'card-sweep' : ''} ${clickable ? 'hover:bg-bg-hover' : 'cursor-default'
           }`}
       >
         <FileTypeIcon name={file} />
@@ -1046,13 +1211,13 @@ function EditCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'to
         {active ? (
           <span className="shimmer-text shrink-0 text-[11.5px] font-medium leading-none">Generating…</span>
         ) : proposed ? (
-          <span className="shrink-0 rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium leading-none text-warn">{t('previewPending')}</span>
+          <span className="shrink-0 self-center rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium leading-none text-warn">{t('previewPending')}</span>
         ) : msg.status === 'failed' ? (
           <span className="shrink-0 text-[11.5px] font-medium leading-none text-err">Failed</span>
         ) : msg.status === 'canceled' ? (
           <span className="shrink-0 text-[11.5px] leading-none text-ink-faint">Canceled</span>
         ) : (
-          <span className="flex shrink-0 items-center gap-1.5 font-mono text-[11.5px] leading-none tabular-nums">
+          <span className="flex shrink-0 items-center gap-1.5 self-center font-mono text-[11.5px] leading-none tabular-nums">
             {counts && counts.adds > 0 && <span className="text-ok">+{counts.adds}</span>}
             {counts && counts.dels > 0 && <span className="text-err">-{counts.dels}</span>}
             <span className={`font-semibold ${letterTone}`}>{letter}</span>
@@ -1061,9 +1226,9 @@ function EditCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'to
         {!canOpenPanel &&
           hasDetail &&
           (open ? (
-            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+            <ChevronDown size={12} className="shrink-0 self-center text-ink-faint" />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-ink-faint" />
+            <ChevronRight size={12} className="shrink-0 self-center text-ink-faint" />
           ))}
       </button>
       <Collapsible open={open && hasDetail && !canOpenPanel}>
@@ -1148,17 +1313,17 @@ export function ShellCard({ msg }: { msg: Extract<UnifiedMessage, { kind: 'tool_
     <div className={`overflow-hidden rounded-lg border transition ${active ? 'border-accent/35' : 'border-line'}`}>
       <button
         onClick={() => out && setOpen(!open)}
-        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left ${active ? 'card-sweep' : ''} ${out ? 'hover:bg-bg-hover' : 'cursor-default'
+        className={`flex w-full items-baseline gap-2 px-3 py-1.5 text-left ${active ? 'card-sweep' : ''} ${out ? 'hover:bg-bg-hover' : 'cursor-default'
           }`}
       >
-        <TerminalSquare size={13} className="shrink-0 text-ink-faint" />
+        <TerminalSquare size={13} className="shrink-0 self-center text-ink-faint" />
         <span className="min-w-0 flex-1 truncate font-mono text-[12px] leading-[1.2] text-ink-soft">{msg.title}</span>
         {label}
         {out &&
           (open ? (
-            <ChevronDown size={12} className="shrink-0 text-ink-faint" />
+            <ChevronDown size={12} className="shrink-0 self-center text-ink-faint" />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-ink-faint" />
+            <ChevronRight size={12} className="shrink-0 self-center text-ink-faint" />
           ))}
       </button>
       <Collapsible open={open && !!out}>
@@ -1219,4 +1384,75 @@ function prefixLines(text: string, prefix: string): string {
     .split('\n')
     .map((l) => prefix + l)
     .join('\n');
+}
+
+/** 赛马结果卡片 — 赛马完成后回流到宿主对话的特殊 user 消息。
+ *  渲染为可折叠卡片（默认折叠）：标题行 + 状态徽章 + 展开后的最终方案 markdown。
+ *  底部"查看完整赛马"按钮打开赛马视图回看全程产物。
+ *  AI 上下文里已含完整赛马结果（text 字段发给引擎），用户可直接就方案提问。 */
+function RaceResultCard({ msg, sessionId }: { msg: Extract<UnifiedMessage, { kind: 'user' }>; sessionId: string }): JSX.Element {
+  const t = useT();
+  const r = msg.raceResult!;
+  const [open, setOpen] = useState(false);
+  const openRace = useRaceStore((s) => s.openRace);
+  const auditBadge = r.auditPassed
+    ? <span className="rounded-md bg-ok/10 px-1.5 py-0.5 text-[11px] font-medium text-ok">{t('raceResultAuditPassed')}</span>
+    : <span className="rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">{t('raceResultAuditFailed')}</span>;
+  // 审计未通过 + 已交付 = 人工放行，不能用普通「已交付」的绿色徽章误导。
+  const overridden = !!r.overridden || (r.delivered && !r.auditPassed);
+  const deliveryBadge = overridden
+    ? <span className="rounded-md bg-warn/10 px-1.5 py-0.5 text-[11px] font-medium text-warn">{t('raceResultDeliveredOverride')}</span>
+    : r.delivered
+      ? <span className="rounded-md bg-ok/10 px-1.5 py-0.5 text-[11px] font-medium text-ok">{t('raceResultDelivered')}</span>
+      : <span className="rounded-md bg-err/10 px-1.5 py-0.5 text-[11px] font-medium text-err">{t('raceResultNotDelivered')}</span>;
+  return (
+    <div className="overflow-hidden rounded-2xl border border-line bg-bg-panel/60 shadow-sm">
+      {/* 标题行：点击折叠/展开 */}
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-baseline gap-2 px-4 py-3 text-left transition hover:bg-bg-hover"
+      >
+        <span className="text-[14px]">🏇</span>
+        <span className="text-[13px] font-semibold text-ink">{t('raceResultTitle')}</span>
+        <span className="rounded-md border border-line px-1.5 py-0.5 font-mono text-[10.5px] text-ink-faint">v{r.version}</span>
+        <span className="flex shrink-0 items-center gap-1.5 self-center">
+          {auditBadge}
+          {deliveryBadge}
+          {r.repairRound > 0 && (
+            <span className="rounded-md bg-bg-input px-1.5 py-0.5 text-[11px] text-ink-faint">{t('raceResultRepairRound', { n: r.repairRound })}</span>
+          )}
+        </span>
+        <span className="ml-auto shrink-0 self-center text-ink-faint">
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </span>
+      </button>
+      {overridden && (
+        <div className="border-t border-warn/20 bg-warn/5 px-4 py-2 text-[11.5px] text-warn">
+          {t('raceResultOverrideNotice')}
+        </div>
+      )}
+      {/* 展开后的最终方案 markdown */}
+      <Collapsible open={open}>
+        <div className="max-h-96 overflow-y-auto border-t border-line px-4 py-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">{t('raceResultFinalPlan')}</div>
+          {r.finalPlan.trim().length < 100 && (
+            <div className="mb-2 rounded-lg bg-warn/10 px-2.5 py-1.5 text-[11.5px] text-warn">{t('raceResultPlanShortWarning')}</div>
+          )}
+          <div className="md-body text-[13px]">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{r.finalPlan}</ReactMarkdown>
+          </div>
+        </div>
+      </Collapsible>
+      {/* 底部操作行 */}
+      <div className="flex items-center gap-3 border-t border-line px-4 py-2.5">
+        <button
+          onClick={() => openRace(r.raceId)}
+          className="flex items-center gap-1 rounded-lg border border-line bg-bg-input px-2.5 py-1 text-[11.5px] text-ink-soft transition hover:bg-bg-hover hover:text-ink"
+        >
+          <Maximize2 size={12} /> {t('raceResultViewFull')}
+        </button>
+        <span className="text-[11.5px] text-ink-faint">{t('raceResultAskHint')}</span>
+      </div>
+    </div>
+  );
 }

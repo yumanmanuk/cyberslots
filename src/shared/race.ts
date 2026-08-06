@@ -16,8 +16,10 @@ import type { EngineId, PermissionMode } from './types';
 
 // ------------------------------------------------------------------ roles
 
-/** The participants of a race（racerC 为可选第三选手）. */
-export type RaceRole = 'racerA' | 'racerB' | 'racerC' | 'judge' | 'builder' | 'auditor';
+/** The participants of a race（racerC 为可选第三选手）.
+ *  preJudge 为编排器内部临时角色（AI 初审），复用 judge 配置但拥有独立会话，
+ *  不计入 RACE_ROLES（配置 UI 不展示），仅用于 sessions/preJudgeRecommendation。 */
+export type RaceRole = 'racerA' | 'racerB' | 'racerC' | 'judge' | 'builder' | 'auditor' | 'preJudge';
 
 export const RACE_ROLES: readonly RaceRole[] = ['racerA', 'racerB', 'racerC', 'judge', 'builder', 'auditor'] as const;
 
@@ -46,6 +48,8 @@ export interface RaceRoleConfigs {
   judge: RaceRoleConfig;
   builder: RaceRoleConfig;
   auditor: RaceRoleConfig;
+  /** AI 初审角色配置（可选；未配置时 fallback 到 judge 配置兼容旧数据）。 */
+  preJudge?: RaceRoleConfig;
 }
 
 // ----------------------------------------------------------------- stages
@@ -94,6 +98,7 @@ export const RACE_ROLE_LABELS: Record<RaceRole, string> = {
   judge: '裁判',
   builder: '执行者',
   auditor: '审计',
+  preJudge: '初审',
 };
 
 /** Terminal stages carry no further engine work. */
@@ -170,10 +175,33 @@ export interface RaceAdoptDecision {
   comment?: string;
 }
 
+// ---------------------------------------------------------- AI 初审 (pre-judge)
+
+/**
+ * AI 初审模式 —— 在裁判选策略前是否由 AI 先评审各方方案并给出推荐。
+ *  - off：纯人工 4 选 1（默认，现状不变）
+ *  - suggest：AI 出推荐策略 + 理由，用户可一键采纳或自己改（半自动）
+ *  - designate：赛前指定信任选手 + 采纳策略，选手完赛后自动按预置策略走裁判出方案 → 执行（零延迟，人工预决策）
+ *  - auto：AI 推荐 → 自动采纳 → 跳过批注定稿 → 直接进 builder（端到端无人值守，审计兜底）
+ */
+export type RacePreJudgeMode = 'off' | 'suggest' | 'designate' | 'auto';
+
+/** AI 初审的推荐结果：建议策略 + 展示用 markdown 详情（含理由与各选手点评）。 */
+export interface RacePreJudgeRecommendation {
+  /** AI 推荐的采纳策略。 */
+  strategy: RaceAdoptStrategy;
+  /** 一句话结论（banner 展示用，≤60 字）。 */
+  summary: string;
+  /** 完整 markdown 详情（弹窗展开用：推荐策略 / 推荐理由 / 各选手点评）。 */
+  detail: string;
+}
+
 /** Audit outcome for the current build. */
 export interface RaceAuditResult {
   passed: boolean;
   issues: string[];
+  /** Full markdown body from the auditor (for rich preview). */
+  body?: string;
 }
 
 // -------------------------------------------------------------- run stats
@@ -249,6 +277,11 @@ export interface RaceGroup {
   annotations: string[];
   /** Latest audit outcome (set during auditing). */
   audit?: RaceAuditResult;
+  /** 是否已作为成果交付（审计通过，或审计未通过但用户人工放行）。 */
+  delivered?: boolean;
+  /** 审计未通过但用户人工放行交付（overrideAudit）。UI/结果卡片据此显示
+   *  「人工放行」而非普通「已交付」，避免把流程放行误读为审计通过/已实施。 */
+  auditOverridden?: boolean;
   /** 各阶段累计用时/上下行 token（kimi 会话不计 token，见 RaceStageStats）。 */
   stats?: RaceStats;
   /** Repair loop counter and its bound (prevents infinite audit↔repair). */
@@ -264,6 +297,15 @@ export interface RaceGroup {
   eliminated?: RacerRole[];
   /** 发起对话的压缩摘录（可选）：注入双选手规划回合作为背景资料。 */
   contextSeed?: string;
+  /** AI 初审模式（发令时选定，整场不变）；省略 = off（纯人工）。 */
+  preJudgeMode?: RacePreJudgeMode;
+  /** AI 初审推荐结果；undefined = 尚未产出或已被忽略/降级。
+   *  auto 模式下产出后会立即自动采纳（写入 adopt），此字段仍保留供回看。 */
+  preJudgeRecommendation?: RacePreJudgeRecommendation;
+  /** designate 模式下用户预置的采纳策略；选手完赛后自动采纳，跳过 AI 初审和人工选择。 */
+  designateStrategy?: RaceAdoptStrategy;
+  /** designate 模式下的评语（指导裁判出方案）。 */
+  designateComment?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -302,6 +344,13 @@ export interface RaceCreateRequest {
   contextSeed?: string;
   /** Default 3; audit↔repair loop bound. */
   maxRepairRounds?: number;
+  /** AI 初审模式；省略 = off（纯人工 4 选 1）。 */
+  preJudgeMode?: RacePreJudgeMode;
+  /** designate 模式下预置的采纳策略（如 'adoptA'/'preferB'）+ 可选评语。
+   *  仅 preJudgeMode === 'designate' 时有效。 */
+  designateStrategy?: RaceAdoptStrategy;
+  /** designate 模式下的评语（指导裁判出方案）。 */
+  designateComment?: string;
 }
 
 // ----------------------------------------------------------------- events
@@ -320,13 +369,25 @@ export type RaceEvent =
   /** Judge produced/updated the fused final plan. */
   | { type: 'race.finalPlan'; version: number; text: string }
   /** Auditor returned a verdict. */
-  | { type: 'race.audit'; passed: boolean; issues: string[]; repairRound: number }
+  | { type: 'race.audit'; passed: boolean; issues: string[]; body?: string; repairRound: number }
   /** 阶段用时/token 统计更新（阶段收尾或角色回合记账时推送）。 */
   | { type: 'race.stats'; stats: RaceStats }
   /** Recoverable orchestration error (a role failed, etc.). */
   | { type: 'race.error'; message: string; role?: RaceRole }
-  /** Whole race finished (audit passed or repair budget exhausted). */
-  | { type: 'race.done'; delivered: boolean };
+  /** Whole race finished (audit passed, repair budget exhausted, or user
+   *  override). `overridden` = 审计未通过但用户人工放行交付。 */
+  | { type: 'race.done'; delivered: boolean; overridden?: boolean }
+  // ---- AI 初审（pre-judge）事件 ----
+  /** AI 初审开始评审（UI 进入"AI 评审中"等待态）。 */
+  | { type: 'race.preJudgeReviewing' }
+  /** AI 初审推荐结果已产出（UI 显示 banner + 一键采纳）。 */
+  | { type: 'race.preJudgeRecommendation'; recommendation: RacePreJudgeRecommendation }
+  /** 全自动模式：AI 已自动采纳建议，即将进入方案生成（UI 显示只读过场）。 */
+  | { type: 'race.preJudgeAutoAdopted'; strategy: RaceAdoptStrategy }
+  /** AI 初审不可用（失败/超时/解析失败），降级为纯人工 4 选 1。 */
+  | { type: 'race.preJudgeUnavailable'; reason: string }
+  /** 全自动模式：裁判出方案后自动定稿，跳过批注环节直接进 builder。 */
+  | { type: 'race.autoFinalized'; version: number };
 
 export interface RaceEventEnvelope {
   raceId: string;

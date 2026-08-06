@@ -6,10 +6,13 @@
  * 带样式的节点，故用 contenteditable + 自定义序列化/复制拦截。
  *
  * 设计约束（保持与 Composer 现有 text 字符串模型兼容）：
- * - value 始终是「序列化后的纯文本」（chip → `名(路径)`）；父组件的
- *   send/goal/queue 逻辑照旧读写这个字符串。
- * - chip 只由 insertFileChip（拖拽）以命令式插入，绝不从字符串反解析回
- *   chip —— 因此 value 外部变更（清空 / 回填队列消息）只作纯文本渲染。
+ * - value 是「排除胶囊后的纯文本」；选区胶囊由 Composer 的 selections
+ *   store 单独跟踪，文件/文件夹胶囊由 onFileChipsChange 回报给父组件、
+ *   同步进 attachments —— 发送/排队/草稿/回退都以附件列表为准，避免
+ *   chip 被序列化跳过而丢失。
+ * - chip 只由 insertSelectionChip / insertFileChip 以命令式插入，绝不从
+ *   字符串反解析回 chip —— value 外部变更（清空 / 回填队列消息）只作纯
+ *   文本渲染，并把当前存活的文件胶囊重新插回末尾（不丢失文件引用）。
  * - onCopy 拦截：按选区片段序列化为 `名(路径)` 写入剪贴板。
  * - onPaste 图片交父组件处理，其余强制纯文本粘贴（去格式）。
  */
@@ -18,10 +21,11 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 
 export interface ChipInputHandle {
   focus(): void;
-  /** 在当前光标处插入一个文件/文件夹引用胶囊（显示名，序列化为 `名(路径)`）。 */
-  insertFileChip(name: string, path: string, dir?: boolean): void;
   /** 在当前光标处插入代码选区引用胶囊（显示 `文件名 #L起-止`，序列化为 `名#L…(路径)`）。 */
   insertSelectionChip(sel: { id: string; fileName: string; rangeLabel: string; path: string }): void;
+  /** 在当前光标处插入文件/文件夹引用胶囊（显示文件名，序列化为 `名(路径)`）。
+   *  silent=true 时不触发 emit（恢复草稿/回退时用，父组件已同步 attachments）。 */
+  insertFileChip(name: string, path: string, dir?: boolean, silent?: boolean): void;
   /** 整体替换为纯文本并把光标移到末尾（斜线命令菜单插入触发词）。 */
   setPlainText(v: string): void;
 }
@@ -34,27 +38,32 @@ interface Props {
   onImagePaste?: (items: DataTransferItem[]) => boolean;
   /** 编辑导致选区胶囊增减后回报当前存活的选区 id（Composer 据此同步删除 store 快照）。 */
   onSelChipsChange?: (ids: string[]) => void;
+  /** 编辑导致文件/文件夹胶囊增减后回报当前存活清单（Composer 据此同步 attachments）。 */
+  onFileChipsChange?: (refs: Array<{ name: string; path: string; dir: boolean }>) => void;
   placeholder?: string;
   className?: string;
 }
 
 /** DOM → 纯文本：chip → `名(路径)`，<br> → 换行，其余取文本。 */
-function serialize(root: Node): string {
+function serialize(root: Node, includeChipText = true): string {
   let out = '';
   for (const child of Array.from(root.childNodes)) {
     if (child.nodeType === Node.TEXT_NODE) {
-      out += child.textContent ?? '';
+      // emit 模式下 nbsp 折成单空格（chip 插的空位），保留其它字符原样。
+      const t = child.textContent ?? '';
+      out += includeChipText ? t : t.replace(/\u00A0/g, ' ');
     } else if (child instanceof HTMLElement) {
       if (child.dataset.chip) {
-        out += `${child.dataset.name}(${child.dataset.path})`;
+        // chip 节点序列化为 `name(path)` 文本，UserBubble 据此解析回行内 chip 渲染。
+        if (includeChipText) out += `${child.dataset.name}(${child.dataset.path})`;
       } else if (child.tagName === 'BR') {
         out += '\n';
       } else if (child.tagName === 'DIV') {
-        // Chromium 偶尔用 <div> 包裹换行块。
+        // Chromium 锅倒尔用 <div> 包住换行块。
         if (out && !out.endsWith('\n')) out += '\n';
-        out += serialize(child);
+        out += serialize(child, includeChipText);
       } else {
-        out += serialize(child);
+        out += serialize(child, includeChipText);
       }
     }
   }
@@ -62,7 +71,7 @@ function serialize(root: Node): string {
 }
 
 const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
-  { value, onChange, onKeyDown, onImagePaste, onSelChipsChange, placeholder, className },
+  { value, onChange, onKeyDown, onImagePaste, onSelChipsChange, onFileChipsChange, placeholder, className },
   ref,
 ) {
   const elRef = useRef<HTMLDivElement>(null);
@@ -76,10 +85,19 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
   const emit = (): void => {
     const el = elRef.current;
     if (!el) return;
-    onChange(serialize(el));
+    // includeChipText=true：把行内文件名胶囊写进 msg.text，发送后用户气泡
+    // 可以按 name(path) 解析成 chip 节点渲染（与输入框视觉一致）。
+    onChange(serialize(el, true));
     syncEmpty();
     onSelChipsChange?.(
       Array.from(el.querySelectorAll<HTMLElement>('[data-selid]')).map((n) => n.dataset.selid!),
+    );
+    onFileChipsChange?.(
+      Array.from(el.querySelectorAll<HTMLElement>('[data-filepath]')).map((n) => ({
+        name: n.dataset.name ?? '',
+        path: n.dataset.path ?? '',
+        dir: n.dataset.dir === '1',
+      })),
     );
   };
 
@@ -112,7 +130,7 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
   };
 
   /** 把胶囊插到插入点，光标落在胶囊后的空格之后。 */
-  const insertChipNode = (chip: HTMLElement): void => {
+  const insertChipNode = (chip: HTMLElement, silent = false): void => {
     const el = elRef.current;
     if (!el) return;
     // 先解析插入点再 focus — focus 可能把光标重置到开头。
@@ -128,7 +146,7 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
     sel?.removeAllRanges();
     sel?.addRange(range);
     lastRange.current = range.cloneRange();
-    emit();
+    if (!silent) emit();
   };
 
   // 外部 value 变更（清空 / 回填）→ 纯文本渲染并把光标移到末尾；与当前
@@ -136,8 +154,29 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
   useEffect(() => {
     const el = elRef.current;
     if (!el) return;
-    if (serialize(el) !== value) {
+    if (serialize(el, false) !== value) {
+      // 文件胶囊是独立数据通道：先把存活清单暂存，回填正文后再插回末尾，
+      // 避免回退/队列回填/切会话时把行内文件引用清掉。
+      const chips = Array.from(el.querySelectorAll<HTMLElement>('[data-filepath]')).map((n) => ({
+        name: n.dataset.name ?? '',
+        path: n.dataset.path ?? '',
+        dir: n.dataset.dir === '1',
+      }));
       el.textContent = value;
+      for (const c of chips) {
+        const chip = document.createElement('span');
+        chip.dataset.chip = '1';
+        chip.dataset.filepath = c.path;
+        chip.dataset.name = c.name;
+        chip.dataset.path = c.path;
+        if (c.dir) chip.dataset.dir = '1';
+        chip.contentEditable = 'false';
+        chip.className = 'oc-file-chip';
+        chip.title = c.path;
+        chip.textContent = c.name;
+        el.appendChild(chip);
+        el.appendChild(document.createTextNode('\u00A0'));
+      }
       syncEmpty();
       const sel = window.getSelection();
       const range = document.createRange();
@@ -150,19 +189,6 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
 
   useImperativeHandle(ref, () => ({
     focus: () => elRef.current?.focus(),
-    insertFileChip: (name, path, dir) => {
-      const chip = document.createElement('span');
-      chip.dataset.chip = '1';
-      chip.dataset.name = name;
-      chip.dataset.path = path;
-      // 文件夹引用 — 中性描边 + 文件夹图标（见 index.css [data-dir]）。
-      if (dir) chip.dataset.dir = '1';
-      chip.contentEditable = 'false';
-      chip.className = 'oc-file-chip';
-      chip.textContent = name;
-      chip.title = path;
-      insertChipNode(chip);
-    },
     insertSelectionChip: ({ id, fileName, rangeLabel, path }) => {
       const chip = document.createElement('span');
       chip.dataset.chip = '1';
@@ -180,6 +206,23 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
       rangeEl.textContent = rangeLabel;
       chip.append(nameEl, rangeEl);
       insertChipNode(chip);
+    },
+    insertFileChip: (name, path, dir, silent) => {
+      const el = elRef.current;
+      if (!el) return;
+      // 同路径只插一个（附件列表按路径去重，避免发送重复引用）。
+      if (Array.from(el.querySelectorAll<HTMLElement>('[data-filepath]')).some((n) => n.dataset.path === path)) return;
+      const chip = document.createElement('span');
+      chip.dataset.chip = '1';
+      chip.dataset.filepath = path;
+      chip.dataset.name = name;
+      chip.dataset.path = path;
+      if (dir) chip.dataset.dir = '1';
+      chip.contentEditable = 'false';
+      chip.className = 'oc-file-chip';
+      chip.title = path;
+      chip.textContent = name;
+      insertChipNode(chip, silent);
     },
     setPlainText: (v) => {
       const el = elRef.current;
@@ -206,7 +249,7 @@ const ChipInput = forwardRef<ChipInputHandle, Props>(function ChipInput(
     const frag = sel.getRangeAt(0).cloneContents();
     const holder = document.createElement('div');
     holder.appendChild(frag);
-    e.clipboardData.setData('text/plain', serialize(holder));
+    e.clipboardData.setData('text/plain', serialize(holder, true));
     e.preventDefault();
     if (e.type === 'cut') {
       sel.getRangeAt(0).deleteContents();

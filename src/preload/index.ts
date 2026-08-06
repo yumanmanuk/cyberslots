@@ -7,8 +7,39 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import type { CyberSlotsApi } from '@shared/ipc';
 import { IPC } from '@shared/ipc';
-import type { CompatAuditSnapshot, EngineEventEnvelope } from '@shared/types';
+import type { CompatAuditSnapshot, EngineEventEnvelope, BrowserPanelState } from '@shared/types';
 import type { RaceEventEnvelope } from '@shared/race';
+
+// 首帧主题注入：主进程建窗时已解析出实际明暗（light/dark），经
+// additionalArguments 传到这里。必须在页面脚本执行前同步设置
+// <html data-mode>，否则首帧会按 index.css 的 :root 浅色兜底绘制，
+// 深色用户会看到「先浅后深」的启动闪烁。
+const csThemeArg = process.argv.find((a) => a.startsWith('--cs-theme='));
+const csTheme = csThemeArg?.slice('--cs-theme='.length);
+if (csTheme === 'dark' || csTheme === 'light') {
+  // preload tsconfig 不含 DOM lib，这里用最小结构类型访问 document，
+  // 避免为整段 preload 引入浏览器全局类型。
+  interface ThemeDocument {
+    documentElement: { dataset: Record<string, string> } | null | undefined;
+    addEventListener(
+      type: 'DOMContentLoaded',
+      listener: () => void,
+      options?: { once?: boolean },
+    ): void;
+  }
+  const themeDoc = (globalThis as unknown as { document?: ThemeDocument }).document;
+  const applyTheme = (): void => {
+    const el = themeDoc?.documentElement;
+    if (el) el.dataset.mode = csTheme;
+  };
+  // preload 启动时 documentElement 通常已就绪；万一未就绪则挂在
+  // DOMContentLoaded（仍在任何页面脚本之前），不影响首帧正确性。
+  if (themeDoc?.documentElement) {
+    applyTheme();
+  } else if (themeDoc) {
+    themeDoc.addEventListener('DOMContentLoaded', applyTheme, { once: true });
+  }
+}
 
 const api: CyberSlotsApi = {
   sessionCreate: (req) => ipcRenderer.invoke(IPC.sessionCreate, req),
@@ -17,6 +48,7 @@ const api: CyberSlotsApi = {
   sessionCancel: (sessionId) => ipcRenderer.invoke(IPC.sessionCancel, sessionId),
   sessionWarmUp: (sessionId) => ipcRenderer.invoke(IPC.sessionWarmUp, sessionId),
   sessionSetModel: (sessionId, modelId) => ipcRenderer.invoke(IPC.sessionSetModel, sessionId, modelId),
+  sessionSetEffort: (sessionId, effort) => ipcRenderer.invoke(IPC.sessionSetEffort, sessionId, effort),
   sessionSetMode: (sessionId, mode) => ipcRenderer.invoke(IPC.sessionSetMode, sessionId, mode),
   sessionAnswerPermission: (req) => ipcRenderer.invoke(IPC.sessionAnswerPermission, req),
   sessionClose: (sessionId) => ipcRenderer.invoke(IPC.sessionClose, sessionId),
@@ -25,6 +57,7 @@ const api: CyberSlotsApi = {
   sessionMessagesGet: (sessionId) => ipcRenderer.invoke(IPC.sessionMessagesGet, sessionId),
   sessionMessagesSave: (sessionId, messages) =>
     ipcRenderer.invoke(IPC.sessionMessagesSave, sessionId, messages),
+  sessionSearch: (req) => ipcRenderer.invoke(IPC.sessionSearch, req),
   sessionFork: (sessionId) => ipcRenderer.invoke(IPC.sessionFork, sessionId),
   sessionForkEngine: (sessionId, engine) => ipcRenderer.invoke(IPC.sessionForkEngine, sessionId, engine),
   sessionCompact: (sessionId) => ipcRenderer.invoke(IPC.sessionCompact, sessionId),
@@ -34,7 +67,8 @@ const api: CyberSlotsApi = {
   sessionChangesAccept: (sessionId, path) => ipcRenderer.invoke(IPC.sessionChangesAccept, sessionId, path),
   sessionUndoPreview: (sessionId, messageId) => ipcRenderer.invoke(IPC.sessionUndoPreview, sessionId, messageId),
   sessionUndo: (sessionId, messageId) => ipcRenderer.invoke(IPC.sessionUndo, sessionId, messageId),
-  sessionSteer: (sessionId, text) => ipcRenderer.invoke(IPC.sessionSteer, sessionId, text),
+  sessionSteer: (sessionId, text, attachments, messageId) =>
+    ipcRenderer.invoke(IPC.sessionSteer, sessionId, text, attachments, messageId),
   sessionGoalSet: (sessionId, objective) => ipcRenderer.invoke(IPC.sessionGoalSet, sessionId, objective),
   sessionGoalControl: (sessionId, action) => ipcRenderer.invoke(IPC.sessionGoalControl, sessionId, action),
   sessionSetSwarm: (sessionId, active) => ipcRenderer.invoke(IPC.sessionSetSwarm, sessionId, active),
@@ -44,10 +78,12 @@ const api: CyberSlotsApi = {
   workspaceAnnounce: (workspaceId) => ipcRenderer.invoke(IPC.workspaceAnnounce, workspaceId),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (patch) => ipcRenderer.invoke(IPC.settingsSet, patch),
+  dataDirGet: () => ipcRenderer.invoke(IPC.dataDirGet),
+  dataDirSet: (path) => ipcRenderer.invoke(IPC.dataDirSet, path),
   titleGenerate: (text) => ipcRenderer.invoke(IPC.titleGenerate, text),
   usageStats: (query) => ipcRenderer.invoke(IPC.usageStats, query),
   providerQuota: (force) => ipcRenderer.invoke(IPC.providerQuota, force),
-  engineConfigsGet: () => ipcRenderer.invoke(IPC.engineConfigsGet),
+  engineConfigsGet: (force) => ipcRenderer.invoke(IPC.engineConfigsGet, force),
   opencodeCatalogGet: (force) => ipcRenderer.invoke(IPC.opencodeCatalogGet, force),
   ompCatalogGet: (force) => ipcRenderer.invoke(IPC.ompCatalogGet, force),
     antigravityCatalogGet: (force) => ipcRenderer.invoke(IPC.antigravityCatalogGet, force),
@@ -59,6 +95,7 @@ const api: CyberSlotsApi = {
     agyAccountSwitch: (accountId) => ipcRenderer.invoke(IPC.agyAccountSwitch, accountId),
     agyQuota: (force, cachedOnly) => ipcRenderer.invoke(IPC.agyQuota, force, cachedOnly),
     agyActiveQuota: (force) => ipcRenderer.invoke(IPC.agyActiveQuota, force),
+  ompQuota: (force) => ipcRenderer.invoke(IPC.ompQuota, force),
   themeSync: (appearance) => ipcRenderer.invoke(IPC.themeSync, appearance),
   badgeSet: (dataUrl, description) => ipcRenderer.invoke(IPC.badgeSet, dataUrl, description),
   cronList: () => ipcRenderer.invoke(IPC.cronList),
@@ -70,12 +107,14 @@ const api: CyberSlotsApi = {
   fsRead: (path) => ipcRenderer.invoke(IPC.fsRead, path),
   fsWrite: (path, text, root) => ipcRenderer.invoke(IPC.fsWrite, path, text, root),
   fsGitStatus: (root) => ipcRenderer.invoke(IPC.fsGitStatus, root),
+  gitBaseContent: (root, path) => ipcRenderer.invoke(IPC.gitBaseContent, root, path),
   fsImport: (root, srcPaths) => ipcRenderer.invoke(IPC.fsImport, root, srcPaths),
   fsIsDir: (path) => ipcRenderer.invoke(IPC.fsIsDir, path),
   fsResolve: (root, rawPath) => ipcRenderer.invoke(IPC.fsResolve, root, rawPath),
   openIn: (target, path) => ipcRenderer.invoke(IPC.openIn, target, path),
   openersDetect: (force) => ipcRenderer.invoke(IPC.openersDetect, force),
   attachmentSaveTemp: (bytes, ext) => ipcRenderer.invoke(IPC.attachmentSaveTemp, bytes, ext),
+  attachmentDataUrl: (path) => ipcRenderer.invoke(IPC.attachmentDataUrl, path),
   slashList: (req) => ipcRenderer.invoke(IPC.slashList, req),
   terminalCreate: (id, cwd) => ipcRenderer.invoke(IPC.terminalCreate, id, cwd),
   terminalInput: (id, data) => ipcRenderer.invoke(IPC.terminalInput, id, data),
@@ -87,10 +126,24 @@ const api: CyberSlotsApi = {
     return () => ipcRenderer.removeListener(IPC.terminalData, wrapped);
   },
   onEngineEvent: (listener) => {
-    const wrapped = (_e: Electron.IpcRendererEvent, envelope: EngineEventEnvelope): void =>
+    const wrapped = (_e: Electron.IpcRendererEvent, envelope: EngineEventEnvelope | EngineEventEnvelope[]): void =>
       listener(envelope);
     ipcRenderer.on(IPC.engineEvent, wrapped);
     return () => ipcRenderer.removeListener(IPC.engineEvent, wrapped);
+  },
+  onSessionActivate: (listener) => {
+    const wrapped = (_e: Electron.IpcRendererEvent, sessionId: string): void => listener(sessionId);
+    ipcRenderer.on(IPC.sessionActivate, wrapped);
+    return () => ipcRenderer.removeListener(IPC.sessionActivate, wrapped);
+  },
+  // --- 受管浏览器（browser use） ---
+  browserGetState: () => ipcRenderer.invoke(IPC.browserGetState),
+  browserEnsure: () => ipcRenderer.invoke(IPC.browserEnsure),
+  browserStop: () => ipcRenderer.invoke(IPC.browserStop),
+  onBrowserEvent: (listener) => {
+    const wrapped = (_e: Electron.IpcRendererEvent, state: BrowserPanelState): void => listener(state);
+    ipcRenderer.on(IPC.browserEvent, wrapped);
+    return () => ipcRenderer.removeListener(IPC.browserEvent, wrapped);
   },
   compatAuditGet: () => ipcRenderer.invoke(IPC.compatAuditGet),
   onCompatAudit: (listener) => {
@@ -107,12 +160,15 @@ const api: CyberSlotsApi = {
   raceRevise: (raceId, annotation) => ipcRenderer.invoke(IPC.raceRevise, raceId, annotation),
   raceFinalize: (raceId) => ipcRenderer.invoke(IPC.raceFinalize, raceId),
   raceResume: (raceId) => ipcRenderer.invoke(IPC.raceResume, raceId),
+  raceOverrideAudit: (raceId) => ipcRenderer.invoke(IPC.raceOverrideAudit, raceId),
   raceUpdateRole: (raceId, role, cfg) => ipcRenderer.invoke(IPC.raceUpdateRole, raceId, role, cfg),
   raceRetryRacer: (raceId, role) => ipcRenderer.invoke(IPC.raceRetryRacer, raceId, role),
   raceRetryRacerIfMissing: (raceId, role) => ipcRenderer.invoke(IPC.raceRetryRacerIfMissing, raceId, role),
   raceEliminate: (raceId, role) => ipcRenderer.invoke(IPC.raceEliminate, raceId, role),
   raceRestartPlanning: (raceId) => ipcRenderer.invoke(IPC.raceRestartPlanning, raceId),
   raceCancel: (raceId) => ipcRenderer.invoke(IPC.raceCancel, raceId),
+  raceAcceptPreJudge: (raceId) => ipcRenderer.invoke(IPC.raceAcceptPreJudge, raceId),
+  raceDismissPreJudge: (raceId) => ipcRenderer.invoke(IPC.raceDismissPreJudge, raceId),
   onRaceEvent: (listener) => {
     const wrapped = (_e: Electron.IpcRendererEvent, envelope: RaceEventEnvelope): void => listener(envelope);
     ipcRenderer.on(IPC.raceEvent, wrapped);

@@ -52,6 +52,7 @@ export default function RaceLane({
 }): JSX.Element {
   const t = useT();
   const messages = useChatStore((s) => (sessionId ? s.ui[sessionId]?.messages : undefined));
+  const cancelling = useChatStore((s) => (sessionId ? !!s.cancelling[sessionId] : false));
   // 重启后会话消息是懒加载的（仅 selectSession 时水合）；泳道不走
   // 选择链路，需自行触发一次，否则已冲线角色（如执行者）恢复后
   // 永远空白。hydrateSession 幂等，重复调用零成本。
@@ -134,11 +135,12 @@ export default function RaceLane({
               <BrandSpinner size={11} /> {t('raceLaneRunning')}
               {onStop && sessionId && (
                 <button
-                  title={t('raceLaneStopTitle')}
+                  disabled={cancelling}
+                  title={cancelling ? t('stopping') : t('raceLaneStopTitle')}
                   onClick={onStop}
-                  className="ml-1 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err"
+                  className="ml-1 rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err disabled:opacity-40"
                 >
-                  <Square size={10} fill="currentColor" />
+                  {cancelling ? <BrandSpinner size={11} /> : <Square size={10} fill="currentColor" />}
                 </button>
               )}
             </>

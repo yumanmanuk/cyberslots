@@ -47,7 +47,7 @@ import { L } from '../../i18n';
 import { killEngineTree } from '../killTree';
 import { compatAudit } from '../compatAudit';
 import { log } from '../../log/logger';
-import { claudeSpawnEnv, resolveClaudeCli } from './resolveClaude';
+import { claudeSpawnEnv, readClaudeModelSlugs, resolveClaudeCli, resolveClaudeCustomModelId } from './resolveClaude';
 
 const INIT_TIMEOUT_MS = 30_000;
 
@@ -63,8 +63,9 @@ const MODE_MAP: Record<PermissionMode, string> = {
   yolo: 'bypassPermissions',
 };
 
-/** 可选模型别名（`claude` 接受别名或全名；启动时静态下发填充选择器）。 */
-export const CLAUDE_MODEL_SLUGS = ['default', 'sonnet', 'opus', 'haiku'];
+/** 可选模型别名（`claude` 接受别名或全名；启动时静态下发填充选择器）。
+ *  custom 槽位是否可用取决于 ANTHROPIC_CUSTOM_MODEL_OPTION，见 readClaudeModelSlugs。 */
+export const CLAUDE_MODEL_SLUGS = ['default', 'sonnet', 'opus', 'haiku', 'fable'];
 
 /** effort → Claude --effort（low/medium/high/xhigh/max）。 */
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -190,7 +191,7 @@ export class ClaudeAdapter implements EngineAdapter {
   private announceMeta(): void {
     if (this.announcedMeta) return;
     this.announcedMeta = true;
-    this.emit({ type: 'models.update', current: this.modelId, available: CLAUDE_MODEL_SLUGS });
+    this.emit({ type: 'models.update', current: this.modelId, available: readClaudeModelSlugs() });
     this.emit({ type: 'modes.update', current: this.mode, available: ['default', 'plan', 'auto', 'yolo'] });
   }
 
@@ -289,7 +290,8 @@ export class ClaudeAdapter implements EngineAdapter {
       // 使子代理执行过程实时可见（scripts/probe-claude-features.mjs 实测）。
       '--forward-subagent-text',
     ];
-    if (this.modelId && this.modelId !== 'default') args.push('--model', this.modelId);
+    const model = this.resolveModelId();
+    if (model) args.push('--model', model);
     args.push('--permission-mode', MODE_MAP[this.mode] ?? 'default');
     if (this.effort) args.push('--effort', this.effort);
     // 额外 MCP 服务器（claude 自身的 ~/.claude MCP 无论如何都自动加载）。
@@ -454,15 +456,21 @@ export class ClaudeAdapter implements EngineAdapter {
 
   async setModel(modelId: string): Promise<void> {
     this.modelId = modelId;
-    this.emit({ type: 'models.update', current: modelId, available: CLAUDE_MODEL_SLUGS });
+    this.emit({ type: 'models.update', current: modelId, available: readClaudeModelSlugs() });
     // 运行中热切：发 control_request(set_model)；未起进程则下次 spawn 生效。
     if (this.child) {
       this.send({
         type: 'control_request',
         request_id: `model-${randomUUID().slice(0, 8)}`,
-        request: { subtype: 'set_model', model: modelId === 'default' ? undefined : modelId },
+        request: { subtype: 'set_model', model: this.resolveModelId() },
       });
     }
+  }
+
+  /** 实际下发给 CLI 的模型值：custom 槽位解析为 ANTHROPIC_CUSTOM_MODEL_OPTION。 */
+  private resolveModelId(): string | undefined {
+    if (this.modelId === 'custom') return resolveClaudeCustomModelId();
+    return this.modelId && this.modelId !== 'default' ? this.modelId : undefined;
   }
 
   async setMode(mode: PermissionMode): Promise<void> {

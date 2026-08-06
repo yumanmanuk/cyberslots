@@ -35,10 +35,15 @@ import {
   builderPrompt,
   continuePrompt,
   continueBuildPrompt,
+  finalPlanProblems,
   judgeFusePrompt,
+  judgePlanFixPrompt,
   judgeRevisePrompt,
   parseAuditVerdict,
+  parsePreJudgeRecommendation,
+  parseRepairDecision,
   planPrompt,
+  preJudgePrompt,
   rebuttalPrompt,
   repairPrompt,
   roleSessionTitle,
@@ -95,13 +100,15 @@ const DEFAULT_MAX_REPAIR = 3;
 /** runTurn 拒绝错误里的额度耗尽哨兵：嵌在 message 里传给 runTurnWithRetry
  *  （Error 无自定义字段，避免靠英文文案匹配）。 */
 const QUOTA_FLAG = ' [quotaExhausted]';
+/** 执行者拒绝全部审计意见的哨兵：safe 据此按"待人工介入"处理而不是普通错误。 */
+const REJECT_ALL_FLAG = ' [builderRejectedAll]';
 
 export class RaceOrchestrator {
   private readonly groups = new Map<string, RaceGroup>();
   /** 选手阶段链（规划/反驳）存活标记：链活着时单选手重试不代为推进阶段。 */
   private readonly chainActive = new Set<string>();
   /** 进行中的泳道级重试（`raceId:role`）：链收尾时若缺产物的选手正被
-   *  重试接管，链让位退出而非抛旧错（防“重试在跑却弹异常横幅”）。 */
+   *  重试接管，链让位退出而非抛旧错（防"重试在跑却弹异常横幅"）。 */
   private readonly retrying = new Set<string>();
   /** 进行中回合等待的唤醒句柄（sessionId → abort）：剔除僵死选手时
    *  主动 reject 其等待，防止阶段链永久挂起。 */
@@ -141,6 +148,9 @@ export class RaceOrchestrator {
       maxRepairRounds: req.maxRepairRounds ?? DEFAULT_MAX_REPAIR,
       parentSessionId: req.parentSessionId,
       contextSeed: req.contextSeed,
+      preJudgeMode: req.preJudgeMode ?? 'off',
+      designateStrategy: req.designateStrategy,
+      designateComment: req.designateComment,
       createdAt: now,
       updatedAt: now,
     };
@@ -175,7 +185,7 @@ export class RaceOrchestrator {
     const judgeId = await this.ensureRole(g, 'judge');
     const cfg = g.roles.judge;
     const art = g.artifacts ?? {};
-    const plan = await this.runTurnWithRetry(
+    let plan = await this.runTurnWithRetry(
       g,
       judgeId,
       withGuard(
@@ -195,6 +205,32 @@ export class RaceOrchestrator {
       cfg,
       continuePrompt(),
     );
+    // 完整性门槛：裁判把方案写成「状态声明/占位符」（如只写"已完成"或
+    // 指向外部审批）时，自动重出一次；仍不合格则停等人工，不进 building。
+    const problems = finalPlanProblems(plan);
+    if (problems.length) {
+      const retried = await this.runTurnWithRetry(
+        g,
+        judgeId,
+        withGuard(judgePlanFixPrompt(plan, problems), this.needsGuard('judge', cfg)),
+        cfg,
+        continuePrompt(),
+      );
+      const stillProblems = finalPlanProblems(retried);
+      if (stillProblems.length) {
+        log.warn('race', 'judge produced non-auditable final plan', { raceId: g.id, problems: stillProblems });
+        this.host.emit(g.id, {
+          type: 'race.error',
+          role: 'judge',
+          message: L(
+            `裁判产出的最终方案不可审计：${stillProblems.join('；')}。已停在裁判环节，请重跑裁判或提供方案原文。`,
+            `Judge final plan is not auditable: ${stillProblems.join('; ')}. Stopped at judging; rerun the judge or provide the plan text.`,
+          ),
+        });
+        return;
+      }
+      plan = retried;
+    }
     // 首次出方案为 v1；手动重新出方案（rerunJudge，如换裁判后）时 v+1
     // 覆盖展示（旧方案文本在弃用的旧裁判会话历史中仍可回看）。
     const version = g.finalPlan ? g.finalPlanVersion + 1 : 1;
@@ -202,6 +238,11 @@ export class RaceOrchestrator {
     g.finalPlanVersion = version;
     this.touch(g);
     this.host.emit(g.id, { type: 'race.finalPlan', version, text: plan });
+    // 全自动 / 指定选手模式：跳过批注定稿，直接进 builder（审计兜底）。
+    if (g.preJudgeMode === 'auto' || g.preJudgeMode === 'designate') {
+      this.host.emit(g.id, { type: 'race.autoFinalized', version });
+      this.finalize(g.id);
+    }
   }
 
   /** 让裁判按既定采纳策略重新出方案（换裁判引擎后手动重跑）：叫停
@@ -245,6 +286,20 @@ export class RaceOrchestrator {
       cfg,
       continuePrompt(),
     );
+    // 修订后仍须可审计；不合格时保留上一版，不让坏方案覆盖好方案。
+    const problems = finalPlanProblems(plan);
+    if (problems.length) {
+      log.warn('race', 'judge revision not auditable, keeping previous plan', { raceId: g.id, problems });
+      this.host.emit(g.id, {
+        type: 'race.error',
+        role: 'judge',
+        message: L(
+          `裁判修订后的最终方案不可审计：${problems.join('；')}。已保留上一版，请重跑裁判或再次批注。`,
+          `Revised final plan is not auditable: ${problems.join('; ')}. Previous version kept; rerun the judge or annotate again.`,
+        ),
+      });
+      return;
+    }
     g.finalPlan = plan;
     g.finalPlanVersion += 1;
     this.touch(g);
@@ -275,6 +330,19 @@ export class RaceOrchestrator {
   finalize(raceId: string): void {
     const g = this.groups.get(raceId);
     if (!g || g.stage !== 'judging' || !g.finalPlan) return;
+    // 入口再拦一次：防旧数据/被篡改的 race 携带占位方案直接进实施。
+    const problems = finalPlanProblems(g.finalPlan);
+    if (problems.length) {
+      this.host.emit(g.id, {
+        type: 'race.error',
+        role: 'judge',
+        message: L(
+          `最终方案不可审计，无法进入实施：${problems.join('；')}。请重跑裁判或先补充方案内容。`,
+          `Final plan is not auditable, cannot proceed to implementation: ${problems.join('; ')}. Rerun the judge or complete the plan first.`,
+        ),
+      });
+      return;
+    }
     // 同步先切阶段：堵住双击/重复 IPC 导致的 Builder 双发 prompt。
     this.setStage(g, 'building');
     void this.safe(raceId, () => this.runBuilding(g));
@@ -470,6 +538,23 @@ export class RaceOrchestrator {
     this.finish(g, false);
   }
 
+  /** 审计未通过但执行者坚持当前实现时，由用户人工放行：叫停当前审计/修复
+   *  回合，把当前改动按"已交付"结束，不再继续审计-修复循环。 */
+  overrideAudit(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage === 'done' || !g.audit || g.audit.passed || g.delivered) return;
+    for (const role of ['builder', 'auditor'] as const) {
+      const sid = g.sessions[role];
+      if (!sid || !this.pendingTurns.has(sid)) continue;
+      this.host.cancelTurn(sid);
+      this.pendingTurns.get(sid)?.();
+      this.pendingTurns.delete(sid);
+    }
+    g.auditOverridden = true;
+    log.info('race', 'audit overridden by user', { raceId });
+    this.finish(g, true);
+  }
+
   /**
    * 重启后继续被打断的赛马：重跑当前阶段（复用已有角色会话，
    * ensureRuntime 会自动复活引擎进程）。judging 纯等待态无需重跑，
@@ -501,6 +586,24 @@ export class RaceOrchestrator {
         case 'rebuttal':
           return this.runRebuttal(g);
         case 'judging': {
+          // designate 模式恢复：预置策略尚未采纳 → 重新自动采纳。
+          if (g.preJudgeMode === 'designate' && g.designateStrategy && !g.adopt) {
+            log.info('race', 'resume: designate mode re-adopting preset strategy', {
+              raceId: g.id, strategy: g.designateStrategy,
+            });
+            this.adoptStrategy(g.id, g.designateStrategy, g.designateComment);
+            return;
+          }
+          // AI 初审恢复：preJudge 模式且未产出推荐且未采纳 → 重跑 preJudge；
+          // auto 模式已有推荐但未采纳（中断在推荐产出与自动采纳之间）→ 自动采纳。
+          if (g.preJudgeMode && g.preJudgeMode !== 'off' && g.preJudgeMode !== 'designate' && !g.adopt) {
+            if (!g.preJudgeRecommendation) return this.runPreJudge(g);
+            if (g.preJudgeMode === 'auto') {
+              this.host.emit(g.id, { type: 'race.preJudgeAutoAdopted', strategy: g.preJudgeRecommendation.strategy });
+              this.adoptStrategy(g.id, g.preJudgeRecommendation.strategy);
+              return;
+            }
+          }
           // 裁判出方案/修订中被打断 → 重跑那一步；纯等待态 → 重发事件即可。
           if (g.adopt && !g.finalPlan) return this.runFuse(g);
           if (g.finalPlan && g.annotations.length >= g.finalPlanVersion) {
@@ -515,9 +618,17 @@ export class RaceOrchestrator {
         case 'building':
           return this.runBuilding(g);
         case 'auditing':
-        case 'repairing':
-          // 修复中断 → 直接重审：若仍有问题会自然进入下一轮修复。
           return this.runAuditing(g);
+        case 'repairing': {
+          // 修复中断 → 先续/重跑当前修复回合，不跳过执行者；执行者若拒绝
+          // 全部审计意见则停下交人工，不再自动进入审计。
+          const issues = g.audit?.issues ?? [];
+          if (issues.length) {
+            const decision = await this.runRepairTurn(g, issues);
+            if (decision.rejectedAll) this.stopForHuman(g);
+          }
+          return this.runAuditing(g);
+        }
         default:
           return;
       }
@@ -728,6 +839,115 @@ export class RaceOrchestrator {
     // 只预热裁判会话，不出方案 —— 等用户先选定采纳策略（adoptStrategy），
     // 再按策略 + 评语产出最终方案；之后进入批注/修订循环直到定稿。
     await this.ensureRole(g, 'judge');
+
+    // designate 模式：赛前已预置采纳策略，跳过 AI 初审和人工选择，直接走裁判出方案。
+    if (g.preJudgeMode === 'designate' && g.designateStrategy && !g.adopt) {
+      log.info('race', 'designate mode: auto-adopting preset strategy', {
+        raceId: g.id, strategy: g.designateStrategy,
+      });
+      this.adoptStrategy(g.id, g.designateStrategy, g.designateComment);
+      return;
+    }
+
+    // AI 初审：在用户选策略前由 AI 评审并给出推荐（suggest/auto 模式）。
+    // 失败/降级不阻塞 —— 纯人工 4 选 1 始终可用。
+    if (g.preJudgeMode && g.preJudgeMode !== 'off' && !g.preJudgeRecommendation && !g.adopt) {
+      await this.runPreJudge(g);
+    }
+  }
+
+  /**
+   * ★ AI 初审 —— 在裁判选策略前，由 AI 评审各方方案并给出推荐策略 + 理由。
+   *  独立于裁判会话（避免污染裁判上下文），复用裁判的角色配置。
+   *  - suggest 模式：产出推荐后 emit 事件，等用户一键采纳或自己改
+   *  - auto 模式：产出推荐后自动采纳 → runFuse → autoFinalize
+   *  失败/超时/解析失败 → emit preJudgeUnavailable 降级为纯人工，不阻塞。
+   */
+  private async runPreJudge(g: RaceGroup): Promise<void> {
+    if (g.preJudgeRecommendation || g.adopt) return; // 已有推荐或已采纳 → 跳过
+    this.host.emit(g.id, { type: 'race.preJudgeReviewing' });
+    const cfg = g.roles.judge;
+    const sessionId = await this.ensurePreJudgeSession(g);
+    const art = g.artifacts ?? {};
+    const racers = this.racersOf(g).map((r) => ({
+      label: this.racerLetter(r),
+      plan: art[this.planKeyOf(r)] ?? '',
+      rebuttal: art[this.rebutKeyOf(r)] ?? '',
+    }));
+    let out: string;
+    try {
+      out = await this.runTurnWithRetry(
+        g,
+        sessionId,
+        withGuard(
+          preJudgePrompt(g.prompt, racers, (g.eliminated ?? []).map((r) => this.racerLetter(r))),
+          this.needsGuard('preJudge', cfg),
+        ),
+        cfg,
+        continuePrompt(),
+      );
+    } catch (err) {
+      this.fallBackFromPreJudge(g, err instanceof Error ? err.message : String(err));
+      return;
+    }
+    const parsed = parsePreJudgeRecommendation(out);
+    if (!parsed) {
+      this.fallBackFromPreJudge(g, L('AI 初审输出无法解析', 'AI pre-judge output unparseable'));
+      return;
+    }
+    g.preJudgeRecommendation = parsed;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.preJudgeRecommendation', recommendation: parsed });
+    // auto 模式：自动采纳 → runFuse → autoFinalize（链式推进）。
+    if (g.preJudgeMode === 'auto') {
+      this.host.emit(g.id, { type: 'race.preJudgeAutoAdopted', strategy: parsed.strategy });
+      this.adoptStrategy(g.id, parsed.strategy);
+    }
+    // suggest 模式：等用户在 UI 上点"采纳"或自己改。
+  }
+
+  /** AI 初审失败/降级：记日志、emit 事件、不阻塞（回到纯人工 4 选 1）。 */
+  private fallBackFromPreJudge(g: RaceGroup, reason: string): void {
+    log.warn('race', 'pre-judge unavailable, falling back to manual', { raceId: g.id, reason });
+    this.host.emit(g.id, { type: 'race.preJudgeUnavailable', reason });
+  }
+
+  /** 确保 AI 初审会话存在（独立于裁判会话，避免上下文污染）。
+   *  优先使用 preJudge 专属配置；旧数据无 preJudge 配置时 fallback 到 judge。 */
+  private async ensurePreJudgeSession(g: RaceGroup): Promise<string> {
+    const existing = g.sessions.preJudge;
+    if (existing) return existing;
+    const cfg = g.roles.preJudge ?? g.roles.judge;
+    if (!cfg) throw new Error(L('裁判角色未配置', 'Judge role not configured'));
+    const id = await this.host.spawn({
+      engine: cfg.engine,
+      cwd: g.cwd,
+      modelId: cfg.modelId,
+      permissionMode: resolveRoleMode('preJudge', cfg),
+      title: roleSessionTitle('preJudge', g.prompt),
+      raceId: g.id,
+    });
+    g.sessions.preJudge = id;
+    this.touch(g);
+    this.host.emit(g.id, { type: 'race.role', role: 'preJudge', sessionId: id });
+    return id;
+  }
+
+  /** 用户在 UI 上点"采纳 AI 初审建议"：等同于用推荐策略调 adoptStrategy。 */
+  acceptPreJudge(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage !== 'judging' || !g.preJudgeRecommendation || g.adopt) return;
+    log.info('race', 'accept pre-judge recommendation', { raceId, strategy: g.preJudgeRecommendation.strategy });
+    this.adoptStrategy(raceId, g.preJudgeRecommendation.strategy);
+  }
+
+  /** 用户在 UI 上点"忽略 AI 初审建议"：清除推荐，回到纯人工 4 选 1。 */
+  dismissPreJudge(raceId: string): void {
+    const g = this.groups.get(raceId);
+    if (!g || g.stage !== 'judging' || g.adopt) return;
+    log.info('race', 'dismiss pre-judge recommendation', { raceId });
+    g.preJudgeRecommendation = undefined;
+    this.touch(g);
   }
 
   private async runBuilding(g: RaceGroup): Promise<void> {
@@ -760,6 +980,7 @@ export class RaceOrchestrator {
       type: 'race.audit',
       passed: verdict.passed,
       issues: verdict.issues,
+      body: verdict.body,
       repairRound: g.repairRound,
     });
     if (verdict.passed) return this.finish(g, true);
@@ -770,28 +991,50 @@ export class RaceOrchestrator {
   private async runRepair(g: RaceGroup, issues: string[]): Promise<void> {
     g.repairRound += 1;
     this.setStage(g, 'repairing');
-    const builderId = g.sessions.builder!;
-    const cfg = g.roles.builder;
-    await this.runTurnWithRetry(g, builderId, repairPrompt(issues), cfg, continueBuildPrompt());
+    const decision = await this.runRepairTurn(g, issues);
+    if (decision.rejectedAll) this.stopForHuman(g);
     await this.runAuditing(g);
   }
 
+  /** 单独跑一轮 Builder 修复（不重复 +1 repairRound）：resume/换配置重试
+   *  同一轮修复时使用；执行者必须表态，全部拒绝时由调用方停止回合。 */
+  private async runRepairTurn(g: RaceGroup, issues: string[]): Promise<{ rejectedAll: boolean }> {
+    const builderId = await this.ensureRole(g, 'builder');
+    const cfg = g.roles.builder;
+    const out = await this.runTurnWithRetry(g, builderId, repairPrompt(issues), cfg, continueBuildPrompt());
+    return parseRepairDecision(out);
+  }
+
+  /** 执行者拒绝全部审计意见：作为"待人工介入"停下，不自动进入下一轮。 */
+  private stopForHuman(g: RaceGroup): never {
+    log.warn('race', 'builder rejected all audit issues; awaiting human decision', {
+      raceId: g.id,
+      repairRound: g.repairRound,
+    });
+    throw new Error(L(
+      `执行者拒绝全部审计意见，回合已停止，请人工介入${REJECT_ALL_FLAG}`,
+      `Builder rejected all audit issues; turn stopped for manual review${REJECT_ALL_FLAG}`,
+    ));
+  }
+
   private finish(g: RaceGroup, delivered: boolean): void {
+    g.delivered = delivered;
     this.setStage(g, 'done');
-    this.host.emit(g.id, { type: 'race.done', delivered });
+    this.host.emit(g.id, { type: 'race.done', delivered, overridden: g.auditOverridden });
   }
 
   // ------------------------------------------------------------- helpers
 
-  /** 取角色已有会话，没有才新建（重启恢复/重跑阶段时不重复 spawn）。 */
-  private async ensureRole(g: RaceGroup, role: RaceRole): Promise<string> {
+  /** 取角色已有会话，没有才新建（重启恢复/重跑阶段时不重复 spawn）。
+   *  preJudge 走独立的 ensurePreJudgeSession（复用 judge 配置），不经过此路径。 */
+  private async ensureRole(g: RaceGroup, role: Exclude<RaceRole, 'preJudge'>): Promise<string> {
     const existing = g.sessions[role];
     if (existing) return existing;
     return this.spawnRole(g, role);
   }
 
   /** Spawn a role's session, record it, and announce to the renderer. */
-  private async spawnRole(g: RaceGroup, role: RaceRole): Promise<string> {
+  private async spawnRole(g: RaceGroup, role: Exclude<RaceRole, 'preJudge'>): Promise<string> {
     const cfg = g.roles[role];
     if (!cfg) throw new Error(L(`角色未配置：${role}`, `Role not configured: ${role}`));
     const id = await this.host.spawn({
@@ -811,7 +1054,7 @@ export class RaceOrchestrator {
   /** 瞬时错误自动重试（用户主动中止/打断/剔除不重试 —— 对被剔者重发
    *  prompt 是灾难）；连续失败才上浮 race.error 交给用户。
    *  retryText 非空时重试改发它而不是原指令 —— 断点续跑（agy 高频的
-   *  “Agent execution terminated” 模型侧瞬时错是主要受众）：会话上下文
+   *  "Agent execution terminated" 模型侧瞬时错是主要受众）：会话上下文
    *  还在引擎侧，发「继续」让模型接着断点干，比重发整段指令从头再跑省
    *  token 且不丢已完成的半段产物。续跑便宜且幂等 → 给 2 次续跑机会
    *  （共 3 次尝试，递增退避）；无 retryText 保持旧行为（重发原文 1 次）。 */
@@ -951,6 +1194,15 @@ export class RaceOrchestrator {
       const message = err instanceof Error ? err.message : String(err);
       // 被主动打断（撤回决策/重跑规划/剔除唤醒）不是错误，不弹横幅。
       if (message.includes('superseded')) return;
+      // 执行者拒绝全部审计意见 → 按"待人工介入"记录，而不是普通阶段失败。
+      if (message.includes(REJECT_ALL_FLAG)) {
+        log.warn('race', 'repair stopped for manual review', { raceId }, err);
+        this.host.emit(raceId, {
+          type: 'race.error',
+          message: message.replace(REJECT_ALL_FLAG, '').trim(),
+        });
+        return;
+      }
       log.error('race', 'stage chain failed', { raceId }, err);
       this.host.emit(raceId, { type: 'race.error', message });
     }

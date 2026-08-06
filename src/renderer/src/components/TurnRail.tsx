@@ -203,13 +203,15 @@ export default function TurnRail({
             style={{ top: hoverTick * TICK_STEP + TICK_STEP / 2 }}
           >
             <div className="line-clamp-2 text-[12px] leading-[18px] text-ink-faint">{hoveredTurn.question}</div>
+            {/* Question / answer 之间的虚线分隔 —— dashed 让边线有呼吸感而非硬切割，1px 不抢外边框 */}
+            <div className="my-2 border-t border-dashed border-line" />
             {hoveredTurn.heading && (
-              <div className="mt-1 line-clamp-1 text-[13px] font-semibold leading-5 text-ink">{hoveredTurn.heading}</div>
+              <div className="line-clamp-1 text-[13px] font-semibold leading-5 text-ink">{hoveredTurn.heading}</div>
             )}
             {hoveredTurn.snippet ? (
               <div className="mt-0.5 line-clamp-3 text-[12px] leading-[18px] text-ink-soft">{hoveredTurn.snippet}</div>
             ) : (
-              !hoveredTurn.heading && <div className="mt-1 text-[12px] text-ink-faint">{t('turnRailPending')}</div>
+              !hoveredTurn.heading && <div className="text-[12px] text-ink-faint">{t('turnRailPending')}</div>
             )}
           </div>
         )}

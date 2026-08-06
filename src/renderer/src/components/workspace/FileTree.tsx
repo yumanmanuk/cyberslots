@@ -13,6 +13,8 @@ import { useT } from '../../i18n';
 interface Props {
   /** workspace 全部根目录（首个为 primary）；普通项目传单元素数组。 */
   roots: string[];
+  /** 当前在预览/编辑面板中打开的文件 — 树中常驻高亮（无则 null）。 */
+  activePath?: string | null;
   onOpenFile: (path: string) => void;
 }
 
@@ -49,7 +51,7 @@ const GIT_COLORS: Record<string, string> = {
   R: 'text-info',
 };
 
-export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
+export default function FileTree({ roots, activePath = null, onOpenFile }: Props): JSX.Element {
   const t = useT();
   const [children, setChildren] = useState<Record<string, FsNode[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -62,6 +64,9 @@ export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
 
   const multi = roots.length > 1;
   const rootsKey = roots.join('|');
+  // Windows 路径大小写不敏感 + 分隔符混用，比较前统一归一化。
+  const normKey = (p: string): string => p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+  const activeKey = activePath ? normKey(activePath) : null;
 
   const loadDir = useCallback(
     async (dir: string): Promise<void> => {
@@ -139,35 +144,40 @@ export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
   };
 
   const renderNodes = (dir: string, depth: number): JSX.Element[] =>
-    (children[dir] ?? []).map((n) => (
-      <div key={n.path}>
-        <button
-          draggable
-          onDragStart={(e) => onNodeDragStart(e, n)}
-          onClick={() => (n.dir ? toggle(n.path) : onOpenFile(n.path))}
-          onDoubleClick={() => !n.dir && onOpenFile(n.path)}
-          className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[12.5px] text-ink-soft hover:bg-bg-hover"
-          style={{ paddingLeft: 6 + depth * 14 }}
-          title={n.path}
-        >
-          {n.dir ? (
-            <>
-              {expanded.has(n.path) ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
-              {expanded.has(n.path) ? <FolderOpen size={13} className="shrink-0 text-accent/80" /> : <Folder size={13} className="shrink-0 text-accent/80" />}
-            </>
-          ) : (
-            <FileText size={13} className="ml-[12px] shrink-0 text-ink-faint" />
-          )}
-          <span className="min-w-0 flex-1 truncate">{n.name}</span>
-          {!n.dir && git[n.path] && (
-            <span className={`shrink-0 font-mono text-[10px] font-bold ${GIT_COLORS[git[n.path]!] ?? 'text-ink-faint'}`}>
-              {git[n.path]}
-            </span>
-          )}
-        </button>
-        {n.dir && expanded.has(n.path) && renderNodes(n.path, depth + 1)}
-      </div>
-    ));
+    (children[dir] ?? []).map((n) => {
+      const isActive = !n.dir && activeKey !== null && normKey(n.path) === activeKey;
+      return (
+        <div key={n.path}>
+          <button
+            draggable
+            onDragStart={(e) => onNodeDragStart(e, n)}
+            onClick={() => (n.dir ? toggle(n.path) : onOpenFile(n.path))}
+            onDoubleClick={() => !n.dir && onOpenFile(n.path)}
+            className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[12.5px] ${
+              isActive ? 'bg-bg-active font-medium text-ink' : 'text-ink-soft hover:bg-bg-hover'
+            }`}
+            style={{ paddingLeft: 6 + depth * 14 }}
+            title={n.path}
+          >
+            {n.dir ? (
+              <>
+                {expanded.has(n.path) ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+                {expanded.has(n.path) ? <FolderOpen size={13} className="shrink-0 text-accent/80" /> : <Folder size={13} className="shrink-0 text-accent/80" />}
+              </>
+            ) : (
+              <FileText size={13} className={`ml-[12px] shrink-0 ${isActive ? 'text-accent' : 'text-ink-faint'}`} />
+            )}
+            <span className="min-w-0 flex-1 truncate">{n.name}</span>
+            {!n.dir && git[n.path] && (
+              <span className={`shrink-0 font-mono text-[10px] font-bold ${GIT_COLORS[git[n.path]!] ?? 'text-ink-faint'}`}>
+                {git[n.path]}
+              </span>
+            )}
+          </button>
+          {n.dir && expanded.has(n.path) && renderNodes(n.path, depth + 1)}
+        </div>
+      );
+    });
 
   return (
     <div
@@ -197,7 +207,7 @@ export default function FileTree({ roots, onOpenFile }: Props): JSX.Element {
           <RefreshCw size={12} />
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-1 pb-2">
+      <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
         {error && <div className="px-2 py-1 text-[11px] text-err">{error}</div>}
         {dragOver && <div className="px-2 py-1 text-[11px] text-accent">{t('treeDropImport', { name: roots[0]!.split(/[\\/]/).pop() ?? '' })}</div>}
         {/* 根目录未到达（undefined）= 读盘中，与空目录（[]）区分 — 避免初载瞬间的无指示空白 */}

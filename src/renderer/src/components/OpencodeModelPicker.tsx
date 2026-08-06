@@ -106,11 +106,7 @@ export default function OpencodeModelPicker({ sessionId }: { sessionId: string }
     const efforts = bySlug.get(slug)?.efforts;
     const cur = useChatStore.getState().efforts[sessionId];
     if (cur && !(efforts ?? []).includes(cur)) {
-      useChatStore.setState((s) => {
-        const next = { ...s.efforts };
-        delete next[sessionId];
-        return { efforts: next };
-      });
+      useChatStore.getState().setSessionEffort(sessionId, null);
     }
   };
 

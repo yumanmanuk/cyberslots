@@ -2,7 +2,16 @@
 
 > 本文件是后续新对话的**唯一总指引**（as-built 版）：记录已定决策、已实现功能、关键实测结论、代码地图、遗留项与后续路线。
 > 历史决策依据见 `d:\ai-agent\handoff.md`；阶段 0 实测报告见 `cyberslots/docs/phase0-findings.md`。
-> 最后更新：2026-07-31 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+> 最后更新：2026-08-05 · 代码仓库 `d:\demo\cyberslots` · 最新 commit `8129fec`
+>
+> 🆕 **2026-08-05 追加（赛马 AI 初审 + 全自动模式 + 结果回流宿主对话，详见 §4.20）**：
+> **① AI 初审三态模式**（`RacePreJudgeMode: 'off' | 'suggest' | 'auto'`，发令面板三态分段控件，主从关系由分段自然表达）：
+> - **off（默认）**：纯人工 4 选 1，现状不变；
+> - **suggest（半自动）**：裁判选策略前由 AI 评审各方方案，产出推荐策略 + 理由（markdown 结构化：推荐策略 / 一句话结论 / 推荐理由 / 各选手点评）；JudgePanel AdoptStep 显示紧凑 banner（结论一行 + 展开/采纳/忽略），展开复用 `ArtifactZoom` 弹窗查看完整详情；推荐到达时策略网格自动高亮推荐项，用户可一键采纳或自己改；
+> - **auto（全自动）**：AI 推荐 → 自动采纳 → 裁判 fuse 出方案后跳过批注定稿直接进 builder（审计兜底，端到端无人值守）；AdoptStep 显示只读过场 banner，Working 显示「AI 已自动采纳」文案。
+> preJudge 是编排器内部临时角色（`RaceRole` 加 `'preJudge'` 但不计入 `RACE_ROLES` 配置遍历），复用 judge 的引擎/模型配置但 spawn 独立会话避免上下文污染；`ensurePreJudgeSession` 独立于 `ensureRole`（类型收窄 `Exclude<RaceRole,'preJudge'>`）；失败/超时/解析失败 emit `race.preJudgeUnavailable` 降级为纯人工（不弹错误横幅不阻塞）；重启恢复含 preJudge 链路（未产出推荐重跑、auto 模式已有推荐自动采纳）。
+>
+> **② 赛马结果回流宿主对话**：赛马完成（`race.done`）时把最终方案 + 执行结果发给宿主对话的引擎（`chatStore.sendRaceResult`），使 AI 上下文包含赛马产物——用户可直接在宿主对话就方案提问，AI 据赛马结果回答；UI 上渲染为**赛马结果卡片**（`MessageItem.RaceResultCard`，`UnifiedMessage` user 类型加 `raceResult?` 标记字段）：标题行（🏇 赛马完成 · 最终方案 vN + 审计通过/未通过 + 已交付/未交付 + 修复轮次徽章）→ 默认折叠、点击展开 finalPlan markdown → 底部「查看完整赛马」按钮（打开赛马视图回看全程）+ 提示行「可直接就方案提问」。无 finalPlan（中止/修复耗尽）降级为纯文字系统公告。`sendRaceResult` 失败也降级为公告。
 >
 > 🆕 **2026-07-31 追加（kimi KAP 双通道——kimi web REST+WS 首选 + ACP 降级兜底，本轮主体功能，详见 §4.26）**：kimi 会话优先走 **KimiKapAdapter（KAP：`kimi web` kap-server，REST `/api/v1` + WebSocket，背后 agent-core-v2）**，全面补齐 ACP 通道缺失/模拟的能力：**原生 goal**（profile.agent_config.goal_objective/goal_control + goal.updated，含自发续跑）· **原生 steer**（prompts:steer）· **原生 fork**（:fork 真分支）· **原生 compact**（:compact + 四态事件）· **plan_mode** · **原生 swarm_mode**（会话级开关，取代提示词软引导；Composer ⚡ 按能力分流）· **子代理/Swarm 可视化**（subagent.* → 每人一张任务卡卡内进度行，TUI 并行网格桌面等价物）· **真实 usage**（turn.step.completed 逐调用累计，不再字符估算）· **独立 thinking.delta** · **斜杠命令**（/compact + skill :activate，含内置 skills）· **计划面板**（TodoList display → plan.update）· **附件真上传**（POST /files 拿 file_id）· **多问题逐问全量回答** · **plan_review/goal_start 富确认卡**（permission body 卡内滚动看计划全文）。**选路铁律**：会话粒度一选定终身（kimiChannel），KAP 起不来才降级 ACP（只启动时降、不回合热切），旧 ACP 历史会话粘性不迁（跨代际 v1/v2 resume 必丢上下文）。**KapServerHost** 单例发现优先于 spawn（复用用户已跑 `kimi web` + server.token bearer）；**启动能力检测** detectKap 入 engineConfigs 快照；**会话能力快照** SessionMeta.capabilities 经 session.meta patch 驱动 UI 门控（同一引擎不同通道能力不同）。⚠ kap-server 是 private 0.1.0、WS 刚经 v2 breaking，**无对外稳定承诺**，靠 ACP 兜底 + 兼容审计；全部按源码核实，**尚未真机联调**。新增依赖 `ws`。
 >
@@ -396,17 +405,23 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - **完整流程**：双/三选手盲跑并行规划（互不可见）→ 交叉反驳（单轮对称，方案冻结不改稿）→ 裁判（两道人工关口）→ 执行者实施 → 独立审计 → 修复回环（≤maxRepairRounds=3，超限终止未交付）
 - **反驳三段式**（对象归属切割防写串）：⚔ 反驳（只谈对手方案缺陷，按选手分节）/ 🤝 吸纳（承认对手更优的点 + 若按己方实施如何吸纳；只列真正重要防过度设计，没有写“无”不硬凑 —— 声明而非改稿，冻结不破）/ 🛡 辩护（预判质疑的预防性澄清，只谈己方设计点）；互相吸纳的共识点 = 裁判高置信输入
 - **裁判两道人工关口**：④a 采纳决策前置 —— 用户先选策略（采纳X / 以X为准结合其余；策略集按在场选手动态生成 4/6 项）+ 可选评语；④b 裁判严格按决策三段式出方案：一、最终方案（正文干净无溯源标注）/ 二、**设计溯源表**（主要设计点粒度，来源限定 选手X／共识／裁判补充；身份约束「你不是又一位选手」，裁判私货强制自曝供审计）/ 三、取舍说明；④c 批注 → 修订 v+1 循环（溯源表同步维护，批注改动标「用户批注」来源）→ 定稿交执行；出方案前可 **↩ 重新选择策略**（叫停裁判回合回选策略关口，出方案后改意见走批注道），选策略前可 **↩ 重跑规划**（清产物回炉）
+- **★ AI 初审三态模式（2026-08-05，`RacePreJudgeMode`）**：发令面板三态分段控件（off / suggest / auto），主从关系由分段自然表达——只有开了 AI 初审才有全自动。preJudge 是编排器内部临时角色（`RaceRole` 加 `'preJudge'` 但不计入 `RACE_ROLES` 配置遍历），复用 judge 的引擎/模型配置但 spawn **独立会话**避免上下文污染（`ensurePreJudgeSession` 独立于 `ensureRole`，类型收窄 `Exclude<RaceRole,'preJudge'>`）。
+  - **off（默认）**：纯人工 4 选 1，现状不变。
+  - **suggest（半自动）**：④a 选策略前由 AI 评审各方方案，产出推荐策略 + 理由（markdown 结构化：推荐策略 / 一句话结论 / 推荐理由 / 各选手点评）；JudgePanel AdoptStep 显示紧凑 **banner**（结论一行 + 展开/采纳/忽略），展开复用 `ArtifactZoom` 弹窗查看完整详情；推荐到达时策略网格自动高亮推荐项，用户可一键采纳或自己改。
+  - **auto（全自动）**：AI 推荐 → 自动采纳 → 裁判 fuse 出方案后**跳过批注定稿直接进 builder**（审计兜底，端到端无人值守）；AdoptStep 显示只读过场 banner，Working 显示「AI 已自动采纳」文案。
+  - **降级**：preJudge 失败/超时/解析失败 → emit `race.preJudgeUnavailable` 降级为纯人工（不弹错误横幅不阻塞）；重启恢复含 preJudge 链路（未产出推荐重跑、auto 模式已有推荐自动采纳）。
 - **第三选手 C（可选）**：A/B 必选、C 发起面板行内开关；三泳道并排、三方互驳（每人收到全部对手方案按选手分节反驳）、产物预览三栏、策略集扩为 6 选 1
 - **✂ 剔除选手**（仅三人以上在场且裁判选策略前；剩余 ≥2 铁规）：泳道头/产物预览栏 ✂ 二段确认（变红再点，3s 自动复位）；**标记式不删数据**（eliminated 数组，会话/产物保留可查，产物不进裁判输入，裁判 prompt 注明忽略其余选手对被剔者的反驳）；被剔运行中回合就地叫停 + 僵死等待主动唤醒；剔除后剩余产物齐自动推进下一阶段；被剔泳道不占位（不展示残留卡）；不可逆
 - **容错与重试体系**：瞬时错误自动重试一次（1.5s，用户主动中止/剔除不重试）；**逐选手产物落盘**（冲线即冻结，重试只补跑缺失方不重烧已完成侧）；泳道头三态 = 进行中[■中止] / 已冲线🏴 / 已停止[↻重试]（真实会话状态 + 产物落盘事实驱动，单选手重试不等其它选手）；错误横幅三出口 = ↩重选策略（judging）/ ⚙调整选手 / ↻重试当前阶段；**⚙ 调参即自动重跑**（保存后若阶段停摆自动重跑该选手，换引擎/模型重建会话，调了谁谁的当前阶段产物作废）；裁判/执行者等待面板均有 ■ 中止；同回合重试回显只发一行重试标记不重复贴指令原文
 - **交卷判定 = 静默收敛**：回合正常/background 收束后等 2s 静默期，期间引擎续跑（codex 对大 prompt 拆多内部回合/自发回合）就继续等，真安静才交卷（此时 transcript = 最终产物）；异常收束立即上报；产物文本 = 会话「最后一段连续正文」（工具活动重置 + 懒重置：新回合真产出内容才清上回合正文，探索独白与空转自发回合都不污染产物）；空产出报错阻断不带病推进
 - **寄生于宿主对话**：parentSessionId 绑定发起会话；⚔ 入口严格按当前会话过滤（本对话有未完成赛马 → 高亮（进行中 accent / 待继续警示色）+ 点击直入；只有已完成 → 下拉回看+发起；都没有 → 开发起面板；其它对话的赛马不可见）；发起可勾选**携带本对话上下文摘录**（用户/助手正文尾部 8K 字，注入双方规划回合作背景资料 —— 中途转赛马）；角色会话带 raceId 标记**侧栏隐藏**（只能从赛马视图/执行会话按钮进入）；发起/✂剔除/收尾（交付或未交付）均向宿主对话回流系统公告（永久留痕，可基于结果继续聊）；无宿主/宿主已删的赛马重启时收敛为已结束
-- **设置 → 赛马**（⚔ 图标分类页）：默认启用第三选手开关 + 六角色（选手 A/B/C、裁判、执行者、审计）各一行默认引擎/模型/思考深度（模型可选「跟随引擎默认」、档位可选「默认最大档」）；发起面板打开时按此预填，每场仍可临时调；持久化 settings.race（老配置自动迁移）
+- **★ 赛马结果回流宿主对话（2026-08-05）**：赛马完成（`race.done`）时把**最终方案 + 执行结果**发给宿主对话的引擎（`chatStore.sendRaceResult`），使 AI 上下文包含赛马产物——用户可直接在宿主对话就方案提问，AI 据赛马结果回答；UI 上渲染为**赛马结果卡片**（`MessageItem.RaceResultCard`，`UnifiedMessage` user 类型加 `raceResult?` 标记字段）：标题行（🏇 赛马完成 · 最终方案 vN + 审计通过/未通过 + 已交付/未交付 + 修复轮次徽章）→ 默认折叠、点击展开 finalPlan markdown → 底部「查看完整赛马」按钮（打开赛马视图回看全程）+ 提示行「可直接就方案提问」；无 finalPlan（中止/修复耗尽）或 sendRaceResult 失败时降级为纯文字系统公告
+- **设置 → 赛马**（⚔ 图标分类页）：默认启用第三选手开关 + **AI 初审模式默认值**（`defaultPreJudgeMode`，off/suggest/auto，默认 off）+ 六角色（选手 A/B/C、裁判、执行者、审计）各一行默认引擎/模型/思考深度（模型可选「跟随引擎默认」、档位可选「默认最大档」）；发起面板打开时按此预填，每场仍可临时调；持久化 settings.race（老配置自动迁移）
 - **重启恢复**：未完成赛马保留原阶段 + interrupted 标记（judging 纯等待态原样恢复）；进赛马视图「▶ 继续赛马」手动重跑当前阶段（不自动防重启风暴；已落盘产物跳过不重烧）；泳道自行触发会话消息水合（已冲线角色恢复后历史完整可见）
 - **竞态防护（编排器内建）**：阶段链存活标记（链活着时重试/剔除不代推进、resume 拒绝重入防双发 prompt）、代际计数（重跑规划后旧链尸变静默退出）、重试接管让位（链收尾时缺产物方正被重试 → 不抛旧错交棒推进）、定稿同步切阶段防双击 Builder 双发、superseded 中性打断语义（撤回/重跑/剔除的叫停不弹假错误横幅）
 - **赛马视图 UI**：赛程电路 HUD（双规划→交叉反驳→裁判→执行→审计五节点）；泳道渲染**完全复用主区 MessageList**（thinking 动效/shell 动效/自动折叠同源同步），但隐藏主对话专属交互：token 统计行（竞速只看产出，消耗看用量页）、「回退到此处」（编排提问不可回退）、「按此计划实施」（实施走定稿→执行链路）；Plan 卡点击/⚢ 改**弹窗预览**（无右侧面板可用）；裁判阶段 = 冻结产物干净预览（每选手方案文档 md + 反驳/吸纳/辩护折叠，不展全过程原文噪音）；**全阶段整页锁滚**（竞速=泳道内滚；裁判=预览弹性内滚+裁判台固定下部；执行=执行泳道内滚+审计卡固定）；回显气泡超 2000 字预览截断（完整指令照发引擎）；执行阶段「↗ 打开执行会话」可在变更面板逐文件 diff/拒绝
 - **赛后统计（📊 统计卡）**：赛马结束（done）后完成横幅下展示 —— 标题行总用时 + 总 token（↑上行/↓下行），明细表逐环节（双规划/交叉反驳/裁判融合/执行/独立审计/修复回环）列出 用时、Σ token、↑上行、↓下行（列顺序固定：Σ 在 ↑/↓ 之前）；数据源 = RaceGroup.stats 按阶段累计桶（durationMs/inputTokens/outputTokens，随 races.json 持久化 + race.stats 事件实时推）；**计时口径** = 墙钟累计（setStage 切换时结转增量，重试/回炉/audit↔repair 回环都累加；judging 含用户决策/批注等待；重启后由「▶ 继续赛马」重新起表，停机时段不计）；**token 口径** = 角色回合交卷时逐内部回合累计 usage 记入当前阶段（失败回合也记 —— token 真实烧掉了）；**kimi code 不参与 token 统计**（无真实 token 上报仅字符估算 approx，与用量页同口径，用时照常计入，卡底部常驻备注）；历史已完赛无 stats 数据时统计卡自动隐藏
-- 实现：`src/shared/race.ts`（域模型/策略/产物/事件/RaceStats 统计桶）+ `src/main/race/`（RaceOrchestrator 纯控制流状态机（依赖注入 RaceSessionHost）/ RaceManager 组合根桥 SessionManager+IPC+races.json / racePrompts 各阶段提示词）+ `src/renderer/src/store/raceStore.ts` + `components/race/`（RaceView/RaceCircuit/RaceLane/ArtifactsPreview/JudgePanel/RaceSetup/RoleTuneDialog/EliminateButton/RaceStatsCard/modelCatalogs）；Composer ⚔ 入口；设计文档 `docs/大模型赛马方案.md`
+- 实现：`src/shared/race.ts`（域模型/策略/产物/事件/RaceStats 统计桶/**RacePreJudgeMode 枚举 / RacePreJudgeRecommendation / preJudge 角色**）+ `src/main/race/`（RaceOrchestrator 纯控制流状态机（依赖注入 RaceSessionHost，**runPreJudge 子流程 / ensurePreJudgeSession / acceptPreJudge / dismissPreJudge / auto 模式自动定稿 / resume preJudge 恢复**）/ RaceManager 组合根桥 SessionManager+IPC+races.json / racePrompts 各阶段提示词 + **preJudgePrompt + parsePreJudgeRecommendation 纯函数**）+ `src/renderer/src/store/raceStore.ts`（**preJudging 内存态 + 5 个 preJudge 事件处理 + acceptPreJudge/dismissPreJudge action + sendRaceResult 回流**）+ `components/race/`（RaceView/RaceCircuit/RaceLane/ArtifactsPreview/JudgePanel（**AdoptStep AI 评审中等待态 + banner + 复用 ArtifactZoom 展开详情 + Working auto 模式文案**）/RaceSetup（**三态分段控件**）/RoleTuneDialog/EliminateButton/RaceStatsCard/modelCatalogs）+ `chatStore.sendRaceResult`（**赛马结果汇报：注入带 raceResult 标记的 user 消息 + 发 prompt 给引擎注入 AI 上下文**）+ `MessageItem.RaceResultCard`（**可折叠赛马结果卡片**）+ `shared/types.ts`（**UnifiedMessage user 加 raceResult? 字段 / RaceSettings 加 defaultPreJudgeMode**）+ `config/settings.ts`（**defaultPreJudgeMode 默认值与迁移**）+ IPC `race:accept-pre-judge` / `race:dismiss-pre-judge`；Composer ⚔ 入口；设计文档 `docs/大模型赛马方案.md`
 
 ### 4.21 引擎兼容性审计（优雅降级 + 全量记账）
 - **定位**：应对引擎 CLI 升级带来的协议漂移（砍方法/加事件/改格式）——原则是「对用户静默、对维护者全记账」：降级保证程序不崩（最坏丢个别功能），审计保证维护者不瞎（引擎新增能力也能从未识别消息里第一时间发现）
@@ -500,7 +515,7 @@ Renderer (React+Tailwind+zustand, i18n zh/en, 二维主题)
 - kimi setSessionMode 不总回推 current_mode_update：store.setMode 已做乐观更新
 - 主项目 package.json `type: "module"`：内嵌 CJS 资产（ai-server）需自带 `{"type":"commonjs"}` 的 package.json
 - electron-builder 打包需 `signAndEditExecutable: false`，否则 winCodeSign 缓存解压 symlink 失败
-- dev 时若 5173 被占用说明有旧 dev server 残留，杀掉 electron.exe 重启（旧实例会导致改动不生效的假象）
+- dev 时若 7777 被占用说明有旧 dev server 残留，杀掉 electron.exe 重启（旧实例会导致改动不生效的假象）
 - **opencode 实测坑（2026-07-28，本机 CLI 1.17.18）**：
   - 回合结束唯一可靠信号 = SSE `session.idle`（POST message 的 HTTP 响应也会阻塞到完成但只作错误通道，错误顺序实测 session.error → idle）；`message.part.updated` 是**全量快照非增量**（按 partID 记已发长度自算 delta）；用户消息也推 part 事件（按 message role 过滤 echo）
   - `GET /config/providers` = 已连接可用集（handler 调 Provider.list，OpenAPI summary 字面误导）；zen 免费模型无凭据时以 public key 自动加载**免登录可用**；openchamber 选择器同源，`/provider` 全目录仅其 Add-provider 管理页用

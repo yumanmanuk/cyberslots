@@ -40,7 +40,7 @@ function isUnder(path: string, root: string): boolean {
  *   setWindowOpenHandler 拦截 → shell.openExternal 交系统浏览器
  *   （src/main/index.ts）。
  * - **其余一切 href 都视为文件候选，一律 preventDefault**，绝不让 <a>
- *   默认导航 —— 相对 href 在窗口里会被解析成 `http://localhost:5173/...`
+ *   默认导航 —— 相对 href 在窗口里会被解析成 `http://localhost:7777/...`
  *   （dev）命中主进程外链白名单而误入浏览器，这是历史 bug 的根因。
  *   文件候选再按扩展名白名单筛一遍：命中的走文件分流（工作区内 → 右侧
  *   面板预览，requestFilePreview 内做模糊定位；工作区外绝对路径 → 文件

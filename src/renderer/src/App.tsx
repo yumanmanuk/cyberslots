@@ -7,7 +7,7 @@ import type { ResolvedMode, ThemeMode } from '@shared/types';
 import { raceHostArchived } from '@shared/race';
 import { useT } from './i18n';
 import Sidebar from './components/Sidebar';
-import { BrandMark } from './components/brand';
+import { BrandHero, BrandMark } from './components/brand';
 import ChatView from './components/ChatView';
 import NewSessionView from './components/NewSessionView';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -75,13 +75,77 @@ export default function App(): JSX.Element {
   const sidebarCollapsed = useChatStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useChatStore((s) => s.toggleSidebar);
   const [peek, setPeek] = useState(false);
+  const [bootPhase, setBootPhase] = useState<'boot' | 'leaving' | 'done'>('boot');
   const peekTimer = useRef<ReturnType<typeof setTimeout>>();
 
   useTaskbarBadge();
 
+  // 品牌启动蒙层：init（会话列表 + 设置）完成且主界面首帧提交后再淡出；
+  // 最小停留 700ms 避免一闪而过；init 失败/挂起都有兜底，绝不卡死在蒙层。
   useEffect(() => {
-    void init();
+    let fadeTimer: ReturnType<typeof setTimeout> | undefined;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    let dismissed = false;
+    const dismiss = (): void => {
+      if (cancelled || dismissed) return;
+      dismissed = true;
+      setBootPhase('leaving');
+      fadeTimer = setTimeout(() => setBootPhase('done'), 280);
+    };
+    const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+    void Promise.all([
+      init(),
+      wait(700),
+    ])
+      .then(dismiss)
+      .catch(dismiss);
+    hardTimer = setTimeout(dismiss, 5000);
+    return () => {
+      cancelled = true;
+      if (fadeTimer) clearTimeout(fadeTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+    };
   }, [init]);
+
+  // 全局快捷键（会话/看板/新建会话页均生效）：Ctrl+D 打开总控台、Ctrl+N
+  // 新建会话、Ctrl+` 折叠/展开侧栏、Ctrl+, 打开设置。跳过终端焦点 ——
+  // 终端里 Ctrl+D 是 shell EOF、Ctrl+N 是下一条历史命令，必须透传给 xterm。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el?.closest?.('.xterm')) return;
+      const key = e.key.toLowerCase();
+      // 文件编辑器 CodeMirror 有自己的 Ctrl+F 搜索面板，不拦截。
+      if (key === 'f' && el?.closest?.('.cm-editor')) return;
+      if (key === 'd') {
+        e.preventDefault();
+        void useChatStore.getState().openDashboard();
+      } else if (key === 'n') {
+        e.preventDefault();
+        const raceStore = useRaceStore.getState();
+        const prevSessionId = useChatStore.getState().activeSessionId;
+        if (raceStore.activeRaceId && prevSessionId) raceStore.setRaceView(prevSessionId, raceStore.activeRaceId);
+        raceStore.closeRace();
+        useChatStore.setState({ activeSessionId: null, dashboardOpen: false });
+      } else if (key === '`') {
+        e.preventDefault();
+        useChatStore.getState().toggleSidebar();
+      } else if (key === ',') {
+        e.preventDefault();
+        useChatStore.setState({ settingsOpen: true });
+      } else if (key === 'f') {
+        e.preventDefault();
+        // 打开侧栏搜索（侧栏折叠时先展开）
+        const s = useChatStore.getState();
+        if (s.sidebarCollapsed) s.toggleSidebar();
+        useChatStore.setState({ sidebarSearchOpen: !s.sidebarSearchOpen });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // 赛马切片独立初始化（订阅 race:event + 拉取持久化赛马列表）。
   useEffect(() => {
@@ -192,6 +256,21 @@ export default function App(): JSX.Element {
       <ArchivedView />
       <RaceSetup />
       <AntigravityAccountDialog />
+
+      {/* 启动蒙层：全屏品牌拉霸仪式，盖住首帧未就绪的主界面；主题由 preload
+          在首帧前注入，深浅两色下都从第一帧就是正确外观，无二次切换。
+          drag 让蒙层期窗口仍可拖动；淡出时 pointer-events-none 不挡交互。 */}
+      {bootPhase !== 'done' && (
+        <div
+          aria-hidden={bootPhase === 'leaving'}
+          className={`drag fixed inset-0 z-[100] flex flex-col items-center justify-center gap-4 bg-bg-canvas transition-opacity duration-300 ${
+            bootPhase === 'leaving' ? 'pointer-events-none opacity-0' : 'opacity-100'
+          }`}
+        >
+          <BrandHero size={96} />
+          <span className="text-[13px] leading-5 text-ink-soft">{t('loading')}</span>
+        </div>
+      )}
     </div>
   );
 }

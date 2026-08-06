@@ -88,9 +88,9 @@ export function claudeSpawnEnv(spec: SpawnSpec): NodeJS.ProcessEnv {
 }
 
 let cachedVersion: string | null | undefined; // undefined=未探测 null=失败
-let failedAt = 0; // 失败只缓存短期（应用先启动、CLI 后安装的场景无需重启即可检出）
+let failedAt = 0; // 失败缓存 5 分钟（应用先启动、CLI 后安装，5 分钟内重新探测）
 let probedEntry: string | undefined; // 上次探测的入口 — 自定义命令变化时自动重探
-const PROBE_FAIL_TTL = 30_000;
+const PROBE_FAIL_TTL = 300_000;
 
 function probeVersion(explicitEntry?: string): string | undefined {
   const entryKey = explicitEntry?.trim() || '';
@@ -153,33 +153,75 @@ function probeAuth(explicitEntry?: string): { loggedIn: boolean; authMethod: 'oa
   return { loggedIn: false, authMethod: 'none' };
 }
 
-/** 读 ~/.claude/settings.json 的 env 段，推导「别名 → 自定义模型显示名」。
- *  第三方网关用户常用 ANTHROPIC_DEFAULT_SONNET/OPUS/HAIKU_MODEL 把别名重定向到
- *  自定义模型（可配套 …_MODEL_NAME 友好名），ANTHROPIC_MODEL 则决定 default 档。
- *  这里只读展示名不参与 spawn — 模型路由仍由 CLI 自身按 env 生效。 */
-function readModelLabels(): Record<string, string> | undefined {
+/** Claude 别名槽位（alias → env 键后缀），Fable 与 sonnet/opus/haiku 同构。 */
+const CLAUDE_ALIAS_KEYS: Array<[string, string]> = [
+  ['sonnet', 'SONNET'],
+  ['opus', 'OPUS'],
+  ['haiku', 'HAIKU'],
+  ['fable', 'FABLE'],
+];
+
+/** 环境键读取：settings.json 里可能写成小写（Windows 下进程环境不敏感），补一次不敏感回退。 */
+function pickEnv(env: Record<string, string | undefined>, key: string): string | undefined {
+  const exact = env[key];
+  if (exact !== undefined) return exact;
+  const lower = key.toLowerCase();
+  const hit = Object.keys(env).find((k) => k.toLowerCase() === lower);
+  return hit ? env[hit] : undefined;
+}
+
+/** 读 ~/.claude/settings.json 的 env 段（settings env 覆盖进程环境变量，与 CLI 自身生效顺序一致）。 */
+function readClaudeEnv(): Record<string, string | undefined> {
   try {
     const raw = readFileSync(join(homedir(), '.claude', 'settings.json'), 'utf8');
     // PowerShell 写的 settings.json 常带 UTF-8 BOM — JSON.parse 会直接报错，先剥掉。
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) as { env?: Record<string, string | undefined> };
-    // settings.json env 覆盖进程环境变量（与 CLI 自身生效顺序一致）。
-    const env: Record<string, string | undefined> = { ...process.env, ...parsed.env };
+    return { ...process.env, ...parsed.env };
+  } catch {
+    return { ...process.env }; // 无 settings.json / 解析失败 → 仅进程环境
+  }
+}
+
+/** 自定义模型槽位实际模型 id：只取 ANTHROPIC_CUSTOM_MODEL_OPTION（NAME 仅用于展示，
+ *  不下发）；未配置则无 custom 槽位。 */
+export function resolveClaudeCustomModelId(): string | undefined {
+  const id = pickEnv(readClaudeEnv(), 'ANTHROPIC_CUSTOM_MODEL_OPTION')?.trim();
+  return id || undefined;
+}
+
+/** Claude 模型下拉可用槽位：内置别名（含 fable）+ 配置了自定义模型时追加 custom。 */
+export function readClaudeModelSlugs(): string[] {
+  return resolveClaudeCustomModelId()
+    ? ['default', ...CLAUDE_ALIAS_KEYS.map(([alias]) => alias), 'custom']
+    : ['default', ...CLAUDE_ALIAS_KEYS.map(([alias]) => alias)];
+}
+
+/** 读 ~/.claude/settings.json 的 env 段，推导「别名 → 自定义模型显示名」。
+ *  第三方网关用户常用 ANTHROPIC_DEFAULT_SONNET/OPUS/HAIKU/FABLE_MODEL 把别名重定向到
+ *  自定义模型（可配套 …_MODEL_NAME 友好名），ANTHROPIC_MODEL 则决定 default 档，
+ *  ANTHROPIC_CUSTOM_MODEL_OPTION(_NAME) 决定 custom 档。
+ *  这里只读展示名不参与 spawn — 模型路由仍由 CLI 自身按 env 生效。 */
+function readModelLabels(): Record<string, string> | undefined {
+  try {
+    const env = readClaudeEnv();
     const labels: Record<string, string> = {};
-    const aliasKeys: Array<[string, string]> = [['sonnet', 'SONNET'], ['opus', 'OPUS'], ['haiku', 'HAIKU']];
-    for (const [alias, key] of aliasKeys) {
-      const model = env[`ANTHROPIC_DEFAULT_${key}_MODEL`];
+    for (const [alias, key] of CLAUDE_ALIAS_KEYS) {
+      const model = pickEnv(env, `ANTHROPIC_DEFAULT_${key}_MODEL`);
       // 映射回别名自身（如 haiku→haiku）= 未自定义，不覆盖。
-      if (model && model !== alias) labels[alias] = env[`ANTHROPIC_DEFAULT_${key}_MODEL_NAME`] || model;
+      if (model && model !== alias) labels[alias] = pickEnv(env, `ANTHROPIC_DEFAULT_${key}_MODEL_NAME`) || model;
     }
-    const def = env.ANTHROPIC_MODEL;
+    // custom 槽位：存在性/下发值只看 OPTION；展示名 NAME 优先，回退 OPTION。
+    const custom = pickEnv(env, 'ANTHROPIC_CUSTOM_MODEL_OPTION')?.trim();
+    if (custom) labels.custom = pickEnv(env, 'ANTHROPIC_CUSTOM_MODEL_OPTION_NAME')?.trim() || custom;
+    const def = pickEnv(env, 'ANTHROPIC_MODEL');
     if (def) {
       // default 档若与某别名指向同一模型，复用其友好名。
-      const hit = aliasKeys.find(([alias, key]) => def === alias || def === env[`ANTHROPIC_DEFAULT_${key}_MODEL`]);
-      labels.default = (hit && labels[hit[0]]) || def;
+      const hit = CLAUDE_ALIAS_KEYS.find(([alias, key]) => def === alias || def === pickEnv(env, `ANTHROPIC_DEFAULT_${key}_MODEL`));
+      labels.default = (hit && labels[hit[0]]) || (custom && def === custom ? labels.custom : undefined) || def;
     }
     return Object.keys(labels).length ? labels : undefined;
   } catch {
-    return undefined; // 无 settings.json / 解析失败 → 回落内置别名展示
+    return undefined; // 兜底：回落内置别名展示
   }
 }
 

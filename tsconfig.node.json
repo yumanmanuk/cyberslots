@@ -4,7 +4,7 @@
     "composite": true,
     "outDir": "node_modules/.tsout/node",
     "types": ["node"],
-    "lib": ["ES2022"],
+    "lib": ["ES2024"],
     "paths": {
       "@shared/*": ["./src/shared/*"]
     }

@@ -46,8 +46,15 @@ command?(name: string, args: string, attachments?: string[], path?: string, isSk
   /**
    * Inject user input into the in-flight turn (codex turn/steer).
    * Returns false when there is no steerable active turn.
+   * messageId 会透传为引擎侧 client_user_message_id，用于把「RPC 已接受」和
+   * 「引擎真正消费（已发给 LLM）」区分开。
    */
-  steer?(text: string): Promise<boolean>;
+  steer?(text: string, attachments?: string[], messageId?: string): Promise<boolean>;
+  /**
+   * steer 返回 true 后引擎会异步 emit `steer.confirmed`（真正消费该输入时）。
+   * 无此能力的引擎（kimi KAP 等）由 SessionManager 在 steer 成功后立即回显。
+   */
+  steerConfirmable?: boolean;
   /**
    * Engine-native goal surface (codex thread/goal/*). Engines without a
    * client-side goal API omit these and the UI hides the goal controls.

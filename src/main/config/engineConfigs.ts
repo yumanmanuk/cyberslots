@@ -39,7 +39,7 @@ type Json = Record<string, unknown>;
 // 失败短 TTL（应用先启动、CLI 后安装无需重启即可检出）。
 
 const versionCache = new Map<string, { value?: string; failedAt?: number }>();
-const VERSION_FAIL_TTL = 30_000;
+const VERSION_FAIL_TTL = 300_000;
 
 /** npm 全局包 package.json 的版本快路径；不存在/解不动返回 undefined。 */
 function npmPkgVersion(...segments: string[]): string | undefined {

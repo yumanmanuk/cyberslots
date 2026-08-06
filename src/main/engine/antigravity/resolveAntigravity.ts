@@ -39,8 +39,8 @@ export function findAgyBinary(explicitPath?: string): string | undefined {
 }
 
 let cachedVersion: string | null | undefined; // undefined=未探测 null=失败
-let failedAt = 0; // 失败只缓存短期（应用先启动、CLI 后安装的场景无需重启即可检出）
-const PROBE_FAIL_TTL = 30_000;
+let failedAt = 0; // 失败缓存 5 分钟（应用先启动、CLI 后安装，5 分钟内重新探测）
+const PROBE_FAIL_TTL = 300_000;
 function probeVersion(explicitPath?: string): string | undefined {
   if (typeof cachedVersion === 'string') return cachedVersion;
   if (cachedVersion === null && Date.now() - failedAt < PROBE_FAIL_TTL) return undefined;

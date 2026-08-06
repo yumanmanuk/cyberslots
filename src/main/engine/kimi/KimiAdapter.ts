@@ -19,6 +19,7 @@ import {
   ClientSideConnection,
   ndJsonStream,
   type Client,
+  type McpServerStdio,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification,
@@ -66,6 +67,9 @@ export interface KimiAdapterOptions {
   unattended?: boolean;
   /** Optional explicit path to kimi dist/main.mjs (settings override). */
   cliEntry?: string;
+  /** ACP newSession/resume/fork 的 MCP 服务器注册（browser use 工具服务；
+   *  缺省 = []。仅在 settings.browserUse 开时由 SessionManager 注入）。 */
+  mcpServers?: McpServerStdio[];
 }
 
 interface PendingPermission {
@@ -193,7 +197,7 @@ export class KimiAdapter implements EngineAdapter {
           client.resumeSession({
             sessionId: this.opts.resumeSessionId,
             cwd: this.opts.cwd,
-            mcpServers: [],
+            mcpServers: this.opts.mcpServers ?? [],
           } as never),
           INIT_TIMEOUT_MS,
           'ACP session/resume',
@@ -211,7 +215,7 @@ export class KimiAdapter implements EngineAdapter {
       }
     }
     const sess = await withTimeout(
-      client.newSession({ cwd: this.opts.cwd, mcpServers: [] }),
+      client.newSession({ cwd: this.opts.cwd, mcpServers: this.opts.mcpServers ?? [] }),
       INIT_TIMEOUT_MS,
       'ACP session/new',
     );
@@ -299,6 +303,9 @@ export class KimiAdapter implements EngineAdapter {
 
   async cancel(): Promise<void> {
     if (!this.promptActive) return;
+    // 挂起权限一并取消：session/cancel 只停回合，pending request_permission
+    // 不答的话引擎可能继续等授权、回合迟迟不收尾。
+    for (const requestId of [...this.pendingPermissions.keys()]) this.answerPermission(requestId);
     await this.requireClient().cancel({ sessionId: this.sessionId });
   }
 
@@ -367,7 +374,7 @@ export class KimiAdapter implements EngineAdapter {
         client.unstable_forkSession({
           sessionId: this.sessionId,
           cwd: this.opts.cwd,
-          mcpServers: [],
+          mcpServers: this.opts.mcpServers ?? [],
         } as never),
         INIT_TIMEOUT_MS,
         'ACP session/fork',

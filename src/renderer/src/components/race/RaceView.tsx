@@ -6,8 +6,10 @@
 
 import { ArrowLeft, CircleAlert, OctagonX, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
-import { BrandHero } from '../brand';
+import { BrandHero, BrandSpinner } from '../brand';
 import { RaceHorse } from '../RaceHorse';
 
 import type { RaceGroup, RaceRole, RaceStage, RacerRole } from '@shared/race';
@@ -16,6 +18,8 @@ import { raceRoleKey, raceStageKey, useT } from '../../i18n';
 import { useChatStore } from '../../store/chatStore';
 import { useRaceStore } from '../../store/raceStore';
 import { ENGINE_LABELS } from '../EngineIcon';
+import MdLink from '../MdLink';
+import MdPre from '../MdCodeBlock';
 import ArtifactsPreview from './ArtifactsPreview';
 import JudgePanel from './JudgePanel';
 import RaceCircuit from './RaceCircuit';
@@ -23,7 +27,7 @@ import RaceLane from './RaceLane';
 import RaceStatsCard from './RaceStatsCard';
 import RoleTuneDialog from './RoleTuneDialog';
 
-function roleSubtitle(t: ReturnType<typeof useT>, race: RaceGroup, role: RaceRole): string {
+function roleSubtitle(t: ReturnType<typeof useT>, race: RaceGroup, role: RacerRole | 'builder' | 'auditor'): string {
   const cfg = race.roles[role];
   if (!cfg) return '';
   return `${ENGINE_LABELS[cfg.engine]} · ${cfg.modelId || t('raceDefaultModel')}${cfg.effort ? ` · ${cfg.effort}` : ''}`;
@@ -69,6 +73,7 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
   const closeRace = useRaceStore((s) => s.closeRace);
   const selectSession = useChatStore((s) => s.selectSession);
   const cancelRace = useRaceStore((s) => s.cancelRace);
+  const cancellingRace = useRaceStore((s) => !!s.cancelling[raceId]);
   const resumeRace = useRaceStore((s) => s.resumeRace);
   const openTune = useRaceStore((s) => s.openTune);
   const dismissError = useRaceStore((s) => s.dismissError);
@@ -108,8 +113,14 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
             // 从总控台进入时底层不是宿主对话，故必须显式导航，不能只 closeRace。
             // 宿主已不存在（删除等）才退回原关闭逻辑，避免选中一个不存在的会话。
             const pid = race.parentSessionId;
-            if (pid && useChatStore.getState().sessions.some((m) => m.id === pid)) selectSession(pid);
-            else closeRace();
+            if (pid && useChatStore.getState().sessions.some((m) => m.id === pid)) {
+              // 返回对话是显式退出赛马页，不清除/不恢复该会话的赛马停留态。
+              selectSession(pid, { restoreRace: false });
+            } else {
+              const activeSessionId = useChatStore.getState().activeSessionId;
+              if (activeSessionId) useRaceStore.getState().setRaceView(activeSessionId, undefined);
+              closeRace();
+            }
           }}
           className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-ink"
         >
@@ -124,11 +135,12 @@ export default function RaceView({ raceId }: { raceId: string }): JSX.Element {
         </span>
         {stage !== 'done' && (
           <button
+            disabled={cancellingRace}
             onClick={() => void cancelRace()}
-            title={t('raceCancelTitle')}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-err"
+            title={cancellingRace ? t('stopping') : t('raceCancelTitle')}
+            className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-ink-faint transition hover:bg-bg-hover hover:text-err disabled:opacity-40"
           >
-            <OctagonX size={13} /> {t('raceCancel')}
+            {cancellingRace ? <BrandSpinner size={12} /> : <OctagonX size={13} />} {t('raceCancel')}
           </button>
         )}
       </div>
@@ -274,7 +286,7 @@ function DualLanes({ race, running, fill = false }: { race: RaceGroup; running: 
               running={running}
               fill={fill}
               finished={finishedOf(r)}
-              onStop={id ? () => void window.cyberslots.sessionCancel(id) : undefined}
+              onStop={id ? () => void useChatStore.getState().cancelSession(id) : undefined}
               onRetry={() => void retryRacer(r)}
               onEliminate={canEliminate ? () => void eliminateRacer(r) : undefined}
             />
@@ -320,6 +332,7 @@ async function openBuilderSession(sessionId: string): Promise<void> {
  *  review=回看只读：泳道不当作运行中（无中止按钮），不重复展示完成横幅/统计。 */
 function BuilderSection({ race, review = false }: { race: RaceGroup; review?: boolean }): JSX.Element {
   const t = useT();
+  const overrideAudit = useRaceStore((s) => s.overrideAudit);
   const building = !review && (race.stage === 'building' || race.stage === 'repairing');
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-3">
@@ -332,7 +345,7 @@ function BuilderSection({ race, review = false }: { race: RaceGroup; review?: bo
         running={building}
         fill
         onStop={
-          race.sessions.builder ? () => void window.cyberslots.sessionCancel(race.sessions.builder!) : undefined
+          race.sessions.builder ? () => void useChatStore.getState().cancelSession(race.sessions.builder!) : undefined
         }
       />
 
@@ -346,14 +359,14 @@ function BuilderSection({ race, review = false }: { race: RaceGroup; review?: bo
       )}
 
       {(race.audit || race.stage === 'auditing') && (
-        <div className="max-h-[36vh] shrink-0 overflow-y-auto rounded-2xl border border-line bg-bg-panel/70 p-4">
-          <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-ink">
+        <div className="flex max-h-[60vh] shrink-0 flex-col rounded-2xl border border-line bg-bg-panel/70 p-4">
+          <div className="mb-2 flex shrink-0 items-center gap-2 text-[13px] font-semibold text-ink">
             🛡 {t('raceStageAuditing')}
             <span className="font-mono text-[10.5px] font-normal text-ink-faint">{roleSubtitle(t, race, 'auditor')}</span>
           </div>
           {race.stage === 'auditing' ? (
             <div className="flex flex-col items-center gap-2 py-3 text-[12px] text-ink-soft">
-              {/* 面板横幅按规范用 BrandHero — 13px 三星在此场景退化成“横着动的三个点”，无品牌辨识度 */}
+              {/* 面板横幅按规范用 BrandHero — 13px 三星在此场景退化成"横着动的三个点"，无品牌辨识度 */}
               <BrandHero size={48} />
               {t('raceAuditingBody')}
             </div>
@@ -361,21 +374,44 @@ function BuilderSection({ race, review = false }: { race: RaceGroup; review?: bo
             <div className="text-[13px] font-semibold text-accent">{t('raceAuditPassed')}</div>
           ) : race.audit ? (
             <>
-              <div className="text-[13px] font-semibold text-err">{t('raceAuditFailed', { n: race.audit.issues.length })}</div>
-              <ul className="mt-2 space-y-1 text-[12px] text-ink-soft">
-                {race.audit.issues.map((it, i) => (
-                  <li key={i}>· {it}</li>
-                ))}
-              </ul>
+              <div className="shrink-0 text-[13px] font-semibold text-err">{t('raceAuditFailed', { n: race.audit.issues.length })}</div>
+              <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
+                {race.audit.body ? (
+                  <div className="md-body pr-1 text-[13px]">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink, pre: MdPre }}>{race.audit.body}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <ul className="space-y-1 text-[12px] text-ink-soft">
+                    {race.audit.issues.map((it, i) => (
+                      <li key={i}>· {it}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </>
           ) : null}
+          {!review && race.audit && !race.audit.passed && race.stage !== 'done' && !race.delivered && (
+            <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2 border-t border-line pt-3">
+              <button
+                onClick={() => void overrideAudit()}
+                title={t('raceOverrideAuditTitle')}
+                className="shrink-0 rounded-lg bg-accent px-3 py-1 text-[12px] font-semibold text-white transition hover:opacity-90"
+              >
+                {t('raceOverrideAudit')}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {race.stage === 'done' && !review && (
         <>
           <div className="shrink-0 rounded-2xl border border-line bg-bg-panel/70 p-4 text-[13px] text-ink">
-            {race.audit?.passed ? t('raceDoneDelivered') : t('raceDoneEnded')}
+            {race.auditOverridden || (race.delivered && !!race.audit && !race.audit.passed)
+              ? t('raceDoneDeliveredOverride')
+              : race.delivered
+                ? t('raceDoneDelivered')
+                : t('raceDoneEnded')}
             <span className="ml-1 text-[12px] text-ink-faint">{t('raceDoneKept')}</span>
           </div>
           <RaceStatsCard race={race} />

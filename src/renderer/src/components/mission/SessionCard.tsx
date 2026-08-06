@@ -123,7 +123,7 @@ function PlanRing({ done, total }: { done: number; total: number }): JSX.Element
   const c = 2 * Math.PI * r;
   const ratio = total > 0 ? done / total : 0;
   return (
-    <span className="flex items-center gap-1 text-[11px] tabular-nums text-ink-soft" title={`Plan ${done}/${total}`}>
+    <span className="flex items-center gap-1 text-[11px] tabular-nums text-ink-soft" title={`todo ${done}/${total}`}>
       <svg width={14} height={14} viewBox="0 0 14 14" className="-rotate-90">
         <circle cx="7" cy="7" r={r} fill="none" stroke="var(--line)" strokeWidth="2" />
         <circle
@@ -175,6 +175,7 @@ export default function SessionCard({ meta, column, selected, hydrate }: Session
   const goal = useChatStore((s) => s.goals[meta.id]) as GoalInfo | undefined;
   const activity = useChatStore((s) => s.lastActivity[meta.id]);
   const queueLen = useChatStore((s) => s.queues[meta.id]?.length ?? 0);
+  const cancelling = useChatStore((s) => !!s.cancelling[meta.id]);
   const [steerOpen, setSteerOpen] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [steerTip, setSteerTip] = useState<string | null>(null);
@@ -410,11 +411,12 @@ export default function SessionCard({ meta, column, selected, hydrate }: Session
         </button>
         {live && (
           <button
-            title={t('mcStop')}
+            disabled={cancelling}
+            title={cancelling ? t('stopping') : t('mcStop')}
             onClick={() => void useChatStore.getState().cancelSession(meta.id)}
-            className="rounded-md p-1 text-ink-faint transition hover:bg-err/15 hover:text-err"
+            className="rounded-md p-1 text-ink-faint transition hover:bg-err/15 hover:text-err disabled:opacity-40"
           >
-            <Square size={12} />
+            {cancelling ? <BrandSpinner size={12} /> : <Square size={12} />}
           </button>
         )}
         {meta.unread && (

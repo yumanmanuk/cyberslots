@@ -4,15 +4,24 @@
  * colors + line numbers. Edit mode is a plain editor with save.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
+import CodeMirror from '@uiw/react-codemirror';
+import { languages } from '@codemirror/language-data';
+import { foldService, HighlightStyle, LanguageDescription, syntaxHighlighting, type LanguageSupport } from '@codemirror/language';
+import { Compartment, RangeSet, RangeSetBuilder, StateEffect, StateField, type EditorState } from '@codemirror/state';
+import { search } from '@codemirror/search';
+import { Decoration, EditorView, GutterMarker, highlightTrailingWhitespace, keymap, lineNumberMarkers, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { tags } from '@lezer/highlight';
 import { Code2, Eye, ExternalLink, FolderGit2, FolderOpen, MessageSquarePlus, Monitor, Pencil, Save, Terminal, X } from 'lucide-react';
 
+import type { GitBaseContent } from '@shared/ipc';
 import { useChatStore } from '../../store/chatStore';
 import { BrandSpinner } from '../brand';
 import { useT } from '../../i18n';
+import { computeLineDiff, EMPTY_LINE_DIFF, type LineDiff } from './diffRows';
 import MdLink from '../MdLink';
 
 import type { OpenTarget } from '@shared/ipc';
@@ -39,6 +48,15 @@ const LANG_BY_EXT: Record<string, string> = {
   svg: 'xml',
 };
 
+/** git 状态徽标配色（与文件树 GIT_COLORS 同语义）：新增绿 / 修改琥珀 / 删除红 / 重命名蓝。 */
+const GIT_BADGE_CLS: Record<string, string> = {
+  M: 'bg-warn/15 text-warn',
+  A: 'bg-ok/15 text-ok',
+  U: 'bg-ok/15 text-ok',
+  D: 'bg-err/15 text-err',
+  R: 'bg-info/15 text-info',
+};
+
 interface Props {
   path: string;
   root: string;
@@ -51,6 +69,198 @@ interface Props {
 
 type Mode = 'preview' | 'source' | 'edit';
 
+/** 编辑模式 CodeMirror 主题：底色交给容器，行号/光标/选区跟随主题变量，
+ *  token 色取 --code-*（与预览模式 .hljs 同一色板）。 */
+const CM_THEME = EditorView.theme({
+  '&': { height: '100%', fontSize: '12px', backgroundColor: 'transparent', color: 'var(--ink)' },
+  '.cm-scroller': { fontFamily: 'Iosevka, "Cascadia Code", Consolas, monospace', lineHeight: '20px' },
+  '.cm-content': { padding: '12px 0', caretColor: 'var(--ink)' },
+  '.cm-line': { padding: '0 12px' },
+  '.cm-gutters': { backgroundColor: 'transparent', borderRight: 'none', color: 'var(--ink-faint)' },
+  '.cm-lineNumbers .cm-gutterElement': { minWidth: '34px', padding: '0 8px 0 12px', textAlign: 'right' },
+  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--bg-active) 55%, transparent)' },
+  '.cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--bg-active) 55%, transparent)' },
+  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--accent-soft)' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--ink)' },
+  '&.cm-focused': { outline: 'none' },
+  // ── 搜索 / 替换面板 ──
+  '.cm-panel.cm-search': {
+    backgroundColor: 'var(--bg-input)',
+    color: 'var(--ink)',
+    borderBottom: '1px solid var(--line)',
+    padding: '6px 8px 4px',
+    fontSize: '12px',
+    '& input, & button, & label': { margin: '.2em .5em .2em 0' },
+    '& input[type=checkbox]': { marginRight: '.2em' },
+    '& label': { fontSize: '80%', whiteSpace: 'pre', display: 'inline-flex', alignItems: 'center', gap: '3px', color: 'var(--ink-faint)' },
+    '& [name=close]': {
+      position: 'absolute',
+      top: '4px',
+      right: '4px',
+      backgroundColor: 'inherit',
+      border: 'none',
+      font: 'inherit',
+      padding: 0,
+      margin: 0,
+      cursor: 'pointer',
+      color: 'var(--ink-faint)',
+      fontSize: '16px',
+      '&:hover': { color: 'var(--ink)' },
+    },
+  },
+  '.cm-textfield': {
+    backgroundColor: 'var(--bg)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    borderRadius: '4px',
+    padding: '2px 6px',
+    fontSize: '12px',
+    outline: 'none',
+  },
+  '.cm-textfield:focus': { borderColor: 'var(--accent)' },
+  '.cm-button': {
+    backgroundColor: 'var(--bg-panel)',
+    color: 'var(--ink-soft)',
+    border: '1px solid var(--line)',
+    borderRadius: '4px',
+    padding: '2px 8px',
+    fontSize: '11px',
+    cursor: 'pointer',
+  },
+  '.cm-button:hover': { backgroundColor: 'var(--bg-hover)', color: 'var(--ink)' },
+  // ── 自动补全 / 工具提示 ──
+  '.cm-tooltip': {
+    backgroundColor: 'var(--bg-input)',
+    color: 'var(--ink)',
+    border: '1px solid var(--line)',
+    borderRadius: '8px',
+    boxShadow: '0 8px 24px rgb(0 0 0 / 14%)',
+    overflow: 'hidden',
+  },
+  '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'var(--accent-soft)', color: 'var(--ink)' },
+  '.cm-completionDetail': { color: 'var(--ink-faint)', marginLeft: '6px', fontSize: '10.5px' },
+  '.cm-tooltip.cm-tooltip-autocomplete > ul': { fontFamily: 'Iosevka, "Cascadia Code", Consolas, monospace', fontSize: '12px', maxHeight: '220px' },
+  // ── 代码折叠 ──
+  '.cm-foldGutter .cm-gutterElement': { cursor: 'pointer', color: 'var(--ink-faint)' },
+  '.cm-foldPlaceholder': {
+    backgroundColor: 'var(--bg-active)',
+    color: 'var(--ink-soft)',
+    border: '1px solid var(--line)',
+    borderRadius: '3px',
+    margin: '0 2px',
+  },
+  // ── 匹配高亮（搜索命中 / 选中词 / 括号）──
+  '.cm-searchMatch': {
+    backgroundColor: 'color-mix(in srgb, var(--accent) 26%, transparent)',
+    outline: '1px solid color-mix(in srgb, var(--accent) 45%, transparent)',
+  },
+  '.cm-searchMatch-selected': { backgroundColor: 'var(--accent-soft)' },
+  '.cm-selectionMatch': { backgroundColor: 'color-mix(in srgb, var(--accent) 20%, transparent)' },
+  '.cm-matchingBracket': {
+    backgroundColor: 'color-mix(in srgb, var(--accent) 16%, transparent)',
+    outline: '1px solid color-mix(in srgb, var(--accent) 45%, transparent)',
+  },
+  '.cm-trailingSpace': { backgroundColor: 'color-mix(in srgb, var(--err) 22%, transparent)' },
+});
+
+/** token 色映射 — 与 index.css 的 .hljs 规则逐类对应。 */
+const CM_HIGHLIGHT = HighlightStyle.define([
+  { tag: tags.comment, color: 'var(--ink-faint)', fontStyle: 'italic' },
+  {
+    tag: [tags.keyword, tags.moduleKeyword, tags.controlKeyword, tags.operatorKeyword, tags.definitionKeyword, tags.modifier],
+    color: 'var(--code-keyword)',
+  },
+  {
+    tag: [tags.string, tags.special(tags.string), tags.regexp, tags.inserted, tags.attributeName, tags.attributeValue],
+    color: 'var(--code-string)',
+  },
+  { tag: [tags.number, tags.bool, tags.atom, tags.typeName, tags.link], color: 'var(--code-number)' },
+  {
+    tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.className, tags.name, tags.labelName, tags.definition(tags.variableName)],
+    color: 'var(--code-title)',
+  },
+  {
+    tag: [tags.variableName, tags.propertyName, tags.definition(tags.propertyName), tags.standard(tags.variableName), tags.self],
+    color: 'var(--code-attr)',
+  },
+  { tag: tags.deleted, color: 'var(--err)' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strong, fontWeight: '600' },
+]);
+
+/** 稳定的 basicSetup 配置：对象引用必须恒定，否则 @uiw/react-codemirror 每次渲染
+ *  都会重建整套扩展（折叠状态/选区装饰被无谓重置）。 */
+const CM_BASIC_SETUP = {
+  lineNumbers: true,
+  foldGutter: true,
+  highlightActiveLineGutter: true,
+  highlightActiveLine: true,
+  highlightSelectionMatches: true,
+  autocompletion: true,
+  closeBrackets: true,
+  bracketMatching: true,
+  rectangularSelection: true,
+  searchKeymap: true,
+  completionKeymap: true,
+  foldKeymap: true,
+} as const;
+
+/** 行首缩进数（tab 按 1 计）。 */
+const countIndent = (s: string): number => {
+  const m = /^\s*/.exec(s);
+  return m ? m[0].length : 0;
+};
+
+/** 缩进折叠兜底：语法树无可折叠节点（纯文本 / 未知扩展名 / 语法折叠失效）时，
+ *  按「子行缩进更深」折叠，让任意文本文件都有折叠能力。 */
+const INDENT_FOLD = foldService.of((state, lineStart) => {
+  const line = state.doc.lineAt(lineStart);
+  const indent = countIndent(line.text);
+  if (indent === 0 || line.length === 0) return null;
+  let end = line.to;
+  for (let n = line.number + 1; n <= state.doc.lines; n++) {
+    const next = state.doc.line(n);
+    if (next.length === 0) {
+      end = next.to;
+      continue;
+    }
+    if (countIndent(next.text) > indent) {
+      end = next.to;
+      continue;
+    }
+    break;
+  }
+  return end > line.to ? { from: line.to, to: end } : null;
+});
+
+/** 行号 gutter 的 diff 标记（elementClass 加到对应 .cm-gutterElement 上）。 */
+class DiffGutterMarker extends GutterMarker {
+  constructor(override readonly elementClass: string) {
+    super();
+  }
+
+  override eq(other: DiffGutterMarker): boolean {
+    return other.elementClass === this.elementClass;
+  }
+}
+
+/** 按行号表构建行背景装饰 + gutter 标记（1-based 行号 → add/mod/del）。 */
+function buildDiffField(doc: EditorState['doc'], d: LineDiff): { deco: DecorationSet; markers: RangeSet<GutterMarker> } {
+  const deco = new RangeSetBuilder<Decoration>();
+  const markers = new RangeSetBuilder<GutterMarker>();
+  for (let ln = 1; ln <= doc.lines; ln++) {
+    const kind = d.rows.get(ln);
+    const line = doc.line(ln);
+    if (kind) {
+      deco.add(line.from, line.from, Decoration.line({ class: kind === 'add' ? 'cm-diff-line-add' : 'cm-diff-line-mod' }));
+      markers.add(line.from, line.from, new DiffGutterMarker(kind === 'add' ? 'cm-diff-gutter-add' : 'cm-diff-gutter-mod'));
+    } else if (d.dels.has(ln)) {
+      markers.add(line.from, line.from, new DiffGutterMarker('cm-diff-gutter-del'));
+    }
+  }
+  return { deco: deco.finish(), markers: markers.finish() };
+}
+
 export default function FilePreview({ path, root, sessionId, reloadKey, onClose }: Props): JSX.Element {
   const t = useT();
   const [text, setText] = useState<string | null>(null);
@@ -60,11 +270,59 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
   const [mode, setMode] = useState<Mode>('preview');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** 编辑模式语法高亮语言（按文件名异步匹配，未命中则纯文本）。 */
+  const [editLang, setEditLang] = useState<LanguageSupport | null>(null);
+  /** git 基准（HEAD 内容 + 文件状态）；null = 未拉取/非 git。 */
+  const [gitBase, setGitBase] = useState<GitBaseContent | null>(null);
+  /** 状态栏：光标行/列 + 选区字符数。 */
+  const [stat, setStat] = useState({ line: 1, col: 1, selLen: 0 });
   /** 非 null = 编辑中未保存，但 AI 已改磁盘 — 存磁盘新内容供冲突提示。 */
   const [conflict, setConflict] = useState<string | null>(null);
 
   const isMd = ext === 'md' || ext === 'markdown';
   const fileName = useMemo(() => path.split(/[\\/]/).pop() ?? path, [path]);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  // 始终持有最新标记表：CodeMirror StateField 的 create/update 从 ref 读取，
+  // 避免扩展重建与 React 渲染的时序竞态。
+  // 行级变更标记：随 git 基准 / 草稿实时重算（未保存编辑也参与，效果同 VS Code）。
+  // 非 git、无变更（status 空）或二进制（base null 且非新增）→ 无标记。
+  const lineDiff = useMemo(() => {
+    if (!gitBase || !gitBase.status) return EMPTY_LINE_DIFF;
+    if (gitBase.base == null && gitBase.status !== 'U' && gitBase.status !== 'A') return EMPTY_LINE_DIFF;
+    return computeLineDiff(gitBase.base, draft);
+  }, [gitBase, draft]);
+  const lineDiffRef = useRef(lineDiff);
+  lineDiffRef.current = lineDiff;
+
+  // 拉取 git 基准：切文件时清零旧标记，到达后按当前草稿重算。
+  useEffect(() => {
+    let alive = true;
+    setGitBase(null);
+    lineDiffRef.current = EMPTY_LINE_DIFF;
+    void window.cyberslots.gitBaseContent(root, path).then((g) => {
+      if (!alive) return;
+      setGitBase(g);
+      // 标记表由 useMemo 随 gitBase 重算；这里只需刷新 ref 供编辑器 reconfig。
+      lineDiffRef.current = computeLineDiff(g.base, draftRef.current);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [root, path]);
+
+  // 编辑语言按扩展名匹配（language-data 内含 js/ts/py/rs/yaml/html/md 等），
+  // 首次进入编辑时短暂异步加载，之后复用。
+  useEffect(() => {
+    let alive = true;
+    setEditLang(null);
+    const desc = LanguageDescription.matchFilename(languages, fileName);
+    if (!desc) return () => { alive = false; };
+    void desc.load().then((ls) => {
+      if (alive) setEditLang(ls);
+    });
+    return () => { alive = false; };
+  }, [fileName]);
 
   useEffect(() => {
     setText(null);
@@ -107,7 +365,7 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
       .catch(() => undefined); // 文件可能被回退删除：保留现有内容
   }, [reloadKey]);
 
-  const save = async (): Promise<void> => {
+  const save = useCallback(async (): Promise<void> => {
     setSaving(true);
     setError(null);
     try {
@@ -120,14 +378,98 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
     } finally {
       setSaving(false);
     }
-  };
+  }, [draft, isMd, path, root]);
+
+  // keymap 引用最新 save，但不随每次输入重建扩展（避免编辑器频繁重配置）。
+  const saveRef = useRef(save);
+  useEffect(() => { saveRef.current = save; }, [save]);
+
+  // git 行级标记：StateField 固定配置 + 显式 StateEffect 重建。
+  // 关键：不能只靠 docChanged 时才更新 —— git 基准到达 / 切文件时文档没变，
+  // 旧装饰（空或上一个文件的）会一直挂着，表现为「要真的改一次才出标记」。
+  // 这里由下面的 effect 派发 diffRebuild，让字段用最新行号表整体重建。
+  const diffRebuild = useMemo(() => StateEffect.define<LineDiff>(), []);
+  const diffField = useMemo(
+    () =>
+      StateField.define<{ deco: DecorationSet; markers: RangeSet<GutterMarker> }>({
+        create: (state) => buildDiffField(state.doc, lineDiffRef.current),
+        update: (v, tr) => {
+          for (const e of tr.effects) {
+            if (e.is(diffRebuild)) return buildDiffField(tr.state.doc, e.value);
+          }
+          if (tr.docChanged) return { deco: v.deco.map(tr.changes), markers: v.markers.map(tr.changes) };
+          return v;
+        },
+        provide: (f) => [
+          EditorView.decorations.from(f, (v) => v.deco),
+          lineNumberMarkers.from(f, (v) => v.markers),
+        ],
+      }),
+    [diffRebuild],
+  );
+  const diffCompartment = useMemo(() => new Compartment(), []);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const updateStat = useCallback((view: EditorView): void => {
+    const sel = view.state.selection.main;
+    const line = view.state.doc.lineAt(sel.head);
+    setStat({ line: line.number, col: sel.head - line.from + 1, selLen: Math.abs(sel.to - sel.from) });
+  }, []);
+  useEffect(
+    () => () => {
+      editorViewRef.current = null;
+    },
+    [],
+  );
+
+  // 标记表变化（git 基准到达 / 每次编辑）→ 派发重建 effect，让新行号表生效。
+  useEffect(() => {
+    const view = editorViewRef.current;
+    if (!view || !gitBase?.status) return;
+    view.dispatch({ effects: diffRebuild.of(lineDiff) });
+  }, [diffRebuild, gitBase, lineDiff]);
+
+  const editExtensions = useMemo(
+    () => [
+      CM_THEME,
+      INDENT_FOLD,
+      search({ top: true }),
+      syntaxHighlighting(CM_HIGHLIGHT),
+      highlightTrailingWhitespace(),
+      keymap.of([{ key: 'Mod-s', run: () => { void saveRef.current(); return true; } }]),
+      diffCompartment.of(diffField),
+      ...(editLang ? [editLang] : []),
+    ],
+    [editLang, diffCompartment, diffField],
+  );
+
+  // 稳定回调：@uiw/react-codemirror 的 reconfigure 依赖这些 prop 的引用，
+  // 每次渲染传新函数会触发整套扩展重建（折叠状态被抖掉）。
+  const handleChange = useCallback((v: string) => setDraft(v), []);
+  const handleUpdate = useCallback(
+    (vu: ViewUpdate) => {
+      if (vu.selectionSet || vu.docChanged) updateStat(vu.view);
+    },
+    [updateStat],
+  );
+  const handleCreate = useCallback(
+    (view: EditorView) => {
+      editorViewRef.current = view;
+      updateStat(view);
+    },
+    [updateStat],
+  );
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 px-2 pb-1 pt-2">
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-ink-soft" title={path}>
           {fileName}
         </span>
+        {gitBase?.status && (
+          <span className={`shrink-0 rounded px-1.5 py-[1px] font-mono text-[10px] font-bold ${GIT_BADGE_CLS[gitBase.status] ?? 'text-ink-faint'}`}>
+            {gitBase.status}
+          </span>
+        )}
         {isMd && mode !== 'edit' && (
           <IconBtn title={mode === 'preview' ? t('fpViewSource') : t('fpPreview')} onClick={() => setMode(mode === 'preview' ? 'source' : 'preview')}>
             {mode === 'preview' ? <Code2 size={13} /> : <Eye size={13} />}
@@ -175,24 +517,29 @@ export default function FilePreview({ path, root, sessionId, reloadKey, onClose 
             <BrandSpinner size={12} /> {t('loading')}
           </div>
         ) : mode === 'edit' ? (
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.ctrlKey && e.key === 's') {
-                e.preventDefault();
-                void save();
-              }
-            }}
-            spellCheck={false}
-            className="h-full w-full resize-none bg-bg-input p-3 font-mono text-[12px] leading-5 outline-none"
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="relative min-h-0 flex-1">
+              <CodeMirror
+                value={draft}
+                onChange={handleChange}
+                extensions={editExtensions}
+                height="100%"
+                theme="none"
+                className="h-full bg-bg-input"
+                onCreateEditor={handleCreate}
+                onUpdate={handleUpdate}
+                basicSetup={CM_BASIC_SETUP}
+              />
+              {gitBase?.status && <DiffOverview lineDiff={lineDiff} total={Math.max(1, draft.split('\n').length)} />}
+            </div>
+            <EditorStatusBar stat={stat} ext={ext} gitBase={gitBase} />
+          </div>
         ) : isMd && mode === 'preview' ? (
           <div className="md-body px-4 py-3">
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>{text ?? ''}</ReactMarkdown>
           </div>
         ) : (
-          <NumberedSource text={text ?? ''} ext={ext} path={path} fileName={fileName} sessionId={sessionId} />
+          <NumberedSource text={text ?? ''} ext={ext} path={path} fileName={fileName} sessionId={sessionId} lineDiff={lineDiff} />
         )}
       </div>
     </div>
@@ -207,12 +554,14 @@ function NumberedSource({
   path,
   fileName,
   sessionId,
+  lineDiff,
 }: {
   text: string;
   ext: string;
   path: string;
   fileName: string;
   sessionId: string;
+  lineDiff: LineDiff;
 }): JSX.Element {
   const t = useT();
   const addSelection = useChatStore((s) => s.addSelection);
@@ -320,10 +669,19 @@ function NumberedSource({
         if (e.shiftKey) evalSelection();
       }}
     >
-      <div className="select-none px-2 py-2 text-right text-ink-faint/70">
-        {lines.map((_, i) => (
-          <div key={i}>{i + 1}</div>
-        ))}
+      <div className="select-none py-2 text-right text-ink-faint/70">
+        {lines.map((_, i) => {
+          const ln = i + 1;
+          const kind = lineDiff.rows.get(ln) ?? (lineDiff.dels.has(ln) ? 'del' : null);
+          return (
+            <div
+              key={i}
+              className={`relative px-2 ${kind === 'add' ? 'pv-diff-gutter-add' : kind === 'mod' ? 'pv-diff-gutter-mod' : kind === 'del' ? 'pv-diff-gutter-del' : ''}`}
+            >
+              {ln}
+            </div>
+          );
+        })}
       </div>
       {html !== undefined ? (
         <pre ref={preRef} className="hljs flex-1 overflow-x-auto whitespace-pre bg-transparent px-3 py-2" dangerouslySetInnerHTML={{ __html: html }} />
@@ -345,6 +703,9 @@ function NumberedSource({
             {selBtn.startLine === selBtn.endLine ? `L${selBtn.startLine}` : `L${selBtn.startLine}-${selBtn.endLine}`}
           </span>
         </button>
+      )}
+      {(lineDiff.rows.size > 0 || lineDiff.dels.size > 0) && (
+        <DiffOverview lineDiff={lineDiff} total={Math.max(1, lines.length)} />
       )}
     </div>
   );
@@ -386,6 +747,74 @@ function OpenInMenu({ path }: { path: string }): JSX.Element {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/** 右侧变更概览条（VS Code overview ruler 语义）：整文件高度按行号映射，
+ *  新增绿 / 修改琥珀 / 删除红；只画有变更的行，行数多时自动压缩。 */
+function DiffOverview({ lineDiff, total }: { lineDiff: LineDiff; total: number }): JSX.Element | null {
+  const ref = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setHeight(el.clientHeight));
+    ro.observe(el);
+    setHeight(el.clientHeight);
+    return () => ro.disconnect();
+  }, []);
+
+  const marks = useMemo(() => {
+    const out: Array<{ top: number; kind: 'add' | 'mod' | 'del' }> = [];
+    if (!height || total <= 0) return out;
+    const step = height / total;
+    const push = (line: number, kind: 'add' | 'mod' | 'del'): void => {
+      out.push({ top: Math.max(0, Math.min(height - 3, (line - 1) * step)), kind });
+    };
+    for (const [ln, kind] of lineDiff.rows) push(ln, kind);
+    for (const ln of lineDiff.dels) push(ln, 'del');
+    return out;
+  }, [height, lineDiff, total]);
+
+  return (
+    <div ref={ref} className="absolute bottom-2 right-2 top-2 w-[4px] overflow-hidden rounded-full bg-bg-hover/70">
+      {marks.map((m, i) => (
+        <div
+          key={i}
+          className={`absolute left-0 w-full rounded-full ${m.kind === 'add' ? 'bg-ok' : m.kind === 'mod' ? 'bg-warn' : 'bg-err'}`}
+          style={{ top: m.top, height: 3 }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** 编辑状态栏：光标行/列、选区字符数、语言、git 状态、编码（VS Code 底栏风格）。 */
+function EditorStatusBar({
+  stat,
+  ext,
+  gitBase,
+}: {
+  stat: { line: number; col: number; selLen: number };
+  ext: string;
+  gitBase: GitBaseContent | null;
+}): JSX.Element {
+  const gitCls =
+    gitBase?.status === 'M'
+      ? 'text-warn'
+      : gitBase?.status === 'A' || gitBase?.status === 'U'
+        ? 'text-ok'
+        : gitBase?.status === 'D'
+          ? 'text-err'
+          : 'text-info';
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t border-line bg-bg-panel/40 px-3 py-[3px] font-mono text-[10.5px] text-ink-faint">
+      <span className="tabular-nums">行 {stat.line}，列 {stat.col}</span>
+      {stat.selLen > 0 && <span className="tabular-nums">已选 {stat.selLen} 字符</span>}
+      <span className="ml-auto">{ext ? ext.toUpperCase() : 'PLAIN TEXT'}</span>
+      {gitBase?.status && <span className={`font-bold ${gitCls}`}>{gitBase.status}</span>}
+      <span>UTF-8</span>
     </div>
   );
 }

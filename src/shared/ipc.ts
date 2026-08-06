@@ -11,6 +11,7 @@ import type {
   AgyQuotaInfo,
   AntigravityCatalog,
   AppSettings,
+  BrowserPanelState,
   CompatAuditSnapshot,
   CronTask,
   EngineConfigsSnapshot,
@@ -19,6 +20,7 @@ import type {
   GoalControlAction,
   OpencodeCatalog,
   OmpCatalog,
+  OmpQuota,
   PermissionMode,
   ProviderQuotaInfo,
   SessionMeta,
@@ -38,12 +40,14 @@ export const IPC = {
   sessionCancel: 'session:cancel',
   sessionWarmUp: 'session:warm-up',
   sessionSetModel: 'session:set-model',
+  sessionSetEffort: 'session:set-effort',
   sessionSetMode: 'session:set-mode',
   sessionAnswerPermission: 'session:answer-permission',
   sessionClose: 'session:close',
   sessionRename: 'session:rename',
   sessionDelete: 'session:delete',
   sessionMessagesGet: 'session:messages-get',
+  sessionSearch: 'session:search',
   sessionMessagesSave: 'session:messages-save',
   sessionFork: 'session:fork',
   sessionForkEngine: 'session:fork-engine',
@@ -64,6 +68,8 @@ export const IPC = {
   workspaceAnnounce: 'workspace:announce',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  dataDirGet: 'data-dir:get',
+  dataDirSet: 'data-dir:set',
   titleGenerate: 'title:generate',
   usageStats: 'usage:stats',
   providerQuota: 'usage:provider-quota',
@@ -79,6 +85,7 @@ export const IPC = {
   agyAccountSwitch: 'agy:account-switch',
   agyQuota: 'agy:quota',
   agyActiveQuota: 'agy:active-quota',
+  ompQuota: 'omp:quota',
   themeSync: 'window:theme-sync',
   badgeSet: 'window:badge-set',
   cronList: 'cron:list',
@@ -92,12 +99,14 @@ export const IPC = {
   fsRead: 'fs:read',
   fsWrite: 'fs:write',
   fsGitStatus: 'fs:git-status',
+  gitBaseContent: 'fs:git-base-content',
   fsImport: 'fs:import',
   fsIsDir: 'fs:is-dir',
   fsResolve: 'fs:resolve',
   openIn: 'sys:open-in',
   openersDetect: 'sys:openers-detect',
   attachmentSaveTemp: 'attachment:save-temp',
+  attachmentDataUrl: 'attachment:data-url',
   slashList: 'slash:list',
   // 面板内嵌终端
   terminalCreate: 'terminal:create',
@@ -114,17 +123,26 @@ export const IPC = {
   raceRevise: 'race:revise',
   raceFinalize: 'race:finalize',
   raceResume: 'race:resume',
+  raceOverrideAudit: 'race:override-audit',
   raceUpdateRole: 'race:update-role',
   raceRetryRacer: 'race:retry-racer',
   raceRetryRacerIfMissing: 'race:retry-racer-if-missing',
   raceEliminate: 'race:eliminate',
   raceRestartPlanning: 'race:restart-planning',
   raceCancel: 'race:cancel',
+  raceAcceptPreJudge: 'race:accept-pre-judge',
+  raceDismissPreJudge: 'race:dismiss-pre-judge',
+  // 受管浏览器（browser use 工具服务层；settings.browserUse 开关控制）
+  browserGetState: 'browser:get-state',
+  browserEnsure: 'browser:ensure',
+  browserStop: 'browser:stop',
   // main → renderer (send/on)
   engineEvent: 'engine:event',
+  sessionActivate: 'session:activate',
   terminalData: 'terminal:data',
   raceEvent: 'race:event',
   compatAudit: 'compat:audit',
+  browserEvent: 'browser:event',
   // 日志：renderer → main 批量落盘（send，无应答）；打开日志目录。
   logWrite: 'log:write',
   logsDir: 'log:dir',
@@ -135,6 +153,8 @@ export interface SessionCreateRequest {
   engine: EngineId;
   cwd: string; // '' → chat mode (scratch dir)
   modelId?: string;
+  /** 新会话默认思考深度（本程序每引擎默认，随 meta 一起落盘）。 */
+  effort?: string;
   permissionMode?: PermissionMode;
   title?: string;
   /** Bind the session to a named multi-folder workspace. */
@@ -155,6 +175,16 @@ export interface SessionPromptRequest {
 }
 
 /** 渲染进程经 IPC 转发给主进程落盘的单条日志（与主进程 JSONL 行同构）。 */
+/** 数据目录设置结果（IPC 返回）。 */
+export interface DataDirResult {
+  /** 本次启动实际生效的数据目录（重启前不会变）。 */
+  current: string;
+  /** 已写入指针、待下次启动生效的目录（'' = 恢复默认）。 */
+  pending: string;
+  /** pending 与 current 相同（目标即当前目录）。 */
+  applied: boolean;
+}
+
 export interface RendererLogPayload {
   ts: number;
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -186,6 +216,14 @@ export interface FileContent {
   truncated: boolean;
   /** lowercased extension without dot, for highlight/preview routing. */
   ext: string;
+}
+
+/** 单文件 git 基准（编辑器行级变更标记用）：
+ *  base = HEAD 版本内容（未跟踪/新增/二进制/非 git 时为 null），
+ *  status = 文件级短码（M/A/D/U/R，非 git 仓库为空串）。 */
+export interface GitBaseContent {
+  base: string | null;
+  status: string;
 }
 
 export type OpenTarget = 'vscode' | 'cursor' | 'antigravity' | 'explorer' | 'gitbash' | 'wt' | 'terminal';
@@ -244,22 +282,57 @@ export interface SessionChangeDiff {
   after: string | null;
 }
 
+/** 「回退到某提问」预览：files = 将撤销的本会话变更（diff ∩ 本会话台账）；
+ *  unattributed = 快照后存在但不归属于本对话的变更数（仅提示，不会被回退）。 */
+export interface UndoPreview {
+  files: SessionChangeEntry[];
+  unattributed: number;
+}
+
+/** 停止请求的返回：软失败不抛错，通过字段回传，避免 UI 只看到「请求成功」却无提示。 */
+export interface CancelSessionResult {
+  /** 有活跃 goal 且暂停失败/超时——中断后引擎可能自动续跑，UI 应明确提示。 */
+  goalPauseFailed?: boolean;
+}
+
+/** 全局搜索请求（跨会话搜索标题 + 消息内容）。 */
+export interface SessionSearchRequest {
+  query: string;
+  /** 最多返回几条结果（默认 50）。 */
+  limit?: number;
+}
+
+/** 单条搜索命中（标题匹配 or 消息内容匹配）。 */
+export interface SearchHit {
+  sessionId: string;
+  /** 命中的消息 id（标题匹配时为空）。 */
+  messageId?: string;
+  /** 命中类型：title = 标题匹配, content = 消息内容匹配。 */
+  kind: 'title' | 'content';
+  /** 匹配上下文摘要（标题匹配时 = 标题全文；内容匹配时 = 关键词前后 ~60 字）。 */
+  snippet: string;
+}
+
 /** Renderer-facing API exposed by the preload bridge. */
 export interface CyberSlotsApi {
   sessionCreate(req: SessionCreateRequest): Promise<SessionMeta>;
   sessionList(): Promise<SessionMeta[]>;
   sessionPrompt(req: SessionPromptRequest): Promise<void>;
-  sessionCancel(sessionId: string): Promise<void>;
+  sessionCancel(sessionId: string): Promise<CancelSessionResult>;
   /** 预热：选中会话时立即唤醒引擎进程（恢复态不再懒启动）。 */
   sessionWarmUp(sessionId: string): Promise<void>;
   sessionSetModel(sessionId: string, modelId: string): Promise<void>;
-  sessionSetMode(sessionId: string, mode: PermissionMode): Promise<void>;
+  /** 持久化会话级思考深度；null = 清除（回落到引擎默认解析链）。 */
+  sessionSetEffort(sessionId: string, effort: string | null): Promise<void>;
+  sessionSetMode(sessionId: string, mode: PermissionMode): Promise<PermissionMode>;
   sessionAnswerPermission(req: AnswerPermissionRequest): Promise<void>;
   sessionClose(sessionId: string): Promise<void>;
   sessionRename(sessionId: string, title: string): Promise<void>;
   sessionDelete(sessionId: string): Promise<void>;
   sessionMessagesGet(sessionId: string): Promise<UnifiedMessage[]>;
   sessionMessagesSave(sessionId: string, messages: UnifiedMessage[]): Promise<void>;
+  /** 全局搜索：跨会话搜索标题和消息内容。 */
+  sessionSearch(req: SessionSearchRequest): Promise<SearchHit[]>;
   sessionFork(sessionId: string): Promise<SessionMeta>;
   sessionForkEngine(sessionId: string, engine: EngineId): Promise<SessionMeta>;
   sessionCompact(sessionId: string): Promise<void>;
@@ -271,12 +344,12 @@ export interface CyberSlotsApi {
   sessionChangesRevert(sessionId: string, path?: string): Promise<void>;
   /** 接受：保留改动并停止跟踪（不动磁盘）；path 省略 = 全部接受。 */
   sessionChangesAccept(sessionId: string, path?: string): Promise<void>;
-  /** 回退到某提问将撤销的文件清单；null = 该提问无快照（仅能移除消息）。 */
-  sessionUndoPreview(sessionId: string, messageId: string): Promise<SessionChangeEntry[] | null>;
+  /** 回退到某提问将撤销的本会话文件清单 + 未归属变更计数；null = 该提问无快照（仅能移除消息）。 */
+  sessionUndoPreview(sessionId: string, messageId: string): Promise<UndoPreview | null>;
   /** 执行回退：还原文件 + 截断消息 + 重置引擎上下文；返回被移除的提问供回填。 */
   sessionUndo(sessionId: string, messageId: string): Promise<{ text: string; attachments?: string[] }>;
   /** Steer the in-flight turn; resolves false when not steerable. */
-  sessionSteer(sessionId: string, text: string): Promise<boolean>;
+  sessionSteer(sessionId: string, text: string, attachments?: string[], messageId?: string): Promise<boolean>;
   /** Engine-native goal (codex thread/goal). */
   sessionGoalSet(sessionId: string, objective: string): Promise<void>;
   sessionGoalControl(sessionId: string, action: GoalControlAction): Promise<void>;
@@ -291,6 +364,10 @@ export interface CyberSlotsApi {
   workspaceAnnounce(workspaceId: string): Promise<void>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** 当前生效的数据目录（app.getPath('userData')）。 */
+  dataDirGet(): Promise<string>;
+  /** 设置数据目录指针（'' = 恢复默认）；目录不存在时下次启动自动创建。 */
+  dataDirSet(path: string): Promise<DataDirResult>;
   /** AI 生成会话标题（主进程调用设置里的 OpenAI 兼容接口）；
    *  未配置/失败返回 null，渲染层回退截取式标题。 */
   titleGenerate(text: string): Promise<string | null>;
@@ -299,8 +376,9 @@ export interface CyberSlotsApi {
   /** 供应商余量/余额（kimi/minimax token plan、deepseek 余额）；只返回
    *  本地配置里探到 key 的供应商，主进程代查带缓存（force = 跳过缓存）。 */
   providerQuota(force?: boolean): Promise<ProviderQuotaInfo[]>;
-  /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。 */
-  engineConfigsGet(): Promise<EngineConfigsSnapshot>;
+  /** CLI 配置只读快照（~/.kimi-code、~/.codex）+ 路由可用性。
+   *  force = 跳过主进程短 TTL 缓存；选择器展开等非显式场景不传。 */
+  engineConfigsGet(force?: boolean): Promise<EngineConfigsSnapshot>;
   /** opencode 模型目录（主进程代理 /config/providers，按需启动 server）。 */
   opencodeCatalogGet(force?: boolean): Promise<OpencodeCatalog>;
   /** omp 模型目录（主进程代理 `omp models --json`，带缓存）。 */
@@ -327,6 +405,8 @@ export interface CyberSlotsApi {
   agyQuota(force?: boolean, cachedOnly?: boolean): Promise<AgyQuotaInfo[]>;
   /** 当前活动 Antigravity 账号的额度（只 1 次往返，用量小窗/大窗常显；force 跳缓存）。 */
   agyActiveQuota(force?: boolean): Promise<AgyActiveQuota>;
+  /** omp 当前 session 账号的 Claude 系列余量（_omp/usage ext method；force 跳缓存）。 */
+  ompQuota(force?: boolean): Promise<OmpQuota>;
   /** Push the resolved appearance to main so the native title bar matches. */
   themeSync(appearance: WindowAppearance): Promise<void>;
   /** 任务栏角标（Windows overlay icon）：dataUrl = renderer 画好的角标图；
@@ -341,6 +421,8 @@ export interface CyberSlotsApi {
   fsRead(path: string): Promise<FileContent>;
   fsWrite(path: string, text: string, root: string): Promise<void>;
   fsGitStatus(root: string): Promise<Record<string, string>>;
+  /** 取文件相对 HEAD 的基准内容 + 变更状态（编辑器行级标记用）。 */
+  gitBaseContent(root: string, path: string): Promise<GitBaseContent>;
   /** 将拖入的外部文件/文件夹拷贝进工作区根目录；返回成功个数。 */
   fsImport(root: string, srcPaths: string[]): Promise<number>;
   /** 路径是否目录（拖放到输入框时区分文件夹/文件引用）。 */
@@ -352,6 +434,8 @@ export interface CyberSlotsApi {
   openersDetect(force?: boolean): Promise<OpenerAvailability>;
   /** 粘贴/拖拽的二进制写临时文件，返回绝对路径（图片附件）。 */
   attachmentSaveTemp(bytes: Uint8Array, ext: string): Promise<string>;
+  /** 读图片附件为 data URL（缩略图展示）；非图片/读取失败返回 null。 */
+  attachmentDataUrl(path: string): Promise<string | null>;
   /** 斜线命令候选：扫描引擎全局 + 项目级 skills/commands（输入 / 唤起补全菜单）。 */
   slashList(req: SlashListRequest): Promise<SlashItem[]>;
   /** 面板内嵌终端：确保会话 shell 存在（cwd = 会话目录）。 */
@@ -364,7 +448,19 @@ export interface CyberSlotsApi {
   terminalDispose(id: string): Promise<void>;
   /** 订阅 shell 输出流（main → renderer）。 */
   onTerminalData(listener: (payload: { id: string; data: string }) => void): () => void;
-  onEngineEvent(listener: (e: EngineEventEnvelope) => void): () => void;
+  // --- 受管浏览器（browser use；settings.browserUse 开启后可用） ---
+  /** 查询受管浏览器面板状态（status/页面/截图/动作历史）。 */
+  browserGetState(): Promise<BrowserPanelState>;
+  /** 懒启动受管 Chrome（独立 user-data-dir；幂等），返回最新状态。 */
+  browserEnsure(): Promise<BrowserPanelState>;
+  /** 停止受管 Chrome 并释放调试端口。 */
+  browserStop(): Promise<void>;
+  /** 订阅受管浏览器状态全量推送（main → renderer）。 */
+  onBrowserEvent(listener: (state: BrowserPanelState) => void): () => void;
+  /** 引擎事件订阅：主进程 16ms 合批后一次可能送来单条或数组。 */
+  onEngineEvent(listener: (e: EngineEventEnvelope | EngineEventEnvelope[]) => void): () => void;
+  /** 系统通知点击 → 主进程要求定位到某会话（sessionId）。 */
+  onSessionActivate(listener: (sessionId: string) => void): () => void;
   /** 引擎兼容性审计快照（未知事件/被拒方法/解析失败的聚合计数）。 */
   compatAuditGet(): Promise<CompatAuditSnapshot>;
   /** 订阅审计快照变更（新指纹出现/计数增长时节流推送）。 */
@@ -386,6 +482,8 @@ export interface CyberSlotsApi {
   raceFinalize(raceId: string): Promise<void>;
   /** 重启后继续被打断的赛马（重跑当前阶段）。 */
   raceResume(raceId: string): Promise<void>;
+  /** 审计未通过时由用户人工放行：接受当前实现并交付，停止审计-修复循环。 */
+  raceOverrideAudit(raceId: string): Promise<void>;
   /** 重试前调整选手配置（仅 racerA/racerB；引擎/模型变更后重跑时重建会话）。 */
   raceUpdateRole(raceId: string, role: RaceRole, cfg: RaceRoleConfig): Promise<void>;
   /** 单选手重试：只补跑该选手当前阶段回合（另一侧不受影响）。 */
@@ -397,6 +495,10 @@ export interface CyberSlotsApi {
   /** 裁判选策略前回退：清空产物重跑双规划。 */
   raceRestartPlanning(raceId: string): Promise<void>;
   raceCancel(raceId: string): Promise<void>;
+  /** 采纳 AI 初审的推荐策略（等同于用推荐策略调 raceAdopt）。 */
+  raceAcceptPreJudge(raceId: string): Promise<void>;
+  /** 忽略 AI 初审推荐，回到纯人工 4 选 1。 */
+  raceDismissPreJudge(raceId: string): Promise<void>;
   /** 订阅赛马阶段/角色/融合方案/审计等编排事件（main → renderer）。 */
   onRaceEvent(listener: (e: RaceEventEnvelope) => void): () => void;
   /** 渲染进程日志批量上报（fire-and-forget；主进程落 renderer-*.jsonl）。 */

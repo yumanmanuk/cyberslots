@@ -239,6 +239,32 @@ function ApprovalCard({
           {msg.body}
         </pre>
       )}
+      {/* browser use 动作审批增强：回放截图 / 选择器·坐标 / 敏感字段警示 / 外发知悉 */}
+      {msg.origin === 'browser' && msg.browserAction && (
+        <div className="mx-4 mt-1 space-y-1.5 rounded-lg border border-line bg-bg px-3 py-2">
+          {msg.browserAction.previewImage && (
+            <img src={msg.browserAction.previewImage} alt="" className="max-h-40 rounded-md border border-line object-contain" />
+          )}
+          {(msg.browserAction.selector || msg.browserAction.x !== undefined) && (
+            <div className="font-mono text-[11px] leading-4 text-ink-soft">
+              {msg.browserAction.selector && <span className="break-all">{msg.browserAction.selector}</span>}
+              {msg.browserAction.x !== undefined && (
+                <span>
+                  {' '}({msg.browserAction.x}, {msg.browserAction.y ?? 0})
+                </span>
+              )}
+            </div>
+          )}
+          {msg.browserAction.sensitive && (
+            <div className="rounded-md bg-warn/10 px-2 py-1 text-[11.5px] text-warn">{t('browserPermSensitive')}</div>
+          )}
+          {msg.browserAction.outbound && (
+            <div className="text-[11px] leading-4 text-ink-faint">
+              {t('browserPermOutbound', { captures: msg.browserAction.outbound.captures, endpoint: msg.browserAction.outbound.endpoint })}
+            </div>
+          )}
+        </div>
+      )}
       <div className="flex flex-wrap gap-2 px-4 pb-3.5 pt-2">
         {msg.options.map((o) => {
           const rejecting = o.kind.startsWith('reject');

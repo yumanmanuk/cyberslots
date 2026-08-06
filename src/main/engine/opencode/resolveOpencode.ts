@@ -47,10 +47,11 @@ export function opencodeInstalled(): boolean {
   return probeVersion() !== undefined;
 }
 
-// 版本探测走 spawnSync（bun 原生 exe，~百 ms 级），成功结果进程级缓存一次。
+// 版本探测走 spawnSync（bun 原生 exe，~百 ms 级），成功结果进程级缓存一次；
+// 失败缓存 5 分钟 — 短 TTL 会让选择器展开时的配置重读反复 spawn 未安装 CLI。
 let cachedVersion: string | null | undefined; // undefined = 未探测；null = 探测失败
-let failedAt = 0; // 失败只缓存短期（应用先启动、CLI 后安装的场景无需重启即可检出）
-const PROBE_FAIL_TTL = 30_000;
+let failedAt = 0; // 失败缓存 5 分钟（应用先启动、CLI 后安装，5 分钟内重新探测）
+const PROBE_FAIL_TTL = 300_000;
 function probeVersion(): string | undefined {
   if (typeof cachedVersion === 'string') return cachedVersion;
   if (cachedVersion === null && Date.now() - failedAt < PROBE_FAIL_TTL) return undefined;

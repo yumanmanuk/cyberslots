@@ -368,6 +368,10 @@ export class OpencodeAdapter implements EngineAdapter {
 
   async cancel(): Promise<void> {
     if (!this.sessionID) return;
+    // 挂起权限先拒掉：abort 停回合后若还挂着 permission，服务端可能继续等
+    // 应答（曾现「停止没反应」）。reject 让引擎立刻收掉当前等待。
+    // 不传 optionId：服务端收到 reject，UI 侧按「已取消」收卡。
+    for (const requestId of [...this.pendingPermissions]) this.answerPermission(requestId);
     await this.api(`/session/${this.sessionID}/abort`, { method: 'POST', body: '{}' });
   }
 

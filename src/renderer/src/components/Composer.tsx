@@ -13,7 +13,6 @@ import {
   ChevronRight,
   Clock,
   CircleAlert,
-  FileText,
   Flame,
   GripVertical,
   Hand,
@@ -33,8 +32,8 @@ import {
 } from 'lucide-react';
 
 import type { SlashItem } from '@shared/ipc';
-import type { CodeSelection, CodexCatalogModel, EngineId, OmpModelEntry, PermissionMode } from '@shared/types';
-import { useChatStore, type QueuedMessage } from '../store/chatStore';
+import type { ChatSelection, CodexCatalogModel, EngineId, OmpModelEntry, PermissionMode } from '@shared/types';
+import { useChatStore, type DraftAttachment, type QueuedMessage } from '../store/chatStore';
 import { useRaceStore } from '../store/raceStore';
 import { useT, type MsgKey } from '../i18n';
 import { EngineIcon, ENGINE_LABELS, PseudoWorkspaceBadge, useEngineOrder } from './EngineIcon';
@@ -43,14 +42,14 @@ import { RaceHorse } from './RaceHorse';
 import OpencodeModelPicker from './OpencodeModelPicker';
 import ChipInput, { type ChipInputHandle } from './ChipInput';
 import SlashMenu from './SlashMenu';
-import { selectionRangeLabel } from '../selections';
+import { isTerminalSelection, selectionLineCount, selectionRangeLabel } from '../selections';
 import { resolveEffectiveEffort } from '../effort';
 import { modelDisplayLabel } from './race/modelCatalogs';
 import { TREE_NODE_MIME } from './workspace/FileTree';
 import PlanWidget from './PlanWidget';
 
 /** zustand selector 稳定引用（避免 `?? []` 每次新建导致多余重渲染）。 */
-const NO_SELECTIONS: CodeSelection[] = [];
+const NO_SELECTIONS: ChatSelection[] = [];
 
 const PERM_LABEL_KEYS: Record<string, MsgKey> = {
   default: 'permManual',
@@ -97,13 +96,7 @@ const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 /** omp 魔法关键词（独立小写词触发，代码块/路径内不算 — 这里只做宽松提示）。 */
 const MAGIC_KEYWORD_RE = /(^|\s)(ultrathink|orchestrate|workflowz)(\s|$)/;
 
-interface Attachment {
-  path: string;
-  name: string;
-  isImage: boolean;
-  /** 图片预览 object URL（拖拽/粘贴时由 File 生成；发送/移除时 revoke）。 */
-  preview?: string;
-}
+type Attachment = DraftAttachment;
 
 /** Escape 关闭裸弹层（非 Dropdown 封装的 popover 用）。 */
 function useEscClose(open: boolean, onClose: () => void): void {
@@ -120,9 +113,11 @@ function useEscClose(open: boolean, onClose: () => void): void {
 export default function Composer({ sessionId }: { sessionId: string }): JSX.Element {
   const t = useT();
   // 初值取会话草稿 — 切会话时 ChatView 按 key 整树重建，本地 state 会丢；
-  // 未发送内容靠 store.drafts 按会话保留（卸载时写回，见下方 effect）。
+  // 未发送文本 + 图片附件靠 store 按会话保留（卸载时写回，见下方 effect）。
   const [text, setText] = useState(() => useChatStore.getState().drafts[sessionId] ?? '');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    () => useChatStore.getState().draftAttachments?.[sessionId] ?? [],
+  );
   const [expanded, setExpanded] = useState(false);
   const [ctxFullOpen, setCtxFullOpen] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
@@ -153,6 +148,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   const removeSelection = useChatStore((s) => s.removeSelection);
   const cancel = useChatStore((s) => s.cancel);
   const sending = useChatStore((s) => !!s.sending[sessionId]);
+  const cancelling = useChatStore((s) => !!s.cancelling[sessionId]);
 
   // 在途发送（含启动期等待投递）也算忙 — 后续消息走排队，避免并发 prompt。
   const busy = meta?.status === 'running' || meta?.status === 'awaiting' || sending;
@@ -179,18 +175,49 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
   useEffect(() => {
     if (!undoDraft) return;
     setText(undoDraft.text);
+    if (undoDraft.attachments?.length) {
+      restorePaths(undoDraft.attachments);
+    }
     chipRef.current?.focus();
     useChatStore.setState((s) => ({ composerDrafts: { ...s.composerDrafts, [sessionId]: undefined } }));
   }, [undoDraft, sessionId]);
 
+  // 会话挂载后：把草稿里的非图片附件重新插成行内胶囊（图片走缩略图区，
+  // 不需要 DOM chip）。silent 插入避免 emit 在正文渲染前回写清掉文本。
+  const restoredFileChips = useRef(false);
+  useEffect(() => {
+    if (restoredFileChips.current) return;
+    restoredFileChips.current = true;
+    const files = useChatStore.getState().draftAttachments?.[sessionId] ?? [];
+    for (const f of files) {
+      if (!f.isImage) chipRef.current?.insertFileChip(f.name, f.path, undefined, true);
+    }
+  }, [sessionId]);
+
   // 卸载时把未发送内容存为会话草稿（纯内存，重启不保留）。
   const textRef = useRef(text);
   textRef.current = text;
+  const attachmentsRef = useRef(attachments);
+  attachmentsRef.current = attachments;
   useEffect(() => {
     return () => {
-      useChatStore.setState((s) => ({ drafts: { ...s.drafts, [sessionId]: textRef.current } }));
+      // 会话已删除时不再回写，避免卸载清理把刚清掉的草稿/附件复活。
+      if (!useChatStore.getState().sessions.some((m) => m.id === sessionId)) return;
+      useChatStore.setState((s) => ({
+        drafts: { ...s.drafts, [sessionId]: textRef.current },
+        draftAttachments: { ...s.draftAttachments, [sessionId]: attachmentsRef.current },
+      }));
     };
   }, [sessionId]);
+
+  /** 切换引擎前把当前输入内容刷入 store — fork 出的新会话按新 id 初始化
+   *  输入框，不先落库的话复制到的是上次卸载时的旧草稿。 */
+  const flushDraft = (): void => {
+    useChatStore.setState((s) => ({
+      drafts: { ...s.drafts, [sessionId]: textRef.current },
+      draftAttachments: { ...s.draftAttachments, [sessionId]: attachmentsRef.current },
+    }));
+  };
 
   const send = (opts?: { force?: boolean }): void => {
     const value = text.trim();
@@ -201,6 +228,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       if (!value) return;
       setText('');
       setGoalMode(false);
+      chipRef.current?.setPlainText('');
       void useChatStore.getState().setGoal(value);
       chipRef.current?.focus();
       return;
@@ -216,6 +244,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     for (const a of attachments) if (a.preview) URL.revokeObjectURL(a.preview);
     setAttachments([]);
     if (sels) useChatStore.getState().clearSelections(sessionId);
+    // 清空行内胶囊（文件 + 选区），避免发送后胶囊残留在输入框里。
+    chipRef.current?.setPlainText('');
     if (busy) {
       // 忙碌时入队，回合结束后自动依次发送
       useChatStore.getState().enqueue(value, paths, sels);
@@ -249,19 +279,112 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     void setMode(isPlan ? 'default' : 'plan');
   };
 
-  // Shift+Tab 全局切 Agent/Plan — 必须挂在 window 上：焦点不在输入框时
-  // 浏览器默认的反向 Tab 导航会把焦点跳到其它按钮（黄色 focus 框）。
+  // Ctrl+Tab / Shift+Tab 全局切 Agent/Plan — 必须挂在 window 上：焦点不在
+  // 输入框时浏览器默认的 Tab 导航会把焦点跳到其它按钮（黄色 focus 框）。
   useEffect(() => {
-    const onGlobalKey = (e: KeyboardEvent): void => {
-      if (e.key !== 'Tab' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
-      e.preventDefault();
+    const togglePlanMode = (): void => {
       const current = useChatStore.getState().ui[sessionId]?.modes.current;
       const next = current === 'plan' ? 'default' : 'plan';
       if (next === 'plan') setGoalMode(false); // 进入 Plan → 退出目标模式
       void useChatStore.getState().setMode(next);
     };
+    const onGlobalKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Tab') return;
+      const ctrlTab = e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey;
+      const shiftTab = e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+      if (!ctrlTab && !shiftTab) return;
+      e.preventDefault();
+      togglePlanMode();
+    };
     window.addEventListener('keydown', onGlobalKey);
     return () => window.removeEventListener('keydown', onGlobalKey);
+  }, [sessionId]);
+
+  // Ctrl+M / Ctrl+Shift+M 循环模型、Ctrl+E / Ctrl+Shift+E 循环思考深度 —
+  // 全局 window 级（焦点不在输入框也生效）；无可用列表 / 无思考档位面时
+  // 静默无动作，不打扰。
+  useEffect(() => {
+    const cycleModel = (dir: 1 | -1): void => {
+      const s = useChatStore.getState();
+      const meta = s.sessions.find((m) => m.id === sessionId);
+      if (!meta) return;
+      const uiModels = s.ui[sessionId]?.models;
+      const current = uiModels?.current || meta.modelId || '';
+      // 与 ModelPicker 的 available 兜底解析保持一致（codex catalog / omp slugs / current）。
+      const catalogSlugs = s.codexCatalog.map((c) => c.slug);
+      const ompSlugs = meta.engine === 'omp' ? (s.ompCatalog?.models ?? []).map((m) => m.slug) : [];
+      const rawAvailable = uiModels?.available.length
+        ? uiModels.available
+        : meta.engine === 'codex'
+          ? catalogSlugs.length
+            ? catalogSlugs
+            : current
+              ? [current]
+              : []
+          : meta.engine === 'omp'
+            ? current
+              ? [current]
+              : [] // ACP 模型值域未到前不展示目录全量（目录 ≠ 会话可用集）
+            : ompSlugs.length
+              ? current && !ompSlugs.includes(current)
+                ? [current, ...ompSlugs]
+                : ompSlugs
+              : current
+                ? [current]
+                : [];
+      // antigravity/omp 隐藏黑名单过滤（始终保留当前模型，同 ModelPicker）。
+      const hidden =
+        meta.engine === 'antigravity'
+          ? (s.settings?.antigravityHiddenModels ?? [])
+          : meta.engine === 'omp'
+            ? (s.settings?.ompHiddenModels ?? [])
+            : [];
+      const available = hidden.length
+        ? rawAvailable.filter((m) => m === current || !hidden.includes(m))
+        : rawAvailable;
+      if (available.length < 2) return;
+      const idx = available.indexOf(current);
+      const next =
+        idx >= 0 ? available[(idx + dir + available.length) % available.length]! : available[dir === 1 ? 0 : available.length - 1]!;
+      if (next !== current) void s.setModel(next);
+    };
+
+    const cycleEffort = (dir: 1 | -1): void => {
+      const s = useChatStore.getState();
+      const meta = s.sessions.find((m) => m.id === sessionId);
+      if (!meta) return;
+      const ui = s.ui[sessionId];
+      const activeModel = ui?.models?.current || ui?.models?.available[0] || meta.modelId || '';
+      const resolved = resolveEffectiveEffort({
+        engine: meta.engine,
+        override: s.efforts[sessionId],
+        activeModel,
+        kimiModels: s.kimiModels,
+        codexCatalog: s.codexCatalog,
+        codexDefaultEffort: s.codexDefaultEffort,
+        opencodeCatalog: s.opencodeCatalog,
+        ompCatalog: s.ompCatalog,
+        ompThinking: ui?.thinking,
+      });
+      if (!resolved || resolved.options.length < 2) return;
+      const next = resolved.options[(resolved.index + dir + resolved.options.length) % resolved.options.length]!;
+      useChatStore.getState().setSessionEffort(sessionId, next);
+    };
+
+    const onKey = (e: KeyboardEvent): void => {
+      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      const dir: 1 | -1 = e.shiftKey ? -1 : 1;
+      const key = e.key.toLowerCase();
+      if (key === 'm') {
+        e.preventDefault();
+        cycleModel(dir);
+      } else if (key === 'e') {
+        e.preventDefault();
+        cycleEffort(dir);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, [sessionId]);
 
   // 切换会话时重置目标编辑模式（Composer 不随会话 remount）。
@@ -352,8 +475,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       chipRef.current?.insertSelectionChip({
         id: s.id,
         fileName: s.fileName,
-        rangeLabel: selectionRangeLabel(s),
-        path: s.path,
+        rangeLabel: isTerminalSelection(s) ? ` ${t('selLineCount', { n: selectionLineCount(s) })}` : selectionRangeLabel(s),
+        path: isTerminalSelection(s) ? s.cwd : s.path,
       });
     }
   }, [selections, sessionId]);
@@ -401,8 +524,32 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
     }
   };
 
-  /** 把一个 File 分流成附件：图片 → 缩略图附件；非图片 → 光标处文件引用
-   *  chip（拖拽与「+ 选择文件」共用同一条链路）。 */
+  /** 回填路径列表（回退/队列编辑）：图片进缩略图附件，非图片插行内胶囊。
+   *  silent —— 状态由调用方同步，不触发 emit（避免正文被回写清掉）。 */
+  const restorePaths = (paths: string[]): void => {
+    if (!paths.length) return;
+    setAttachments((prev) => {
+      const known = new Set(prev.map((a) => a.path));
+      const fresh = paths
+        .filter((p) => !known.has(p))
+        .map((p) => ({
+          path: p,
+          name: p.split(/[\\/]/).pop() ?? p,
+          isImage: IMAGE_RE.test(p),
+        }));
+      return fresh.length ? [...prev, ...fresh] : prev;
+    });
+    for (const p of paths) {
+      if (!IMAGE_RE.test(p)) chipRef.current?.insertFileChip(p.split(/[\\/]/).pop() ?? p, p, undefined, true);
+    }
+  };
+
+  /** 非图片文件/文件夹 → 行内胶囊插到光标处（attachments 由 onFileChipsChange
+   *  从 DOM 同步），彻底绕开「胶囊可见但发送时丢」的旧病。 */
+  const insertFileChips = (items: Array<{ name: string; path: string; dir?: boolean }>): void => {
+    for (const it of items) chipRef.current?.insertFileChip(it.name, it.path, it.dir);
+  };
+
   const addFiles = (fileList: File[]): void => {
     const imgs: Attachment[] = [];
     const refs: Array<{ name: string; path: string }> = [];
@@ -414,22 +561,12 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
         if (attachments.some((a) => a.path === path)) continue;
         imgs.push({ path, name: file.name, isImage: true, preview: URL.createObjectURL(file) });
       } else {
-        // 非图片：在光标处插入文件引用 chip。
+        // 非图片：行内胶囊插到光标处（与文本同一行）。
         refs.push({ name: file.name, path });
       }
     }
     if (imgs.length) setAttachments((prev) => [...prev, ...imgs]);
-    if (refs.length) {
-      // 非图片：逐个在光标处插入引用 chip（显示胶囊，复制/发送时
-      // 序列化为 `名字(路径)` 纯文本）。外部文件不携带目录信息。
-      // 需问主进程 stat 后再插（文件夹 chip 图标/样式不同）。
-      void (async () => {
-        for (const r of refs) {
-          const dir = await window.cyberslots.fsIsDir(r.path);
-          chipRef.current?.insertFileChip(r.name, r.path, dir);
-        }
-      })();
-    }
+    if (refs.length) insertFileChips(refs);
   };
 
   const onDrop = (e: React.DragEvent): void => {
@@ -445,7 +582,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             prev.some((a) => a.path === node.path) ? prev : [...prev, { path: node.path, name: node.name, isImage: true }],
           );
         } else {
-          chipRef.current?.insertFileChip(node.name, node.path, node.dir);
+          // 工作区文件/文件夹 → 行内胶囊插到光标处（与文本同一行）。
+          insertFileChips([{ name: node.name, path: node.path, dir: node.dir }]);
         }
       } catch {
         // 损坏的拖拽数据 → 忽略。
@@ -485,8 +623,19 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
       return prev.filter((a) => a.path !== path);
     });
 
+  /** DOM 文件胶囊存活清单 → attachments（图片仍以 state 为准；删除胶囊 =
+   *  删除附件，发送不夹带看不见的引用）。 */
+  const syncFileChips = (refs: Array<{ name: string; path: string; dir: boolean }>): void => {
+    setAttachments((prev) => {
+      const imgs = prev.filter((a) => a.isImage);
+      const files = refs.map((r) => ({ path: r.path, name: r.name, isImage: false }));
+      const next = [...imgs, ...files];
+      if (next.length === prev.length && next.every((a, i) => a.path === prev[i]!.path)) return prev;
+      return next;
+    });
+  };
+
   const images = attachments.filter((a) => a.isImage);
-  const files = attachments.filter((a) => !a.isImage);
 
   return (
     <div className="shrink-0 px-6 pb-5 pt-1">
@@ -501,6 +650,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
           }}
           onEditItem={(item) => {
             setText(item.text);
+            if (item.attachments?.length) restorePaths(item.attachments);
             // 队列项携带的选区引用一并回填 store（文本里已含胶囊标记，
             // 跳过行内插入避免重复；addSelection 自带去重）。
             if (item.selections?.length) {
@@ -551,6 +701,7 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             onKeyDown={onKeyDown}
             onImagePaste={handleImagePaste}
             onSelChipsChange={syncSelChips}
+            onFileChipsChange={syncFileChips}
             placeholder={goalMode ? t('goalPlaceholder') : starting && !busy ? t('inputStarting') : busy ? t('inputBusy') : sendKey === 'ctrl-enter' ? t('inputPlaceholderCtrl') : t('inputPlaceholder')}
             className="no-scrollbar max-h-32 min-h-[3.25rem] overflow-y-auto px-4 pb-1 pt-3 text-body"
           />
@@ -570,17 +721,8 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
             </div>
           )}
 
-          {/* 非图片文件附件 — 中性色小块 */}
-          {files.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 px-3 pb-1.5">
-              {files.map((a) => (
-                <AttachmentChip key={a.path} att={a} onRemove={() => removeAttachment(a.path)} />
-              ))}
-            </div>
-          )}
-
           <div className="flex items-center gap-1.5 px-3 pb-2.5">
-            <EngineBadge sessionId={sessionId} />
+            <EngineBadge sessionId={sessionId} onSwitchEngine={flushDraft} />
             {/* + 菜单（codex 同款）：选择文件 / 放大输入框。承接了原右侧
                 独立放大按钮的功能，与引擎图标同为永不退避项（引擎仍最左）。 */}
             <AddMenu onExpand={() => setExpanded(true)} onPickFiles={() => fileInputRef.current?.click()} />
@@ -639,10 +781,11 @@ export default function Composer({ sessionId }: { sessionId: string }): JSX.Elem
                 // 输入为空 → 同位显示中止按钮
                 <button
                   onClick={() => void cancel()}
-                  title={t('stop')}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80"
+                  disabled={cancelling}
+                  title={cancelling ? t('stopping') : t('stop')}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink text-bg transition hover:opacity-80 disabled:opacity-80"
                 >
-                  <Square size={13} fill="currentColor" />
+                  {cancelling ? <BrandSpinner size={14} /> : <Square size={13} fill="currentColor" />}
                 </button>
               )
             ) : (
@@ -799,8 +942,10 @@ function QueuePanel({
   const steerQueued = useChatStore((s) => s.steerQueued);
   const [open, setOpen] = useState(() => queue.length > 0);
   const dragFrom = useRef<number | null>(null);
-  // Transient per-panel notice after a steer attempt falls back (kimi has no native steer).
-  const [steerNotice, setSteerNotice] = useState<{ id: string; kind: 'moved' | 'head' } | null>(null);
+  // Transient per-panel notice after a steer attempt falls back / re-routes.
+  const [steerNotice, setSteerNotice] = useState<{ id: string; kind: 'moved' | 'head' | 'sent' } | null>(null);
+  /** 正在尝试引导的队列项（IPC 往返期间的行内进行中态）。 */
+  const [steeringId, setSteeringId] = useState<string | null>(null);
   useEffect(() => {
     if (!steerNotice) return;
     const timer = setTimeout(() => setSteerNotice(null), 2600);
@@ -846,47 +991,62 @@ function QueuePanel({
                 if (dragFrom.current !== null && dragFrom.current !== i) moveQueued(sessionId, dragFrom.current, i);
                 dragFrom.current = null;
               }}
-              className="queue-row-in group flex items-center gap-1.5 px-2 py-1"
+              className="queue-row-in group flex items-baseline gap-1.5 px-2 py-1"
             >
-              <GripVertical size={13} className="shrink-0 cursor-grab text-ink-faint/60 group-hover:text-ink-faint" />
-              <span className="min-w-0 flex-1 truncate text-[12px] text-ink" title={item.text}>
+              <GripVertical size={13} className="shrink-0 cursor-grab self-center text-ink-faint/60 group-hover:text-ink-faint" />
+              <span className="min-w-0 flex-1 truncate text-[12px] leading-[20px] text-ink" title={item.text}>
                 {item.text}
               </span>
               {item.selections && item.selections.length > 0 && (
                 <span
                   title={item.selections.map((s) => s.fileName).join(', ')}
-                  className="shrink-0 rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent"
+                  className="shrink-0 self-center rounded bg-accent-soft px-1.5 py-0.5 text-[10px] text-accent"
                 >
                   +{item.selections.length} {t('selRefs')}
                 </span>
               )}
-              {/* 排队等待 = 进行中语义 — 品牌星芒轮闪 */}
-              <span className="flex shrink-0 items-center gap-1 text-[11px] text-ink-faint">
-                <BrandSpinner size={11} />
-                {t('queueItemWaiting')}
-              </span>
+              {item.attachments && item.attachments.length > 0 && (
+                <span
+                  title={item.attachments.join('\n')}
+                  className="flex shrink-0 items-center gap-1 self-center rounded bg-bg-panel px-1.5 py-0.5 text-[10px] text-ink-soft"
+                >
+                  <Paperclip size={10} className="text-ink-faint" />
+                  {item.attachments.length} {t('attachments')}
+                </span>
+              )}
+              {(item.steering || steeringId === item.id) && (
+                <span className="flex shrink-0 items-center gap-1 self-center text-[11px] text-accent">
+                  <BrandSpinner size={11} />
+                  {t('queueItemSteering')}
+                </span>
+              )}
               <button
                 title={t('queueSteer')}
-                onClick={() =>
-                  void steerQueued(sessionId, item.id).then((r) => {
-                    if (r === 'moved' || r === 'head') setSteerNotice({ id: item.id, kind: r });
-                  })
-                }
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-accent"
+                disabled={steeringId !== null || item.steering}
+                onClick={() => {
+                  setSteeringId(item.id);
+                  void steerQueued(sessionId, item.id)
+                    .then((r) => {
+                      if (r === 'moved' || r === 'head' || r === 'sent') setSteerNotice({ id: item.id, kind: r });
+                    })
+                    .finally(() => setSteeringId(null))
+                    .catch(() => undefined);
+                }}
+                className="flex items-center justify-center self-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-accent disabled:opacity-40"
               >
                 <ArrowUp size={12} className="rotate-45" />
               </button>
               <button
                 title={t('queueEdit')}
                 onClick={() => onEditItem(item)}
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
+                className="flex items-center justify-center self-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink"
               >
                 <Pencil size={12} />
               </button>
               <button
                 title={t('remove')}
                 onClick={() => removeQueued(sessionId, item.id)}
-                className="rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err"
+                className="flex items-center justify-center self-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-err"
               >
                 <Trash2 size={12} />
               </button>
@@ -894,29 +1054,18 @@ function QueuePanel({
           ))}
           {steerNotice && (
             <div className="px-3 pb-1 text-[11px] text-warn">
-              {t(steerNotice.kind === 'moved' ? 'queueSteerMoved' : 'queueSteerHead')}
+              {t(
+                steerNotice.kind === 'moved'
+                  ? 'queueSteerMoved'
+                  : steerNotice.kind === 'sent'
+                    ? 'queueSteerSent'
+                    : 'queueSteerHead',
+              )}
             </div>
           )}
         </div>
       )}
     </div>
-  );
-}
-
-// ------------------------------------------------------------ attachments
-
-function AttachmentChip({ att, onRemove }: { att: Attachment; onRemove: () => void }): JSX.Element {
-  return (
-    <span
-      title={att.path}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-bg-panel px-2 py-1 text-[11.5px] text-ink-soft"
-    >
-      <FileText size={12} className="text-ink-faint" />
-      <span className="max-w-44 truncate">{att.name}</span>
-      <button onClick={onRemove} className="rounded-md text-ink-faint transition hover:text-ink">
-        <X size={11} />
-      </button>
-    </span>
   );
 }
 
@@ -956,7 +1105,13 @@ function ModeSwitch({ isPlan, onCycle, compact }: { isPlan: boolean; onCycle: ()
   );
 }
 
-function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
+function EngineBadge({
+  sessionId,
+  onSwitchEngine,
+}: {
+  sessionId: string;
+  onSwitchEngine: () => void;
+}): JSX.Element | null {
   const t = useT();
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const forkToEngine = useChatStore((s) => s.forkToEngine);
@@ -1011,6 +1166,7 @@ function EngineBadge({ sessionId }: { sessionId: string }): JSX.Element | null {
                 onClick={() => {
                   if (unavailable) return;
                   setOpen(false);
+                  onSwitchEngine();
                   void forkToEngine(sessionId, other);
                 }}
               >
@@ -1205,9 +1361,10 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
   const uiModels = useChatStore((s) => s.ui[sessionId]?.models);
   const setModel = useChatStore((s) => s.setModel);
   const catalog = useChatStore((s) => s.codexCatalog);
+  const kimiModels = useChatStore((s) => s.kimiModels);
   const claudeLabels = useChatStore((s) => s.claudeModelLabels);
   const lang = useChatStore((s) => s.settings?.language ?? 'zh');
-  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const maybeRefreshEngineConfigs = useChatStore((s) => s.maybeRefreshEngineConfigs);
   const agyHiddenList = useChatStore((s) => s.settings?.antigravityHiddenModels);
   const ompHiddenList = useChatStore((s) => s.settings?.ompHiddenModels);
   const ompCatalog = useChatStore((s) => s.ompCatalog);
@@ -1234,13 +1391,17 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
           : current
             ? [current]
             : []
-        : ompSlugs.length
-          ? current && !ompSlugs.includes(current)
-            ? [current, ...ompSlugs]
-            : ompSlugs
-          : current
+        : meta?.engine === 'omp'
+          ? current
             ? [current]
-            : [];
+            : [] // ACP 模型值域未到前不展示目录全量（目录 ≠ 会话可用集）
+          : ompSlugs.length
+            ? current && !ompSlugs.includes(current)
+              ? [current, ...ompSlugs]
+              : ompSlugs
+            : current
+              ? [current]
+              : [];
   // antigravity/omp：按设置页隐藏黑名单过滤选择器（始终保留当前模型，避免选中项消失）。
   const available =
     meta?.engine === 'antigravity' && agyHiddenList?.length
@@ -1276,13 +1437,24 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
     void setModel(id);
     // 换模型后若已显式选过的思考深度不在新模型支持列表里，重置为其
     // 默认档；未显式选过则继续跟随 codex 默认解析（不写入覆盖值）。
-    const efforts = entryOf(id)?.efforts;
-    if (efforts?.length) {
-      const cur = useChatStore.getState().efforts[sessionId];
-      if (cur && !efforts.includes(cur)) {
-        const next = entryOf(id)?.defaultEffort ?? efforts[efforts.length - 1]!;
-        useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: next } }));
-      }
+    const cur = useChatStore.getState().efforts[sessionId];
+    if (!cur) return;
+    let efforts: string[] | undefined;
+    let defaultEffort: string | undefined;
+    if (isOmp) {
+      efforts = ompEntryOf(id)?.efforts; // omp 目录无默认档字段 → 重置取末档
+    } else if (meta?.engine === 'kimi') {
+      const kEntry = kimiModels.find((m) => m.alias === id);
+      efforts = kEntry?.efforts;
+      defaultEffort = kEntry?.defaultEffort;
+    } else {
+      const entry = entryOf(id);
+      efforts = entry?.efforts;
+      defaultEffort = entry?.defaultEffort;
+    }
+    if (efforts?.length && !efforts.includes(cur)) {
+      const next = defaultEffort ?? efforts[efforts.length - 1]!;
+      useChatStore.getState().setSessionEffort(sessionId, next);
     }
   };
 
@@ -1290,11 +1462,11 @@ function ModelPicker({ sessionId }: { sessionId: string }): JSX.Element | null {
     <div className="relative min-w-0">
       <button
         onClick={() => {
-          // 展开时后台重读配置目录 → 换 catalog 后无需重启应用即可看到新模型。
-          if (!open) void refreshEngineConfigs();
+          // 展开时后台重读配置目录（TTL 节流）→ 换 catalog 后无需重启应用即可看到新模型。
+          if (!open) void maybeRefreshEngineConfigs();
           setOpen(!open);
         }}
-        title={labelFor(activeId)}
+        title={`${labelFor(activeId)} · ${t('modelCycleHint')}`}
         className="flex w-full min-w-0 items-center gap-1 rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
         {/* min-w-0 + truncate：宽度不够时模型名截断省略，不撑出输入框 */}
@@ -1360,16 +1532,27 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   const t = useT();
   const override = useChatStore((s) => s.efforts[sessionId]);
   const cfgDefault = useChatStore((s) => s.codexDefaultEffort);
-  const refreshEngineConfigs = useChatStore((s) => s.refreshEngineConfigs);
+  const maybeRefreshEngineConfigs = useChatStore((s) => s.maybeRefreshEngineConfigs);
   const models = useChatStore((s) => s.ui[sessionId]?.models);
   const meta = useChatStore((s) => s.sessions.find((m) => m.id === sessionId));
   const catalog = useChatStore((s) => s.codexCatalog);
   const ocCatalog = useChatStore((s) => s.opencodeCatalog);
   const ompCatalog = useChatStore((s) => s.ompCatalog);
+  const ompThinking = useChatStore((s) => s.ui[sessionId]?.thinking);
   const loadOmpCatalog = useChatStore((s) => s.loadOmpCatalog);
   const kimiModels = useChatStore((s) => s.kimiModels);
+  const btnRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   useEscClose(open, () => setOpen(false));
+  // 弹层用 fixed 定位（与 RightDock 的 dropAt 同策略）——absolute 会被
+  // DockReveal 的 overflow 裁剪链切掉，sidechat 面板里弹层右侧被吃。
+  const popupStyle = (): React.CSSProperties => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return {};
+    const s: React.CSSProperties = { position: 'fixed', bottom: window.innerHeight - r.top + 4, width: 256 };
+    if (align === 'left') s.left = r.left; else s.right = Math.max(8, window.innerWidth - r.right);
+    return s;
+  };
   const isOpencode = meta?.engine === 'opencode';
   const isOmp = meta?.engine === 'omp';
   // omp 精细档来自模型目录 thinking[]，目录是懒加载的 → 此前只有设置页
@@ -1382,7 +1565,7 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   const isClaude = meta?.engine === 'claude';
   // claude：思考档 = /effort 斜杠命令的档位（low/medium/high/xhigh/max），
   // 运行时回合间热切（scripts/probe-claude-effort.mjs 实测）。未显选时展示
-  // high 但不写 override（保持模型默认，不主动下发 /effort）。
+  // 默认 max 但不写 override（sendPromptTo 以该默认档显式下发）。
   // 注：isClaude 分支在下方实体解析后（需 activeModel/open 已就绪）统一处理。
   // 档位列表优先取 catalog 里当前模型声明的档位。
   // 引擎未运行时回退到持久化的 meta.modelId。
@@ -1399,6 +1582,7 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
     codexDefaultEffort: cfgDefault,
     opencodeCatalog: ocCatalog,
     ompCatalog,
+    ompThinking,
   });
   // kimi：值域来自 config.toml 声明（off + support_efforts，always_thinking
   // 模型（off）；无档位声明的模型隐控件。下发路径 = prompt 带
@@ -1409,14 +1593,15 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
     const kLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const kSelect = (i: number): void => {
       const value = kEfforts[Math.max(0, Math.min(kEfforts.length - 1, i))]!;
-      useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+      useChatStore.getState().setSessionEffort(sessionId, value);
     };
     return (
       <div className="relative">
         <button
-          title={t('effort')}
+          ref={btnRef}
+          title={`${t('effort')} · ${t('effortCycleHint')}`}
           onClick={() => {
-            if (!open) void refreshEngineConfigs();
+            if (!open) void maybeRefreshEngineConfigs();
             setOpen(!open);
           }}
           className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
@@ -1427,7 +1612,7 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-            <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
+            <div style={popupStyle()} className="z-20 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
               <div className="mb-3 flex items-center">
                 <span className={`text-ui font-medium ${kEffort === 'max' ? 'effort-max-label' : ''}`}>{kLabel(kEffort)}</span>
               </div>
@@ -1445,11 +1630,11 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   }
   // omp：值域 = off/auto + 目录 thinking[] 精细档；非 reasoning 模型隐控件。
   if (isOmp) {
-    // 目录未就绪（懒拉取中）→ BrandSpinner 占位，避免先展示 off/auto
-    // 假两档误导选择；拉取失败（catalog 为 error）时仍回退基础两档。
-    if (!ompCatalog) {
+    // 目录未就绪（懒拉取中）且 ACP 未推送 thinking 值域 → BrandSpinner 占位，
+    // 避免先展示 off/auto 假两档误导选择；ACP 已推送时跳过等待。
+    if (!ompCatalog && !ompThinking?.available.length) {
       return (
-        <span title={t('effort')} className="flex items-center px-2 py-1 text-ink-faint">
+        <span title={`${t('effort')} · ${t('effortCycleHint')}`} className="flex items-center px-2 py-1 text-ink-faint">
           <BrandSpinner size={12} />
         </span>
       );
@@ -1459,12 +1644,13 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
     const ompLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const ompSelect = (i: number): void => {
       const value = ompEfforts[Math.max(0, Math.min(ompEfforts.length - 1, i))]!;
-      useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+      useChatStore.getState().setSessionEffort(sessionId, value);
     };
     return (
       <div className="relative">
         <button
-          title={t('effort')}
+          ref={btnRef}
+          title={`${t('effort')} · ${t('effortCycleHint')}`}
           onClick={() => setOpen(!open)}
           className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
         >
@@ -1474,7 +1660,7 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-            <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
+            <div style={popupStyle()} className="z-20 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
               <div className="mb-3 flex items-center">
                 <span className="text-ui font-medium">{ompLabel(ompEffort)}</span>
               </div>
@@ -1490,20 +1676,21 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
       </div>
     );
   }
-  // claude：思考档 = /effort 斜杠命令的档位（回合间热切）；未显选时展示 high
-  // 但不写 override（保持模型默认，不主动下发 /effort）。
+  // claude：思考档 = /effort 斜杠命令的档位（回合间热切）；未显选时展示默认
+  // max（sendPromptTo 以该档显式下发）。
   if (isClaude) {
     if (!resolved) return null;
     const { value: cEffort, options: CLAUDE_EFFORTS, index: cIdx } = resolved;
     const cLabel = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
     const cSelect = (i: number): void => {
       const value = CLAUDE_EFFORTS[Math.max(0, Math.min(CLAUDE_EFFORTS.length - 1, i))]!;
-      useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+      useChatStore.getState().setSessionEffort(sessionId, value);
     };
     return (
       <div className="relative">
         <button
-          title={t('effort')}
+          ref={btnRef}
+          title={`${t('effort')} · ${t('effortCycleHint')}`}
           onClick={() => setOpen(!open)}
           className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
         >
@@ -1513,7 +1700,7 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-            <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
+            <div style={popupStyle()} className="z-20 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
               <div className="mb-3 flex items-center">
                 <span className={`text-ui font-medium ${cEffort === 'max' ? 'effort-max-label' : ''}`}>{cLabel(cEffort)}</span>
               </div>
@@ -1532,34 +1719,42 @@ export function EffortPicker({ sessionId, align = 'right' }: { sessionId: string
   // codex / opencode 统一壳：opencode 无 reasoning variants 的模型不渲染
   // 思考深度控件（resolved 为 undefined）。
   if (!resolved) return null;
-  const { value: effort, options: efforts, index: idx } = resolved;
+  const { value: effort, options: efforts, index: idx, explicit } = resolved;
   const label = (e: string): string => (EFFORT_LABEL_KEYS[e] ? t(EFFORT_LABEL_KEYS[e]!) : e);
+  // opencode 目录无默认档字段且未显选时，展示「跟随默认」而非具体档 —
+  // 发送侧 explicit=false 不下发，避免把预览档强加给服务端。
+  const showFollowDefault = !explicit;
 
   const select = (i: number): void => {
     const value = efforts[Math.max(0, Math.min(efforts.length - 1, i))]!;
-    useChatStore.setState((s) => ({ efforts: { ...s.efforts, [sessionId]: value } }));
+    useChatStore.getState().setSessionEffort(sessionId, value);
   };
 
   return (
     <div className="relative">
       <button
-        title={t('effort')}
+        ref={btnRef}
+        title={`${t('effort')} · ${t('effortCycleHint')}`}
         onClick={() => {
-          // 同 ModelPicker：展开时后台刷新（档位元数据同源于 catalog）。
-          if (!open) void refreshEngineConfigs();
+          // 同 ModelPicker：展开时后台刷新（TTL 节流；档位元数据同源于 catalog）。
+          if (!open) void maybeRefreshEngineConfigs();
           setOpen(!open);
         }}
         className="flex items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-ui text-ink-soft transition hover:bg-bg-hover"
       >
-        <span className={effort === 'xhigh' ? 'effort-max-label' : ''}>{label(effort)}</span>
+        <span className={effort === 'xhigh' ? 'effort-max-label' : ''}>
+          {showFollowDefault ? t('effortFollowDefault') : label(effort)}
+        </span>
         <ChevronDown size={11} />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className={`absolute bottom-9 z-20 w-64 rounded-2xl border border-line bg-bg-input p-4 shadow-lg ${align === 'left' ? 'left-0' : 'right-0'}`}>
+          <div style={popupStyle()} className="z-20 rounded-2xl border border-line bg-bg-input p-4 shadow-lg">
             <div className="mb-3 flex items-center">
-              <span className={`text-ui font-medium ${effort === 'xhigh' ? 'effort-max-label' : ''}`}>{label(effort)}</span>
+                <span className={`text-ui font-medium ${effort === 'xhigh' ? 'effort-max-label' : ''}`}>
+                  {showFollowDefault ? t('effortFollowDefault') : label(effort)}
+                </span>
             </div>
             <EffortSlider index={idx} count={efforts.length} onSelect={select} />
             <div className="mt-2 flex justify-between text-[10px] text-ink-faint">
@@ -1822,14 +2017,14 @@ function GoalBar({ sessionId, onEdit }: { sessionId: string; onEdit: (initial: s
 
   return (
     <div className="border-b border-line bg-bg-panel/70">
-      <div className="flex items-center gap-2 px-3 py-1.5 text-[12px]">
-        <Target size={12} className={`shrink-0 ${goal.status === 'active' ? 'text-accent' : 'text-ink-faint'}`} />
-        <span className="shrink-0 font-medium leading-none text-ink">{statusLabel}</span>
-        <span className="min-w-0 flex-1 truncate leading-[1.2] text-ink-soft" title={goal.objective}>
+      <div className="flex items-baseline gap-2 px-3 py-1.5 text-[12px]">
+        <Target size={12} className={`shrink-0 self-center ${goal.status === 'active' ? 'text-accent' : 'text-ink-faint'}`} />
+        <span className="shrink-0 font-medium leading-[19px] text-ink">{statusLabel}</span>
+        <span className="min-w-0 flex-1 truncate leading-[19px] text-ink-soft" title={goal.objective}>
           {goal.objective}
         </span>
         <span
-          className="shrink-0 font-mono text-[11px] leading-none tabular-nums text-ink-faint"
+          className="shrink-0 font-mono text-[11px] leading-[19px] tabular-nums text-ink-faint"
           title={`${t('goalTokensTitle', { n: goal.tokensUsed.toLocaleString() })}${goal.tokenBudget ? t('goalTokensBudget', { n: goal.tokenBudget.toLocaleString() }) : ''}`}
         >
           {formatElapsed(displaySeconds * 1000)}
@@ -1950,7 +2145,7 @@ function ExpandDialog({
 
 function IconBtn({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }): JSX.Element {
   return (
-    <button title={title} onClick={onClick} className="flex items-center justify-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
+    <button title={title} onClick={onClick} className="flex items-center justify-center self-center rounded-md p-1 text-ink-faint transition hover:bg-bg-hover hover:text-ink">
       {children}
     </button>
   );

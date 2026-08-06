@@ -10,7 +10,8 @@ import { useRaceStore } from './raceStore';
 
 import type {
   AppSettings,
-  CodeSelection,
+  BrowserPanelState,
+  ChatSelection,
   CodexCatalogModel,
   CompatAuditSnapshot,
   ContextFallbackRule,
@@ -43,7 +44,7 @@ import {
   recordRateWindowHit,
   type RateWindow,
 } from '@shared/agyPolicy';
-import { serializeSelections, selectionRangeLabel } from '../selections';
+import { isTerminalSelection, serializeSelections, selectionRangeLabel } from '../selections';
 import { resolveEffectiveEffort } from '../effort';
 import { rlog } from '../log/logger';
 
@@ -60,8 +61,11 @@ export interface QueuedMessage {
   id: string;
   text: string;
   attachments?: string[];
-  /** 随消息排队的代码选区引用（发送时与正文一起序列化）。 */
-  selections?: CodeSelection[];
+  /** 随消息排队的选区引用（发送时与正文一起序列化）。 */
+  selections?: ChatSelection[];
+  /** 已成功注入引擎、等待真正消费确认（codex steer.confirmed → user.echo）。
+   *  期间不参与自动派发、按钮禁用，避免同一消息被二次发送。 */
+  steering?: boolean;
 }
 
 export interface SessionUiState {
@@ -72,6 +76,8 @@ export interface SessionUiState {
   commands: SlashCommandInfo[];
   /** 引擎原生 swarm 模式状态（kimi KAP；swarm.update 推送，含自发退出）。 */
   swarm?: boolean;
+  /** omp ACP 推送的 thinking 配置选项值域（off/auto + 精细档）。 */
+  thinking?: { current: string; available: string[] };
   /** Timestamp of the latest engine event — drives the heartbeat indicator. */
   lastActivityAt?: number;
   /** 持久化历史已加载。不能拿「ui 条目存在」当依据 — 任意 main 侧
@@ -109,15 +115,19 @@ interface ChatState {
   efforts: Record<string, string>;
   /** Per-session outbox: messages waiting for the current turn to finish. */
   queues: Record<string, QueuedMessage[]>;
-  /** 输入框里待发送的代码选区卡片（按会话隔离；发送后清空）。 */
-  selections: Record<string, CodeSelection[]>;
+  /** 输入框里待发送的选区卡片（文件/终端；按会话隔离；发送后清空）。 */
+  selections: Record<string, ChatSelection[]>;
   /** prompt 在途标记（含引擎启动期的等待投递）— 启动中允许直接发送，
    *  主进程汇合等就绪后投递；此标记让后续消息走排队、底部指示器不空窗。 */
   sending: Record<string, boolean>;
+  /** 中止请求在途标记 — 点击停止后到引擎确认中断期间，按钮显示进行中态。 */
+  cancelling: Record<string, boolean>;
   /** 回退后待回填输入框的提问（nonce 驱动 Composer 侧 effect）。 */
-  composerDrafts: Record<string, { text: string; nonce: number } | undefined>;
+  composerDrafts: Record<string, { text: string; attachments?: string[]; nonce: number } | undefined>;
   /** 输入框未发送草稿（按会话；切走时保存、切回恢复）。纯内存 — 重启不保留。 */
   drafts: Record<string, string>;
+  /** 输入框未发送附件（按会话；切走时保存、切回恢复）。纯内存 — 重启不保留。 */
+  draftAttachments: Record<string, DraftAttachment[]>;
   /** 侧边栏折叠态（localStorage 持久）。 */
   sidebarCollapsed: boolean;
   /** 会话 → 右侧 dock 的打开状态与当前 tab（纯内存；切会话保留，重启不保留）。 */
@@ -128,12 +138,19 @@ interface ChatState {
   terminals: Record<string, TerminalTab[] | undefined>;
   /** 会话 → 待右侧预览的 plan 文档消息 id（plan 模式回合结束时自动设置）。 */
   planPreview: Record<string, string | undefined>;
+  /** 会话 → 被手动关闭的待办签名（仅条目内容快照）；内容真正更新后自动恢复显示。localStorage 持久。 */
+  planDismissed: Record<string, string | undefined>;
   /** 会话 → 待右侧打开的文件预览（AI 正文文件 chip 点击；nonce 驱动重复点击）。
    *  ChatView 只负责开 files tab（不清除），WorkspacePanel 消费后清除。 */
   pendingFilePreview: Record<string, { path: string; nonce: number } | undefined>;
   /** 会话 → 待右侧变更面板打开的 diff（编辑工具卡点击；nonce 驱动重复点击）。
    *  ChatView 只负责开 changes tab（不清除），WorkspacePanel 消费后清除。 */
   pendingChangePreview: Record<string, { path: string; nonce: number } | undefined>;
+  /** 全局搜索命中后的高亮标记：sessionId + messageId + 搜索关键词。
+   *  ChatView 据此滚动到目标消息并高亮匹配文本；消费后清空。 */
+  searchHighlight: { sessionId: string; messageId?: string; query: string; nonce: number } | null;
+  /** 侧栏搜索面板开关（Ctrl+F 快捷键驱动）。 */
+  sidebarSearchOpen: boolean;
   /** codex model_catalog_json 目录（init 时读取，↻/选择器打开时刷新；模型/思考深度选择器用）。 */
   codexCatalog: CodexCatalogModel[];
   /** ~/.codex/config.toml 的 model_reasoning_effort（codex 全局默认档）。 */
@@ -142,8 +159,11 @@ interface ChatState {
   kimiModels: KimiConfigModel[];
   /** claude 自定义模型别名显示名（~/.claude settings env 推导；模型选择器用）。 */
   claudeModelLabels: Record<string, string> | null;
-  /** 重读引擎配置快照并同步 codex 目录/默认档；返回快照供调用方复用（一次 IPC 两处受益）。 */
-  refreshEngineConfigs(): Promise<EngineConfigsSnapshot>;
+  /** 重读引擎配置快照并同步 codex 目录/默认档；返回快照供调用方复用（一次 IPC 两处受益）。
+   *  force = 跳过主进程短 TTL 缓存（设置页显式刷新用）。 */
+  refreshEngineConfigs(force?: boolean): Promise<EngineConfigsSnapshot>;
+  /** 选择器展开等非显式场景的懒刷新：TTL 节流，避免每次展开都重读配置。 */
+  maybeRefreshEngineConfigs(): Promise<void>;
   /** 各引擎本机可用性（CLI 安装/配置存在）：null = 尚未探测（不置灰）。
    *  引擎选择入口据此把未安装项置灰展示（可见不可选）。 */
   engineAvailability: Record<EngineId, boolean> | null;
@@ -160,6 +180,8 @@ interface ChatState {
   /** 引擎兼容性审计快照（未知事件/被拒方法/解析失败）— 齿轮小黄点
    *  与设置页诊断卡的数据源；null = 尚未拉取。 */
   compatAudit: CompatAuditSnapshot | null;
+  /** 受管浏览器（browser use）全局面板状态 — 主进程 browserEvent 全量推送。 */
+  browser: BrowserPanelState;
   init(): Promise<void>;
   saveSettings(patch: Partial<AppSettings>): Promise<void>;
   addWorkspace(name: string, folders: string[]): Promise<WorkspaceInfo>;
@@ -168,7 +190,12 @@ interface ChatState {
   /** Project → Workspace 升级：建工作区并把同 cwd 会话挂进去。 */
   convertProjectToWorkspace(cwd: string, name: string, folders: string[]): Promise<void>;
   createSession(req: SessionCreateRequest): Promise<void>;
-  selectSession(id: string): void;
+  selectSession(id: string, opts?: { restoreRace?: boolean }): void;
+  /** 系统通知点击 → 定位到该会话（主进程 session:activate 推送）。 */
+  activateSessionFromNotification(sessionId: string): Promise<void>;
+  /** 会话级思考深度：更新内存并持久化到 sessions.json（null = 清除，
+   *  回落到引擎默认解析链）。新建默认/用户 picker/快捷键循环均走这里。 */
+  setSessionEffort(sessionId: string, effort: string | null): void;
   hydrateSession(id: string): void;
   forkSession(id: string): Promise<void>;
   /** 新建一个 sidechat 分支（总是 fork 新会话），返回分支会话 id。 */
@@ -182,6 +209,8 @@ interface ChatState {
   /** 更新某会话右侧 dock 状态（只写补丁，保留未提及字段）。 */
   setRightPanel(sessionId: string, patch: Partial<RightPanelState>): void;
   setPlanPreview(sessionId: string, messageId: string | undefined): void;
+  /** 手动关闭输入框上方的待办条（记录当前 plan 签名；待办内容变化后自动恢复显示）。 */
+  dismissPlan(sessionId: string, signature: string): void;
   /** AI 正文文件 chip 点击 → 右侧 files tab 打开该文件预览（仅 work 会话；相对路径按 cwd 拼绝对）。 */
   requestFilePreview(sessionId: string, rawPath: string): void;
   /** 编辑工具卡点击 → 右侧 changes tab 打开该文件 diff（仅 work 会话；相对路径按 cwd 拼绝对）。 */
@@ -192,17 +221,33 @@ interface ChatState {
   agySwitchFor: string | null;
   openAgySwitch(sessionId: string): void;
   closeAgySwitch(): void;
-  /** 切换 Antigravity 账号（覆写 keyring）；continueSessionId 非空则切后自动发“继续”接回任务。 */
+  /** 切换 Antigravity 账号（覆写 keyring）；continueSessionId 非空则切后自动发"继续"接回任务。 */
   switchAgyAccount(accountId: string, continueSessionId?: string): Promise<{ email: string }>;
-  sendPrompt(text: string, attachments?: string[], selections?: CodeSelection[]): Promise<void>;
+  sendPrompt(text: string, attachments?: string[], selections?: ChatSelection[]): Promise<void>;
   sendPromptTo(
     sessionId: string,
     text: string,
     attachments?: string[],
     enginePrefix?: string,
-    selections?: CodeSelection[],
+    selections?: ChatSelection[],
   ): Promise<void>;
-  addSelection(sessionId: string, sel: CodeSelection): void;
+  /** 赛马结果汇报：向宿主对话发一条特殊 user 消息（UI 渲染为卡片），
+   *  同时把完整赛马结果（最终方案 + 执行结果）发给引擎，使 AI 上下文
+   *  包含赛马产物 —— 用户后续可直接就方案提问。 */
+  sendRaceResult(
+    sessionId: string,
+    result: {
+      raceId: string;
+      prompt: string;
+      finalPlan: string;
+      version: number;
+      delivered: boolean;
+      overridden?: boolean;
+      auditPassed: boolean;
+      repairRound: number;
+    },
+  ): Promise<void>;
+  addSelection(sessionId: string, sel: ChatSelection): void;
   removeSelection(sessionId: string, id: string): void;
   clearSelections(sessionId: string): void;
   cancel(): Promise<void>;
@@ -226,12 +271,12 @@ interface ChatState {
   /** 卡面 steer：运行中注入指令（codex 原生），不可注入降级排队（kimi），
    *  空闲/出错会话直接作为新提问发送。 */
   steerLive(sessionId: string, text: string): Promise<'steered' | 'queued' | 'sent'>;
-  enqueue(text: string, attachments?: string[], selections?: CodeSelection[]): void;
+  enqueue(text: string, attachments?: string[], selections?: ChatSelection[]): void;
   /** Enqueue into a specific session（PermissionSheet 补充说明用）。 */
-  enqueueTo(sessionId: string, text: string, attachments?: string[], selections?: CodeSelection[]): void;
+  enqueueTo(sessionId: string, text: string, attachments?: string[], selections?: ChatSelection[]): void;
   removeQueued(sessionId: string, id: string): void;
   moveQueued(sessionId: string, from: number, to: number): void;
-  steerQueued(sessionId: string, id: string): Promise<'steered' | 'moved' | 'head' | 'none'>;
+  steerQueued(sessionId: string, id: string): Promise<'steering' | 'moved' | 'head' | 'sent' | 'none'>;
   setGoal(objective: string): Promise<void>;
   controlGoal(action: GoalControlAction): Promise<void>;
   /** 原生 swarm 开关（仅 capabilities.swarm 会话；其余引擎用 swarmBoost 前缀）。 */
@@ -258,6 +303,14 @@ export interface RightPanelState {
   activeTab: string;
 }
 
+/** 输入框草稿中的附件（图片缩略图预览为 object URL，同页面切会话时仍有效）。 */
+export interface DraftAttachment {
+  path: string;
+  name: string;
+  isImage: boolean;
+  preview?: string;
+}
+
 const emptyUi = (meta?: Pick<SessionMeta, 'permissionMode'>): SessionUiState => ({
   messages: [],
   models: { current: '', available: [] },
@@ -273,8 +326,49 @@ function seedMetaMode(ui: SessionUiState | undefined, meta: SessionMeta | undefi
   return { ...base, modes: { ...base.modes, current: meta.permissionMode } };
 }
 
+/** 手动关闭待办条的 localStorage 键（按会话 id 键控，重启保留）。 */
+const PLAN_DISMISS_KEY = 'cs.planDismissed';
+
+/** 兼容旧版签名：早期格式为 "planId|status:content…"，逐行带状态前缀；
+ *  现在统一为纯内容快照（状态翻转不算模型更新，不能触发恢复）。 */
+function normalizePlanDismissed(raw: string): string {
+  let v = raw;
+  const bar = v.indexOf('|');
+  if (bar > 0 && /^[0-9a-f-]{36}$/i.test(v.slice(0, bar))) v = v.slice(bar + 1);
+  return v
+    .split('\n')
+    .map((line) => line.replace(/^(completed|pending|in_progress|failed|canceled):/, ''))
+    .join('\n');
+}
+
+function readPlanDismissed(): Record<string, string | undefined> {
+  try {
+    const raw = localStorage.getItem(PLAN_DISMISS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, string | undefined> = {};
+    for (const [k, val] of Object.entries(parsed)) {
+      if (typeof val === 'string') out[k] = normalizePlanDismissed(val);
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function persistPlanDismissed(value: Record<string, string | undefined>): void {
+  try {
+    localStorage.setItem(PLAN_DISMISS_KEY, JSON.stringify(value));
+  } catch {
+    // 存储不可用时静默降级 — 仅本次运行内生效。
+  }
+}
+
 let unsubscribe: (() => void) | undefined;
 let unsubscribeCompat: (() => void) | undefined;
+let browserUnsubscribe: (() => void) | undefined;
+let activateUnsubscribe: (() => void) | undefined;
 
 /** loadOpencodeCatalog 的 in-flight 标记（模块级，不入 store）。 */
 let opencodeCatalogLoading = false;
@@ -284,6 +378,10 @@ let ompCatalogLoading = false;
 
 /** refreshEngineConfigs 的 in-flight 去重（并发调用汇合到同一次 IPC）。 */
 let engineConfigsRefresh: Promise<EngineConfigsSnapshot> | null = null;
+/** 选择器展开触发的懒刷新节流 — 展开重读的意图是「改完 catalog 无需重启
+ *  即可看到新模型」，60s 节流足够新，又不至于每次展开都卡主进程。 */
+const ENGINE_CONFIGS_LAZY_TTL = 60_000;
+let engineConfigsLazyAt = 0;
 
 /** Debounced per-session persistence of the folded message list. */
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -296,6 +394,9 @@ const pendingGoalDone = new Map<string, UnifiedMessage>();
  *  自动压缩（引擎的 stopReason 不统一：opencode 中止后仍报 end_turn，
  *  只看 stopReason 挡不住「点了停止任务还在跑」）。 */
 const stopRequested = new Set<string>();
+/** 停止后引擎长时间不确认收尾的看门狗（sessionId → timer）：超时恢复按钮并提示，
+ *  防止 notify 型 cancel 返回后用户连点，也防止引擎彻底卡死时按钮永久锁死。 */
+const cancelWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 /** 自动压缩冷却：触发后 usage 未见明显下降（omp 等不回推 usage 的通道）时
  *  跳过接下来 N 个回合，防连环触发；下降即解除。 */
 const autoCompactGuard = new Map<string, { baselineUsed: number; skipTurns: number }>();
@@ -303,6 +404,14 @@ const PERSIST_DEBOUNCE = 400;
 // 连续流式（每个 delta 都重置防抖）时最长 2s 强制落盘一次，
 // 把「崩溃/热重启丢失的尾部输出」窗口从「整段回合」压到 ~2s。
 const PERSIST_MAX_WAIT = 2000;
+
+/** noteActivity 首行标签缓存（sessionId → label）：连续 text.delta 复用，
+ *  避免每个 token 都 O(n) 倒序扫消息数组找首行。turn.ended 时清除。 */
+const activityLabelCache = new Map<string, string>();
+/** noteActivity 的 set() 200ms 节流定时器（sessionId → timer）：侧栏
+ *  lastActivity 更新频率上限 ~5 次/秒，消除每 delta 触发的副作用。 */
+const activityThrottleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const ACTIVITY_THROTTLE_MS = 200;
 
 /** 选中即预热的防抖 — 快速连点浏览会话时，只预热最终停留的那一个，
  *  否则每个途经会话都会拉起一个引擎进程（曾致侧栏一排 starting 转圈）。 */
@@ -346,6 +455,20 @@ function flushAllPersist(get: () => ChatState): void {
   for (const id of [...persistTimers.keys()]) persistNow(get, id);
 }
 
+/** 会话级思考深度落盘串行链（快速连点/快捷键循环时保证最终选择最后落盘）。 */
+const effortWriteChains = new Map<string, Promise<void>>();
+
+function persistSessionEffort(sessionId: string, effort: string | undefined): void {
+  const prev = effortWriteChains.get(sessionId) ?? Promise.resolve();
+  const next = prev
+    .then(() => window.cyberslots.sessionSetEffort(sessionId, effort ?? null))
+    .catch((err) => {
+      // 持久化失败不阻断 UI（本次运行内内存态仍生效）；记日志便于排查。
+      rlog.error('chat', 'sessionSetEffort ipc failed', { sessionId }, err);
+    });
+  effortWriteChains.set(sessionId, next);
+}
+
 /** 右侧面板路径解析：相对路径按 cwd 的分隔符风格拼成绝对路径（绝对路径原样）。 */
 function resolvePanelPath(cwd: string, rawPath: string): string {
   if (/^([a-zA-Z]:[\\/]|\/)/.test(rawPath)) return rawPath;
@@ -375,15 +498,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   queues: {},
   selections: {},
   sending: {},
+  cancelling: {},
   composerDrafts: {},
   drafts: {},
+  draftAttachments: {},
   sidebarCollapsed: localStorage.getItem('cs.sidebarCollapsed') === '1',
   rightPanels: {},
   sidechats: {},
   terminals: {},
   planPreview: {},
+  planDismissed: readPlanDismissed(),
   pendingFilePreview: {},
   pendingChangePreview: {},
+  searchHighlight: null,
+  /** 侧栏搜索面板开关（Ctrl+F 快捷键驱动）。 */
+  sidebarSearchOpen: false,
   codexCatalog: [],
   codexDefaultEffort: undefined,
   kimiModels: [],
@@ -394,6 +523,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   openerAvailability: null,
   agySwitchFor: null,
   compatAudit: null,
+  browser: { status: 'off', actions: [] },
 
   /** 懒加载 opencode 模型目录（in-flight 去重；失败结果也缓存，避免风暴重试）。 */
   async loadOpencodeCatalog(force) {
@@ -423,33 +553,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  /** 配置文件是磁盘上的活物（主进程每次现读）— 这里是渲染层唯一的重读入口。 */
-  async refreshEngineConfigs() {
+  /** 配置文件是磁盘上的活物（主进程带短 TTL 缓存现读）— 这里是渲染层唯一的重读入口。 */
+  async refreshEngineConfigs(force) {
+    const applySnapshot = (snap: EngineConfigsSnapshot): EngineConfigsSnapshot => {
+      set({
+        codexCatalog: snap.codex.catalogModels ?? [],
+        codexDefaultEffort: snap.codex.reasoningEffort,
+        kimiModels: (snap.kimi.providers ?? []).flatMap((p) => p.models),
+        claudeModelLabels: snap.claude.modelLabels ?? null,
+        // 可用性：opencode/omp/antigravity/claude 有真实 CLI 探测；kimi/codex 用配置存在性
+        // 近似（装过并登录/初始化过才会有 config.toml）。
+        engineAvailability: {
+          kimi: snap.kimi.exists,
+          codex: snap.codex.exists,
+          opencode: snap.opencode.installed,
+          omp: snap.omp.installed,
+          antigravity: snap.antigravity.installed,
+          claude: snap.claude.installed,
+        },
+      });
+      return snap;
+    };
+    // 显式 force 不走 in-flight 合并 — 设置页「刷新」必须拿到本次读取的新结果。
+    if (force) {
+      const snap = await window.cyberslots.engineConfigsGet(true);
+      return applySnapshot(snap);
+    }
     engineConfigsRefresh ??= window.cyberslots
-      .engineConfigsGet()
-      .then((snap) => {
-        set({
-          codexCatalog: snap.codex.catalogModels ?? [],
-          codexDefaultEffort: snap.codex.reasoningEffort,
-          kimiModels: (snap.kimi.providers ?? []).flatMap((p) => p.models),
-          claudeModelLabels: snap.claude.modelLabels ?? null,
-          // 可用性：opencode/omp/antigravity/claude 有真实 CLI 探测；kimi/codex 用配置存在性
-          // 近似（装过并登录/初始化过才会有 config.toml）。
-          engineAvailability: {
-            kimi: snap.kimi.exists,
-            codex: snap.codex.exists,
-            opencode: snap.opencode.installed,
-            omp: snap.omp.installed,
-            antigravity: snap.antigravity.installed,
-            claude: snap.claude.installed,
-          },
-        });
-        return snap;
-      })
+      .engineConfigsGet(false)
+      .then(applySnapshot)
       .finally(() => {
         engineConfigsRefresh = null;
       });
     return engineConfigsRefresh;
+  },
+
+  /** 选择器展开等非显式场景的懒刷新：TTL 内直接复用现有缓存（不发 IPC）。 */
+  async maybeRefreshEngineConfigs() {
+    const now = Date.now();
+    if (now - engineConfigsLazyAt < ENGINE_CONFIGS_LAZY_TTL) return;
+    engineConfigsLazyAt = now;
+    try {
+      await get().refreshEngineConfigs();
+    } catch {
+      // 失败同样进节流窗口，防止主进程忙/异常时每次展开都触发同步重读。
+    }
   },
 
   async init() {
@@ -464,27 +612,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
       rlog.error('app', 'store init failed (sessionList/settingsGet)', undefined, err);
       throw err;
     }
-    set({ sessions, settings });
+    // 会话级思考深度随 sessions.json 恢复：meta.effort → efforts 内存态，
+    // 否则重启后 picker 会回落到引擎默认档（codex 线程档不跨进程保留）。
+    const restoredEfforts: Record<string, string> = {};
+    for (const m of sessions) if (m.effort) restoredEfforts[m.id] = m.effort;
+    set({ sessions, settings, efforts: restoredEfforts });
     rlog.info('app', 'store initialized', { sessions: sessions.length, language: settings.language });
-    // codex 配置快照 — catalog 目录 + 默认思考深度（选择器的元信息源）。
-    void get().refreshEngineConfigs();
+    // 模型目录预加载 — codex/kimi 随 refreshEngineConfigs 读取；omp 走
+    // `omp models --json`（纯 CLI，无副作用）；opencode 目录要起 serve
+    // 进程，仅检测到已安装时才预加载，避免为从不使用的引擎白起进程。
+    // claude/antigravity 是静态模型列表，无需目录。预加载后进入任何
+    // 引擎的对话，模型选择器都无需再等首拉。
+    void get().loadOmpCatalog();
+    void get()
+      .refreshEngineConfigs()
+      .then(() => {
+        if (get().engineAvailability?.opencode) void get().loadOpencodeCatalog();
+      })
+      .catch(() => undefined);
     // 「外部打开」程序可用性 — 启动后探测一次，菜单据此隐藏未安装项。
     void window.cyberslots.openersDetect().then((a) => set({ openerAvailability: a })).catch(() => undefined);
     unsubscribe?.();
-    unsubscribe = window.cyberslots.onEngineEvent((envelope) => {
-      applyEnvelope(set, get, envelope);
+    unsubscribe = window.cyberslots.onEngineEvent((payload) => {
+      // 主进程 16ms 合批后一次可能送来多个 envelope（兼容旧单条路径）。
+      const envelopes = Array.isArray(payload) ? payload : [payload];
+      for (const envelope of envelopes) {
+        applyEnvelope(set, get, envelope);
+      }
+    });
+    // 系统通知点击 → 定位到对应会话（主进程 session:activate 推送）。
+    activateUnsubscribe?.();
+    activateUnsubscribe = window.cyberslots.onSessionActivate((sessionId) => {
+      void get().activateSessionFromNotification(sessionId);
     });
     // 兼容性审计：启动时拉一次存量（主进程内存态），后续增量走推送。
     void window.cyberslots.compatAuditGet().then((snap) => set({ compatAudit: snap })).catch(() => undefined);
     unsubscribeCompat?.();
     unsubscribeCompat = window.cyberslots.onCompatAudit((snap) => set({ compatAudit: snap }));
+    // 受管浏览器：订阅主进程全量推送；开关开着时补拉一次初始快照。
+    browserUnsubscribe?.();
+    browserUnsubscribe = window.cyberslots.onBrowserEvent((state) => set({ browser: state }));
+    if (settings.browserUse) {
+      void window.cyberslots.browserGetState().then((state) => set({ browser: state })).catch(() => undefined);
+    }
     // 退出/刷新前把挂起的消息落盘写完，尽量不丢正在执行任务的尾部。
     window.addEventListener('beforeunload', () => flushAllPersist(get));
   },
 
   async saveSettings(patch) {
+    const prev = get().settings;
     const settings = await window.cyberslots.settingsSet(patch);
     set({ settings });
+    // browserUse 刚由关转开 → 立刻补拉一次受管浏览器快照（面板不必等下一次推送）。
+    if (!prev?.browserUse && settings.browserUse) {
+      void window.cyberslots.browserGetState().then((state) => set({ browser: state })).catch(() => undefined);
+    }
   },
 
   async addWorkspace(name, folders) {
@@ -519,28 +701,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
   async createSession(req) {
     // 任何会话导航都退出赛马全屏视图（赛马继续后台跑，Composer 🏇 可回），
     // 否则 RaceView 压在 ChatView 上，侧栏点击看起来全部失灵。
-    useRaceStore.getState().closeRace();
+    const raceStore = useRaceStore.getState();
+    const prevSessionId = get().activeSessionId;
+    if (raceStore.activeRaceId && prevSessionId) raceStore.setRaceView(prevSessionId, raceStore.activeRaceId);
+    raceStore.closeRace();
     set({ creating: true, creatingEngine: req.engine });
     let meta: Awaited<ReturnType<typeof window.cyberslots.sessionCreate>>;
     try {
-      meta = await window.cyberslots.sessionCreate(req).catch((err) => {
+      const engineDef = get().settings?.engineDefaults?.[req.engine];
+      meta = await window.cyberslots.sessionCreate(engineDef?.effort ? { ...req, effort: engineDef.effort } : req).catch((err) => {
         rlog.error('chat', 'sessionCreate ipc failed', { engine: req.engine, cwd: req.cwd }, err);
         throw err;
       });
+      // 新会话默认思考深度已随 meta.effort 落盘；未设置则走引擎配置/目录
+      // 默认链（不写 override）。只作用于新建会话。
       set((s) => ({
         sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
         // 新会话没有历史可水合 — 直接标记 hydrated，避免首条消息被水合门禁拖延落盘。
         ui: { ...s.ui, [meta.id]: { ...seedMetaMode(s.ui[meta.id], meta), hydrated: true } },
         activeSessionId: meta.id,
+        efforts: meta.effort ? { ...s.efforts, [meta.id]: meta.effort } : s.efforts,
       }));
     } finally {
       set({ creating: false, creatingEngine: null });
     }
   },
 
-  selectSession(id) {
-    // 同上：会话导航优先于赛马全屏视图。
-    useRaceStore.getState().closeRace();
+  selectSession(id, opts) {
+    // 会话导航优先于赛马全屏视图，但按会话记住「当前对话正停在哪个赛马页」：
+    // 从赛马页切走时保存，切回该会话时恢复；显式从赛马页返回对话则不恢复。
+    const raceStore = useRaceStore.getState();
+    const prevSessionId = get().activeSessionId;
+    const currentRaceId = raceStore.activeRaceId;
+    if (currentRaceId) {
+      if (prevSessionId && prevSessionId !== id) raceStore.setRaceView(prevSessionId, currentRaceId);
+      else if (prevSessionId === id || opts?.restoreRace === false) raceStore.setRaceView(id, undefined);
+      raceStore.closeRace();
+    } else if (opts?.restoreRace === false) {
+      raceStore.setRaceView(id, undefined);
+    }
     set({ activeSessionId: id });
     void window.cyberslots.sessionMarkRead(id);
     set((s) => ({ sessions: s.sessions.map((m) => (m.id === id ? { ...m, unread: false } : m)) }));
@@ -552,6 +751,63 @@ export const useChatStore = create<ChatState>((set, get) => ({
     warmUpTimer = setTimeout(() => {
       if (get().activeSessionId === id) void window.cyberslots.sessionWarmUp(id);
     }, WARM_UP_DELAY);
+    // 切回该会话时恢复它上次停留的赛马页；仅当赛马快照仍存在。
+    if (opts?.restoreRace !== false) {
+      const after = useRaceStore.getState();
+      const savedRaceId = after.raceViews[id];
+      if (savedRaceId && after.races[savedRaceId]) after.openRace(savedRaceId);
+    }
+  },
+
+  async activateSessionFromNotification(sessionId) {
+    let meta = get().sessions.find((m) => m.id === sessionId);
+    if (!meta) {
+      // 通知可能来自刚创建、渲染层列表尚未同步的会话 — 重拉一次再定位。
+      try {
+        const list = await window.cyberslots.sessionList();
+        set({ sessions: list });
+        meta = list.find((m) => m.id === sessionId);
+      } catch (err) {
+        rlog.error('chat', 'notification activate: sessionList failed', { sessionId }, err);
+        return;
+      }
+      if (!meta) {
+        rlog.warn('chat', 'notification activate: session not found', { sessionId });
+        return;
+      }
+    }
+    // 关掉可能挡在主视图上的覆盖层（设置/用量/归档/定时任务/看板）。
+    set({ settingsOpen: false, usageOpen: false, archivedOpen: false, cronOpen: false, dashboardOpen: false });
+    // 赛马角色会话在侧栏隐藏，点击通知应定位到所属赛马页而不是隐藏对话。
+    if (meta.raceId) {
+      const race = useRaceStore.getState().races[meta.raceId];
+      if (race?.parentSessionId) get().selectSession(race.parentSessionId);
+      if (race) useRaceStore.getState().openRace(meta.raceId);
+      return;
+    }
+    // 已归档会话先从归档还原，保证侧栏可见、返回可点。
+    if (meta.archived) await get().archiveSession(sessionId, false);
+    get().selectSession(sessionId);
+  },
+
+  /** 会话级思考深度：内存态（EffortPicker/下发解析）与持久化（sessions.json）
+   *  同步更新。null = 清除 override，回落到引擎默认解析链。 */
+  setSessionEffort(sessionId, effort) {
+    const next = effort?.trim() ? effort : undefined;
+    const prev = get().efforts[sessionId];
+    const prevMetaEffort = get().sessions.find((m) => m.id === sessionId)?.effort;
+    set((s) => {
+      const efforts = { ...s.efforts };
+      if (next) efforts[sessionId] = next;
+      else delete efforts[sessionId];
+      return { efforts };
+    });
+    set((s) => ({
+      sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, effort: next } : m)),
+    }));
+    // 内存值或会话 meta 任一与目标不一致都落盘 —— sidechat 场景 store 已
+    // 预写 engineDef 但主进程 meta 仍是 fork 继承值，必须显式覆盖。
+    if (prev !== next || prevMetaEffort !== next) persistSessionEffort(sessionId, next);
   },
 
   /** Lazy-hydrate persisted history the first time a session is rendered. */
@@ -562,6 +818,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messages = persisted.map((m) =>
         (m.kind === 'text' || m.kind === 'thinking') && m.streaming ? { ...m, streaming: false } : m,
       );
+      // 旧会话迁移：sessions.json 尚无 effort 字段时，用最后一条回合盖章回填
+      // 已选档并落盘（此前 per-session effort 只存在内存，重启即丢）。仅限
+      // 非分支主会话 —— 分支继承的历史 stamp 属于父会话/旧引擎，不算分支自己选的。
+      const liveMeta = get().sessions.find((m) => m.id === id);
+      if (liveMeta && !liveMeta.effort && !get().efforts[id] && !liveMeta.parentId) {
+        for (let i = persisted.length - 1; i >= 0; i--) {
+          const stampEffort = (persisted[i] as { effort?: string }).effort;
+          if (stampEffort) {
+            get().setSessionEffort(id, stampEffort);
+            break;
+          }
+        }
+      }
       set((s) => {
         // 合并而非二选一 — 曾经「流非空就丢弃持久化历史」，与早于水合
         // 到达的引擎事件（恢复降级报错等）竞态，导致历史被截断并回写覆盖。
@@ -591,6 +860,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
         ui: { ...s.ui, [meta.id]: seedMetaMode(s.ui[meta.id], meta) },
+        efforts: meta.effort ? { ...s.efforts, [meta.id]: meta.effort } : s.efforts,
       }));
       get().selectSession(meta.id);
     } finally {
@@ -612,11 +882,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         await window.cyberslots.sessionSetMode(meta.id, 'plan');
       }
       const patched = { ...meta, permissionMode: mode };
+      // 分支思考深度：本程序每引擎默认优先（与 createSession 同逻辑，已随
+      // fork 继承父档时显式覆盖）；未配置默认则沿用 fork 继承的父会话已选档；
+      // 都没有则走引擎默认解析链（不写 override）。
+      const engineDef = get().settings?.engineDefaults?.[meta.engine];
+      const branchEffort = engineDef?.effort ?? meta.effort;
       set((s) => ({
         sessions: [patched, ...s.sessions.filter((x) => x.id !== meta.id)],
         ui: { ...s.ui, [meta.id]: seedMetaMode(s.ui[meta.id], patched) },
         sidechats: { ...s.sidechats, [parentId]: [...(s.sidechats[parentId] ?? []), meta.id] },
+        efforts: branchEffort ? { ...s.efforts, [meta.id]: branchEffort } : s.efforts,
       }));
+      if (engineDef?.effort) get().setSessionEffort(meta.id, engineDef.effort);
       get().hydrateSession(meta.id);
       if (mode === 'plan') {
         mutateUi(set, meta.id, (ui) => ({ ...ui, modes: { ...ui.modes, current: 'plan' } }));
@@ -668,6 +945,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ planPreview: { ...s.planPreview, [sessionId]: messageId } }));
   },
 
+  dismissPlan(sessionId, signature) {
+    const next = { ...get().planDismissed, [sessionId]: signature };
+    persistPlanDismissed(next);
+    set({ planDismissed: next });
+  },
+
   requestFilePreview(sessionId, rawPath) {
     const meta = get().sessions.find((m) => m.id === sessionId);
     // 非 work 会话没有文件面板 — chip 仅作展示，点击无动作。
@@ -703,12 +986,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const meta = await window.cyberslots.sessionForkEngine(id, engine);
       const inPlace = meta.id === id;
-      set((s) => ({
-        sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
-        ui: inPlace
-          ? { ...s.ui, [id]: emptyUi(meta) }
-          : { ...s.ui, [meta.id]: seedMetaMode(s.ui[meta.id], meta) },
-      }));
+      set((s) => {
+        // 输入框草稿（正文/附件/图片）随切换带到新会话：原地换引擎同 id
+        // 无需迁移；fork 分支则复制一份，切回原分支草稿仍保留。
+        const draft = s.drafts[id];
+        const draftAttachments = s.draftAttachments[id];
+        return {
+          sessions: [meta, ...s.sessions.filter((x) => x.id !== meta.id)],
+          ui: inPlace
+            ? { ...s.ui, [id]: emptyUi(meta) }
+            : { ...s.ui, [meta.id]: seedMetaMode(s.ui[meta.id], meta) },
+          drafts: inPlace || draft === undefined ? s.drafts : { ...s.drafts, [meta.id]: draft },
+          draftAttachments:
+            inPlace || draftAttachments === undefined
+              ? s.draftAttachments
+              : { ...s.draftAttachments, [meta.id]: draftAttachments },
+        };
+      });
+      // 引擎切换后旧引擎的思考深度档不再适用（各引擎档位值域/默认链不同）
+      // → 清除新会话的 override，走新引擎默认解析链（原地换引擎时旧档会
+      //  残留在这个 id 上，不清会跨引擎错误沿用）。
+      if (get().efforts[meta.id] || meta.effort) get().setSessionEffort(meta.id, null);
       get().selectSession(meta.id);
     } finally {
       set({ creating: false, creatingEngine: null });
@@ -771,14 +1069,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const session = get().sessions.find((s) => s.id === sessionId);
     const firstMessage = !!(session && isDefaultTitle(session.title));
     if (firstMessage) {
-      const title = typedText.slice(0, 24) || (selections?.length ? `${selections[0]!.fileName} ${selectionRangeLabel(selections[0]!)}` : '') || session.title;
+      const sel0 = selections?.[0];
+      const selTitle = sel0
+        ? isTerminalSelection(sel0)
+          ? sel0.fileName
+          : `${sel0.fileName} ${selectionRangeLabel(sel0)}`
+        : '';
+      const title = typedText.slice(0, 24) || selTitle || session.title;
       autoTitleSession(get, set, sessionId, typedText, title);
     }
     // 思考深度下发值 = EffortPicker 的显示值（共享解析 src/renderer/src/effort.ts）：
     // 用户未显选档时，界面展示的默认档同样是用户意图 —— 引擎会话档是引擎侧
     // 持久状态（KAP 服务端/claude /effort/omp ACP），重启后 override 清空，
-    // 不显式下发会静默沿用残留档，界面与实际运行脱节。undefined = 无档位面
-    // （antigravity / 目录未就绪 / 模型无档声明）→ 不下发，跟随引擎当前档。
+    // 不显式下发会静默沿用残留档，界面与实际运行脱节。explicit=false（opencode
+    // 目录无默认档字段且未显选）或 undefined（无档位面）→ 不下发，跟随引擎当前档。
     const effortMeta = get().sessions.find((m) => m.id === sessionId);
     const effortModels = get().ui[sessionId]?.models;
     const effectiveEffort = resolveEffectiveEffort({
@@ -790,7 +1094,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       codexDefaultEffort: get().codexDefaultEffort,
       opencodeCatalog: get().opencodeCatalog,
       ompCatalog: get().ompCatalog,
-    })?.value;
+      ompThinking: get().ui[sessionId]?.thinking,
+    });
     // 步骤4：新会话首条消息前，agy 账号起跑预检（当前账号 blocked 或落后
     // 池内最优 ≥20pp 则先切后发；cache-only，miss/无锁直接起跑）。
     if (firstMessage && session?.engine === 'antigravity') {
@@ -801,7 +1106,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionId,
         text: finalText,
         attachments,
-        effort: effectiveEffort,
+        effort: effectiveEffort && effectiveEffort.explicit ? effectiveEffort.value : undefined,
         userMessageId: userMsg.id,
       }).catch((err) => {
         // superseded（agy 并发总闸拒绝）由调用方按场景静默吞（catchAutoResume），
@@ -809,6 +1114,68 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!String(err?.message ?? err).includes('superseded')) {
           rlog.error('chat', 'sessionPrompt ipc failed', { sessionId, chars: finalText.length }, err);
         }
+        throw err;
+      });
+    } finally {
+      set((s) => ({ sending: { ...s.sending, [sessionId]: false } }));
+    }
+  },
+
+  async sendRaceResult(sessionId, result) {
+    const lang = (get().settings?.language ?? 'zh') as 'zh' | 'en';
+    const auditSummary = result.auditPassed
+      ? (lang === 'zh' ? '审计通过' : 'Audit passed')
+      : (lang === 'zh' ? '审计未通过' : 'Audit failed');
+    // 审计未通过 + 已交付 = 用户人工放行：必须与普通「已交付」区分，
+    // 否则下游会把流程放行误读成「问题已解决/代码已实施」。
+    const overridden = !!result.overridden || (result.delivered && !result.auditPassed);
+    const deliverySummary = overridden
+      ? (lang === 'zh' ? '已交付（人工放行）' : 'Delivered (manual override)')
+      : result.delivered
+        ? (lang === 'zh' ? '已交付' : 'Delivered')
+        : (lang === 'zh' ? '未交付' : 'Not delivered');
+    const repairSummary = result.repairRound > 0
+      ? ` · ${lang === 'zh' ? `修复 ${result.repairRound} 轮` : `${result.repairRound} repair round(s)`}`
+      : '';
+    // 发给引擎的完整文本 —— AI 读这段话获得赛马结果上下文，后续提问能据此回答。
+    const engineText = [
+      lang === 'zh'
+        ? '以下是刚完成的方案赛马结果，请阅读了解，后续我会就方案提问：'
+        : 'The following is the result of a just-completed plan race. Please read and understand it; I will ask questions about the plan next.',
+      '',
+      `【任务】\n${result.prompt}`,
+      '',
+      `【最终方案 v${result.version}】\n${result.finalPlan}`,
+      '',
+      `【执行结果】${auditSummary}${repairSummary} · ${deliverySummary}`,
+      ...(overridden
+        ? [
+            lang === 'zh'
+              ? '注意：审计未通过，交付为人工放行，不代表问题已解决或代码已实施。'
+              : 'Note: audit failed; delivered via manual override. This does not mean the issue is fixed or the code was implemented.',
+          ]
+        : []),
+    ].join('\n');
+    // user 消息携带 raceResult 标记 —— UI 渲染为赛马结果卡片，而非普通用户气泡。
+    // text 存完整汇报文本（持久化 + compact 时保留语义）。
+    const userMsg: UnifiedMessage = {
+      kind: 'user',
+      id: crypto.randomUUID(),
+      turnId: -1,
+      text: engineText,
+      createdAt: Date.now(),
+      raceResult: result,
+    };
+    mutateUi(set, sessionId, (ui) => ({ ...ui, messages: [...ui.messages, userMsg] }));
+    schedulePersist(get, sessionId);
+    set((s) => ({ sending: { ...s.sending, [sessionId]: true } }));
+    try {
+      await window.cyberslots.sessionPrompt({
+        sessionId,
+        text: engineText,
+        userMessageId: userMsg.id,
+      }).catch((err) => {
+        rlog.error('chat', 'sendRaceResult prompt failed', { sessionId, raceId: result.raceId }, err);
         throw err;
       });
     } finally {
@@ -842,8 +1209,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addSelection(sessionId, sel) {
     set((s) => {
       const list = s.selections[sessionId] ?? [];
-      // 同文件同行号范围不重复添加（避免卡片刷屏）。
-      if (list.some((x) => x.path === sel.path && x.startLine === sel.startLine && x.endLine === sel.endLine)) return {};
+      // 同出处同内容不重复添加（文件按路径+行号，终端按 tab+快照；避免卡片刷屏）。
+      const dup = list.some((x) =>
+        'termId' in sel && 'termId' in x
+          ? x.termId === sel.termId && x.text === sel.text
+          : !('termId' in sel) && !('termId' in x) && x.path === sel.path && x.startLine === sel.startLine && x.endLine === sel.endLine,
+      );
+      if (dup) return {};
       return { selections: { ...s.selections, [sessionId]: [...list, sel] } };
     });
   },
@@ -865,15 +1237,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   async cancelSession(sessionId) {
     // 先记账再发请求：中断落地时（turn.ended）据此按「用户停止」收尾。
+    if (get().cancelling[sessionId]) return;
     stopRequested.add(sessionId);
+    set((s) => ({ cancelling: { ...s.cancelling, [sessionId]: true } }));
+    let failed = false;
     try {
-      await window.cyberslots.sessionCancel(sessionId);
+      const res = await window.cyberslots.sessionCancel(sessionId);
+      if (res?.goalPauseFailed) {
+        const lang = get().settings?.language ?? 'zh';
+        announceSystem(
+          sessionId,
+          lang === 'zh'
+            ? '⚠ 已发停止，但 goal 暂停失败：引擎可能自动续跑；若再次运行请再点一次停止。'
+            : '⚠ Stop sent, but goal pause failed — the engine may auto-continue; press stop again if it resumes.',
+        );
+      }
     } catch (err) {
       // 中止被引擎拒绝/请求失败必须显性化 — 静默吞掉的话「点停止没反应」无从排查。
+      failed = true;
       const emsg = err instanceof Error ? err.message : String(err);
       announceSystem(
         sessionId,
         (get().settings?.language ?? 'zh') === 'zh' ? `⚠ 中止失败：${emsg}` : `⚠ Cancel failed: ${emsg}`,
+      );
+    } finally {
+      // 请求本身失败 → 立刻复位，允许用户重试；只有请求成功才进入「等待引擎收尾」。
+      if (failed) {
+        clearCancelling(set, sessionId);
+        return;
+      }
+      const meta = get().sessions.find((m) => m.id === sessionId);
+      // 引擎已不在运行 → 立刻复位；仍在 running/awaiting → 保持「正在停止」
+      // 直到 turn.ended / 状态回落，避免 ACP notify 型 cancel 立刻复位导致连点。
+      if (!meta || (meta.status !== 'running' && meta.status !== 'awaiting')) {
+        clearCancelling(set, sessionId);
+        return;
+      }
+      const existing = cancelWatchdogs.get(sessionId);
+      if (existing) clearTimeout(existing);
+      cancelWatchdogs.set(
+        sessionId,
+        setTimeout(() => {
+          if (!get().cancelling[sessionId]) return;
+          const lang = get().settings?.language ?? 'zh';
+          announceSystem(
+            sessionId,
+            lang === 'zh'
+              ? '⚠ 引擎长时间未确认停止（回合可能仍在运行）；按钮已恢复，可再次停止或检查引擎。'
+              : '⚠ Engine did not confirm the stop for a long time (the turn may still be running); the button is back — stop again or check the engine.',
+          );
+          clearCancelling(set, sessionId);
+        }, 15_000),
       );
     }
   },
@@ -887,35 +1301,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // 立即落盘：取消防抖窗口内可能把旧列表回写磁盘的定时器。
     persistNow(get, sessionId);
     set((s) => ({
-      composerDrafts: { ...s.composerDrafts, [sessionId]: { text: removed.text, nonce: Date.now() } },
+      composerDrafts: {
+        ...s.composerDrafts,
+        [sessionId]: { text: removed.text, attachments: removed.attachments, nonce: Date.now() },
+      },
     }));
   },
 
   async setModel(modelId) {
     const { activeSessionId } = get();
     if (!activeSessionId) return;
+    const prevModel = get().ui[activeSessionId]?.models.current ?? '';
+    const prevMetaModel = get().sessions.find((m) => m.id === activeSessionId)?.modelId;
+    // 乐观更新 — 引擎侧 models.update 未必即时回推，不先更新的话选择器按钮
+    // 文字要等一轮 IPC + 事件回推才变（主进程忙时体感就是「点一下卡一下」）。
+    if (modelId !== prevModel) {
+      mutateUi(set, activeSessionId, (ui) => ({ ...ui, models: { ...ui.models, current: modelId } }));
+    }
+    if (modelId !== prevMetaModel) {
+      set((s) => ({
+        sessions: s.sessions.map((m) => (m.id === activeSessionId ? { ...m, modelId } : m)),
+      }));
+    }
     try {
       await window.cyberslots.sessionSetModel(activeSessionId, modelId);
     } catch (err) {
+      // 失败回滚 — 仅当当前仍等于本次目标时回滚，避免快速连点 A→B 时
+      // A 的失败把 B 的成功回滚掉。
+      const st = get();
+      const uiCur = st.ui[activeSessionId]?.models.current;
+      const metaCur = st.sessions.find((m) => m.id === activeSessionId)?.modelId;
+      if (uiCur === modelId) {
+        mutateUi(set, activeSessionId, (ui) => ({ ...ui, models: { ...ui.models, current: prevModel } }));
+      }
+      if (metaCur === modelId) {
+        set((s) => ({
+          sessions: s.sessions.map((m) =>
+            m.id === activeSessionId ? { ...m, modelId: prevMetaModel ?? '' } : m,
+          ),
+        }));
+      }
       // 引擎拒绝/请求失败必须显性化 — 静默吞掉的话「切模型没反应」无从排查。
       announceSystem(activeSessionId, `⚠ 切换模型失败（${modelId}）：${err instanceof Error ? err.message : String(err)}`);
     }
   },
 
   async setMode(mode) {
-    const { activeSessionId, sessions, ui } = get();
+    const { activeSessionId } = get();
     if (!activeSessionId) return;
-    const meta = sessions.find((m) => m.id === activeSessionId);
-    const current = ui[activeSessionId]?.modes.current ?? meta?.permissionMode ?? 'default';
     try {
-      // The main process resolves leaving Plan back to the pre-Plan Agent permission.
+      // Main returns the effective mode (incl. plan toggle); sync meta and UI directly.
       const effective = await window.cyberslots.sessionSetMode(activeSessionId, mode);
-      const agentPermissionMode = effective === 'plan'
-        ? (current !== 'plan' ? current : meta?.agentPermissionMode)
-        : effective;
       set((s) => ({
         sessions: s.sessions.map((m) =>
-          m.id === activeSessionId ? { ...m, permissionMode: effective, agentPermissionMode } : m,
+          m.id === activeSessionId ? { ...m, permissionMode: effective } : m,
         ),
       }));
       mutateUi(set, activeSessionId, (ui) => ({ ...ui, modes: { ...ui.modes, current: effective } }));
@@ -959,7 +1398,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   openDashboard() {
-    useRaceStore.getState().closeRace();
+    const raceStore = useRaceStore.getState();
+    const prevSessionId = get().activeSessionId;
+    if (raceStore.activeRaceId && prevSessionId) raceStore.setRaceView(prevSessionId, raceStore.activeRaceId);
+    raceStore.closeRace();
     set({ activeSessionId: null, dashboardOpen: true, settingsOpen: false, usageOpen: false, archivedOpen: false });
   },
 
@@ -982,10 +1424,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const status = get().sessions.find((m) => m.id === sessionId)?.status;
     // 空闲/出错会话没有可注入的回合 — 直接作为新提问发送。
     if (status !== 'running' && status !== 'awaiting' && !get().sending[sessionId]) {
-      void get().sendPromptTo(sessionId, text);
+      void get()
+        .sendPromptTo(sessionId, text)
+        .catch((err) => rlog.error('chat', 'steer idle direct send failed', { sessionId }, err));
       return 'sent';
     }
-    const ok = await window.cyberslots.sessionSteer(sessionId, text);
+    let ok = false;
+    try {
+      ok = await window.cyberslots.sessionSteer(sessionId, text, undefined, crypto.randomUUID());
+    } catch (err) {
+      // 引擎/网络异常（如 KAP POST /prompts 失败）：不丢消息，降级排队。
+      rlog.error('chat', 'sessionSteer ipc failed', { sessionId }, err);
+    }
     if (ok) return 'steered';
     get().enqueueTo(sessionId, text);
     return 'queued';
@@ -1017,21 +1467,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   /** Steer: codex injects into the running turn; when not steerable the
-   *  item jumps to the queue head instead (kimi 降级路径). */
+   *  item jumps to the queue head instead (kimi 降级路径)。
+   *  codex 注入成功只代表 RPC 被接受 —— 队列项标 steering 保持「引导中」，
+   *  等引擎真正消费（user.echo 回显）才移出队列，与官方客户端观感对齐。 */
   async steerQueued(sessionId, id) {
-    const item = (get().queues[sessionId] ?? []).find((q) => q.id === id);
-    if (!item) return 'none';
-    const ok = await window.cyberslots.sessionSteer(sessionId, serializeSelections(item.selections) + item.text);
-    if (ok) {
-      get().removeQueued(sessionId, id);
-      return 'steered';
-    }
-    // kimi has no native steer: fall back to queue head; when already there,
-    // report 'head' so the UI can explain instead of looking dead.
     const list = get().queues[sessionId] ?? [];
     const idx = list.findIndex((q) => q.id === id);
-    if (idx > 0) {
-      get().moveQueued(sessionId, idx, 0);
+    const item = idx >= 0 ? list[idx] : undefined;
+    if (!item) return 'none';
+    const status = get().sessions.find((m) => m.id === sessionId)?.status;
+    // 空闲/出错会话没有可注入的回合 — 与 steerLive 对齐：直接作为新提问发送，
+    // 不再误报「当前引擎不支持即时引导」。
+    if (status !== 'running' && status !== 'awaiting' && !get().sending[sessionId]) {
+      get().removeQueued(sessionId, id);
+      void get().sendPromptTo(sessionId, item.text, item.attachments, undefined, item.selections);
+      return 'sent';
+    }
+    let ok = false;
+    try {
+      // 直接用队列项 id 作为引擎侧 client_user_message_id：确认回显
+      // （user.echo.messageId）到达时按同一 id 从队列移除该项；同时与
+      // changeTracker 共用该 id 拍快照，回退到此提问时能找到还原点。
+      const steerMessageId = id;
+      ok = await window.cyberslots.sessionSteer(
+        sessionId,
+        serializeSelections(item.selections) + item.text,
+        item.attachments,
+        steerMessageId,
+      );
+    } catch (err) {
+      // 引擎/网络异常：消息保留，继续按不可注入降级（插队到队首）。
+      rlog.error('chat', 'sessionSteer ipc failed (queued)', { sessionId }, err);
+    }
+    if (ok) {
+      set((s) => ({
+        queues: {
+          ...s.queues,
+          [sessionId]: (s.queues[sessionId] ?? []).map((q) => (q.id === id ? { ...q, steering: true } : q)),
+        },
+      }));
+      return 'steering';
+    }
+    // 无原生 steer 或当前回合不可注入（review/compact）: fall back to queue
+    // head; when already there, report 'head' so the UI can explain.
+    const after = get().queues[sessionId] ?? [];
+    const cur = after.findIndex((q) => q.id === id);
+    if (cur > 0) {
+      get().moveQueued(sessionId, cur, 0);
       return 'moved';
     }
     return 'head';
@@ -1160,6 +1642,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // 同步清理：该会话挂的终端 PTY，以及它在任意 sidechat 映射里的引用。
     for (const t of get().terminals[id] ?? []) void window.cyberslots.terminalDispose(t.id);
+    for (const a of get().draftAttachments?.[id] ?? []) if (a.preview) URL.revokeObjectURL(a.preview);
+    useRaceStore.getState().setRaceView(id, undefined);
     set((s) => ({
       sessions: s.sessions.filter((m) => m.id !== id),
       activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
@@ -1168,14 +1652,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       goals: { ...s.goals, [id]: undefined },
       efforts: Object.fromEntries(Object.entries(s.efforts).filter(([k]) => k !== id)),
       ui: Object.fromEntries(Object.entries(s.ui).filter(([k]) => k !== id)),
+      planDismissed: { ...s.planDismissed, [id]: undefined },
       sidechats: Object.fromEntries(
         Object.entries(s.sidechats).map(([k, v]) => [k, k === id ? undefined : v?.filter((x) => x !== id)]),
       ),
+      draftAttachments: Object.fromEntries(Object.entries(s.draftAttachments).filter(([k]) => k !== id)),
     }));
+    persistPlanDismissed(get().planDismissed);
     // 其余按会话 id 键控的散表一并摘（会话已不存在，残留即泄漏）。
     persistLastRun.delete(id);
     pendingGoalDone.delete(id);
     stopRequested.delete(id);
+    const cancelTimer = cancelWatchdogs.get(id);
+    if (cancelTimer) clearTimeout(cancelTimer);
+    cancelWatchdogs.delete(id);
     autoCompactGuard.delete(id);
     agyAutoSwitchSessionWins.delete(id);
     const pendingAgyRetry = agyAutoRetryTimers.get(id);
@@ -1223,6 +1713,16 @@ export function announceSystem(sessionId: string, text: string): void {
     ],
   }));
   schedulePersist(useChatStore.getState, sessionId);
+}
+
+/** 清除会话的「正在停止」态并撤掉看门狗（turn.ended / 状态回落 / 超时共用）。 */
+function clearCancelling(set: SetFn, sessionId: string): void {
+  const timer = cancelWatchdogs.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    cancelWatchdogs.delete(sessionId);
+  }
+  set((s) => (s.cancelling[sessionId] ? { cancelling: { ...s.cancelling, [sessionId]: false } } : s));
 }
 
 // ---------------------------------------------- antigravity 额度自动切号
@@ -1533,6 +2033,20 @@ function autoTitleSession(get: () => ChatState, set: SetFn, sessionId: string, s
   });
 }
 
+/** 会话仍是默认标题时按首条消息规则自动命名 —— 赛马直发等「无提问
+ *  入口」复用同一套命名（截取式 + 可选 AI 覆盖）。 */
+export function autoTitleIfDefault(sessionId: string, sourceText: string): void {
+  const session = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+  if (!session || !isDefaultTitle(session.title)) return;
+  autoTitleSession(
+    useChatStore.getState,
+    (fn) => useChatStore.setState(fn),
+    sessionId,
+    sourceText,
+    sourceText.slice(0, 24) || session.title,
+  );
+}
+
 /** "X 秒" under a minute, otherwise "X 分 Y 秒" (en: "Xs" / "Xm Ys"). */
 function formatGoalDuration(seconds: number, lang: 'zh' | 'en'): string {
   const s = Math.max(0, Math.round(seconds));
@@ -1572,13 +2086,25 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
           return planChanged ? { ...ui, messages } : ui;
         });
         if (planChanged) schedulePersist(get, sessionId);
+        // 引擎确认回到非运行态 → 停止态一并收掉（即使没有 turn.ended，
+        // 如 session closed / background 回合，也不能让按钮永久停在「正在停止」）。
+        clearCancelling(set, sessionId);
       }
       return;
     }
     case 'session.meta':
-      set((s) => ({
-        sessions: s.sessions.map((m) => (m.id === sessionId ? { ...m, ...event.patch } : m)),
-      }));
+      set((s) => {
+        const sessions = s.sessions.map((m) => (m.id === sessionId ? { ...m, ...event.patch } : m));
+        // effort 随 meta patch 回推时同步内存 override（主进程持久化链路的
+        // 镜像；正常路径渲染层先写，此处兜底一致性）。
+        let efforts = s.efforts;
+        if ('effort' in event.patch) {
+          efforts = { ...s.efforts };
+          if (event.patch.effort) efforts[sessionId] = event.patch.effort;
+          else delete efforts[sessionId];
+        }
+        return { sessions, efforts };
+      });
       return;
     case 'models.update':
       mutateUi(set, sessionId, (ui) => ({
@@ -1597,10 +2123,13 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       set((s) => ({
         sessions: s.sessions.map((m) =>
           m.id === sessionId
-            ? { ...m, permissionMode: event.current, agentPermissionMode: event.current !== 'plan' ? event.current : m.agentPermissionMode }
+            ? { ...m, permissionMode: event.current }
             : m,
         ),
       }));
+      return;
+    case 'thinking.update':
+      mutateUi(set, sessionId, (ui) => ({ ...ui, thinking: { current: event.current, available: event.available } }));
       return;
     case 'commands.update':
       mutateUi(set, sessionId, (ui) => ({ ...ui, commands: event.commands }));
@@ -1645,7 +2174,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
           text:
             lang === 'zh'
               ? `🎯 Goal「${g.objective}」执行完成 · 用时 ${formatGoalDuration(g.timeUsedSeconds, 'zh')}`
-              : `🎯 Goal “${g.objective}” completed · took ${formatGoalDuration(g.timeUsedSeconds, 'en')}`,
+              : `🎯 Goal "${g.objective}" completed · took ${formatGoalDuration(g.timeUsedSeconds, 'en')}`,
           createdAt: Date.now(),
         };
         // 回合进行中（模型标完成后还会继续流收尾总结）→ 暂存，
@@ -1663,7 +2192,10 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       return;
     }
     case 'turn.ended': {
+      // 回合边界清掉活动摘要缓存与待发节流，下个回合重新扫描。
+      clearActivityThrottle(sessionId);
       // 步骤5：任何 turn.ended 到达即取消该会话未触发的重试定时器（双保险之取消）。
+      clearCancelling(set, sessionId);
       const pendingAgyRetry = agyAutoRetryTimers.get(sessionId);
       if (pendingAgyRetry) {
         clearTimeout(pendingAgyRetry);
@@ -1681,7 +2213,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       const turnMeta = get().sessions.find((m) => m.id === sessionId);
       const turnModels = get().ui[sessionId]?.models;
       // 思考深度盖章 = 下发值（sendPromptTo 同一解析），tooltip 显示与实跑一致。
-      const turnEffort = resolveEffectiveEffort({
+      const turnEffortResolved = resolveEffectiveEffort({
         engine: turnMeta?.engine,
         override: get().efforts[sessionId],
         activeModel: turnModels?.current || turnModels?.available[0] || turnMeta?.modelId || '',
@@ -1690,7 +2222,9 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         codexDefaultEffort: get().codexDefaultEffort,
         opencodeCatalog: get().opencodeCatalog,
         ompCatalog: get().ompCatalog,
-      })?.value;
+        ompThinking: get().ui[sessionId]?.thinking,
+      });
+      const turnEffort = turnEffortResolved && turnEffortResolved.explicit ? turnEffortResolved.value : undefined;
       mutateUi(set, sessionId, (ui) => ({
         ...ui,
         messages: foldMessage(ui.messages, event, {
@@ -1787,20 +2321,24 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       // 压缩前旧值，重触=死循环。
       if (event.stopReason === 'background') {
         if (!event.backgroundKind || userStopped) return;
-        const bgQueue = get().queues[sessionId] ?? [];
-        if (bgQueue.length > 0) {
-          const [next, ...rest] = bgQueue;
-          set((s) => ({ queues: { ...s.queues, [sessionId]: rest } }));
+        const bgQueue = [...(get().queues[sessionId] ?? [])];
+        const nextIdx = bgQueue.findIndex((q) => !q.steering);
+        if (nextIdx >= 0) {
+          const [next] = bgQueue.splice(nextIdx, 1);
+          set((s) => ({ queues: { ...s.queues, [sessionId]: bgQueue } }));
           setTimeout(() => void get().sendPromptTo(sessionId, next!.text, next!.attachments, undefined, next!.selections), 500);
         }
         return;
       }
       // 自动派发等待队列的下一条（稍作延迟，让引擎回到 idle）。
-      const queue = get().queues[sessionId] ?? [];
+      const queue = [...(get().queues[sessionId] ?? [])];
       if (userStopped) return; // 排队消息保留在队列里，由用户自行删除或下次回合后再续发
-      if (queue.length > 0 && event.stopReason !== 'error') {
-        const [next, ...rest] = queue;
-        set((s) => ({ queues: { ...s.queues, [sessionId]: rest } }));
+      const nextIdx = queue.findIndex((q) => !q.steering);
+      if (nextIdx >= 0 && event.stopReason !== 'error') {
+        // 跳过仍标 steering 的项：它已注入引擎、等确认回显移除，不能再当
+        // 普通排队消息派发（否则同一消息会被发两次）。
+        const [next] = queue.splice(nextIdx, 1);
+        set((s) => ({ queues: { ...s.queues, [sessionId]: queue } }));
         setTimeout(() => void get().sendPromptTo(sessionId, next!.text, next!.attachments, undefined, next!.selections), 500);
       } else if (event.stopReason !== 'error') {
         // 自动压缩：无排队且占用达阈值 → 在回合边界（现在）触发一次；
@@ -1808,8 +2346,9 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         const ratio = get().settings?.autoCompactRatio ?? 0;
         const u = get().ui[sessionId]?.usage;
         if (ratio > 0 && u && u.size > 0 && u.used / u.size >= ratio / 100) {
-          // 赛马角色会话不触应用层压缩/降切：compact 回合的提示文本会污染
-          // 角色 transcript（编排器拿它交棒），交给引擎内部压缩兜底。
+          // 赛马角色会话不触应用层压缩：compact 回合的提示文本会污染角色
+          // transcript（编排器拿它交棒），交给引擎内部压缩兜底。模型降切
+          // 不产生任何文本、对 transcript 无害，赛马角色照常放行。
           const isRaceRole = !!get().sessions.find((m) => m.id === sessionId)?.raceId;
           // 冷却：上次触发后 usage 未见下降（omp 等不回推 usage 的通道）时
           // 跳过接下来 3 个回合，防连环触发；下降即解除。
@@ -1822,12 +2361,12 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
           }
           // 满窗降切：当前模型命中规则表（如 k3 256k → k3，同能力仅窗口
           // 不同）且列表里有目标模型 → 不压缩，直接热切继续跑，长任务
-          // 不被压缩打断；无命中才走自动压缩。
+          // 不被压缩打断；无命中才走自动压缩。赛马角色同样生效（热切不
+          // 污染 transcript），仅压缩对赛马排除。
           const models = get().ui[sessionId]?.models;
-          const fallback =
-            isRaceRole || guarded
-              ? undefined
-              : findContextFallback(models?.current, models?.available, get().settings?.contextFallbackRules);
+          const fallback = guarded
+            ? undefined
+            : findContextFallback(models?.current, models?.available, get().settings?.contextFallbackRules);
           if (fallback) {
             const from = models!.current;
             void window.cyberslots.sessionSetModel(sessionId, fallback);
@@ -1878,7 +2417,7 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
       mutateUi(set, sessionId, (ui) => {
         let messages = foldMessage(ui.messages, event);
         // Plan 模式下的正文流标记为计划文档 — 主流只渲染缩略卡片。
-        // 仅对“像文档”的文本生效：模型偶尔把工具调用 JSON 当正文吐
+        // 仅对"像文档"的文本生效：模型偶尔把工具调用 JSON 当正文吐
         // （e2e 实测），那类内容不该包成计划卡。
         if (event.type === 'text.delta' && ui.modes.current === 'plan') {
           const last = messages[messages.length - 1];
@@ -1889,13 +2428,36 @@ function applyEnvelope(set: SetFn, get: GetFn, { sessionId, event }: EngineEvent
         return { ...ui, messages };
       });
       schedulePersist(get, sessionId);
+      // steer 确认回显（user.echo 携带 messageId）到达 = 引擎真正消费了该
+      // 输入 → 移除仍标 steering 的队列项，避免残留「引导中」或二次发送。
+      if (event.type === 'user.echo' && event.messageId) {
+        const queue = get().queues[sessionId];
+        if (queue?.some((item) => item.id === event.messageId)) {
+          set((s) => ({
+            queues: {
+              ...s.queues,
+              [sessionId]: queue.filter((item) => item.id !== event.messageId),
+            },
+          }));
+        }
+      }
       // 「正在做什么」一行摘要 — 看板卡片实时显示（需在折叠之后取值）。
       noteActivity(set, get, sessionId, event);
   }
 }
 
 /** 从事件流提炼「正在做什么」摘要：工具标题 > 正文首行 > 思考中 > 错误首行。
- *  同值跳过 set，避免流式 delta 引发无意义渲染。 */
+ *  同值跳过 + 200ms 节流 + 首行缓存：流式 delta 不再每个 token 都 O(n)
+ *  扫描并触发侧栏/看板重渲染。 */
+function clearActivityThrottle(sessionId: string): void {
+  activityLabelCache.delete(sessionId);
+  const timer = activityThrottleTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    activityThrottleTimers.delete(sessionId);
+  }
+}
+
 function noteActivity(set: SetFn, get: GetFn, sessionId: string, event: EngineEvent): void {
   let label: string | undefined;
   if (event.type === 'tool.upsert') {
@@ -1903,19 +2465,33 @@ function noteActivity(set: SetFn, get: GetFn, sessionId: string, event: EngineEv
   } else if (event.type === 'thinking.delta') {
     label = get().settings?.language === 'en' ? 'Thinking…' : '思考中…';
   } else if (event.type === 'text.delta' && event.text) {
-    const msgs = get().ui[sessionId]?.messages ?? [];
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      const m = msgs[i]!;
-      if (m.kind === 'text') {
-        label = m.text.trimStart().split('\n', 1)[0]!.slice(0, 80);
-        break;
+    const cached = activityLabelCache.get(sessionId);
+    if (cached !== undefined) {
+      label = cached;
+    } else {
+      const msgs = get().ui[sessionId]?.messages ?? [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]!;
+        if (m.kind === 'text') {
+          label = m.text.trimStart().split('\n', 1)[0]!.slice(0, 80);
+          activityLabelCache.set(sessionId, label);
+          break;
+        }
       }
     }
   } else if (event.type === 'error') {
     label = event.message.split('\n', 1)[0]!.slice(0, 80);
   }
   if (!label || get().lastActivity[sessionId] === label) return;
-  set((s) => ({ lastActivity: { ...s.lastActivity, [sessionId]: label } }));
+  // 200ms 节流：窗口内已有待发更新则跳过（首帧语义，侧栏不会跳频）。
+  if (activityThrottleTimers.has(sessionId)) return;
+  activityThrottleTimers.set(
+    sessionId,
+    setTimeout(() => {
+      activityThrottleTimers.delete(sessionId);
+      set((s) => ({ lastActivity: { ...s.lastActivity, [sessionId]: label! } }));
+    }, ACTIVITY_THROTTLE_MS),
+  );
 }
 
 /** 模型 id 归一化：小写并剔除所有分隔符 — 兼容 "Kimi k3 256k" /
@@ -2007,7 +2583,14 @@ function foldMessage(
     case 'user.echo':
       return [
         ...messages,
-        { kind: 'user', id: crypto.randomUUID(), turnId: event.turnId, text: event.text, createdAt: now },
+        {
+          kind: 'user',
+          id: event.messageId ?? crypto.randomUUID(),
+          turnId: event.turnId,
+          text: event.text,
+          attachments: event.attachments,
+          createdAt: now,
+        },
       ];
 
     case 'text.delta':
@@ -2022,7 +2605,11 @@ function foldMessage(
           last.kind === 'thinking'
             ? { ...last, text: last.text + event.text, durationMs: engineDuration ?? last.durationMs }
             : { ...last, text: last.text + event.text };
-        return [...messages.slice(0, -1), updated];
+        // 尾替换：复制指针数组后原地换末元素，避免每次 delta 重排全量
+        // 元素（非尾部消息对象引用不变 → MessageItem memo 可跳过）。
+        const next = messages.slice();
+        next[next.length - 1] = updated;
+        return next;
       }
       // 纯时长回填（空 delta）但已没有在流的思考段 → 回填到本回合
       // 最近一段已收尾的思考（time.end 常晚于工具开始到达）。
@@ -2130,6 +2717,8 @@ function foldMessage(
               body: event.body,
               toolCallId: event.toolCallId,
               options: event.options,
+              origin: event.origin,
+              browserAction: event.browserAction,
               createdAt: now,
             },
       ];
